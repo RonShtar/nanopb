@@ -190,6 +190,44 @@ works when no copy is installed, since the two would clash.
 Tested with Wireshark/tshark 3.6.7 (Lua 5.2) on Windows: `verify` and `live`
 pass 12/12.
 
+## Stress example: many protos, one output
+
+`examples/stress/protos` has one unit, `fleet`, made of 6 protos. It also imports
+`shared/units.proto` from another folder, plus `google/protobuf/any.proto` and
+`timestamp.proto`. Together they use:
+
+- proto2 and proto3 in one unit, with proto2 `required`/defaults;
+- nested messages and nested enums;
+- a 5-way `oneof`;
+- a `map`;
+- packed and unpacked repeated fields, and every scalar type;
+- a `Timestamp`;
+- several `Any` fields, including a `Batch` of `Any` that can hold Envelopes or Batches again;
+- a project-specific `google/protobuf/any.options`;
+- validation rules on most fields.
+
+One command runs everything:
+
+    python tools/wireshark/examples/stress/stress_test.py            # add --install to load it into your Wireshark
+
+It goes through these steps:
+
+1. `gen-c` merges all 36 generated files into `nanopb_stress_out/fleet/fleet.c` and `fleet.h`, and adds the nanopb runtime.
+2. `gen-data` writes samples for all 16 messages (`--count N` per message).
+3. It compiles `fleet.c` and the runtime with `-std=c11 -pedantic -Wall -Wextra -Werror -Wconversion -Wcast-qual`. Then a generated C program decodes, validates and re-encodes every sample. nanopb always encodes repeated scalars packed, so samples with unpacked fields are compared by decoded content, not bytes. The compiler comes from `CC`, `gcc`/`clang`, or `pip install ziglang`.
+4. It writes `nanopb_stress_out/stress.pcap`, and lists each packet with its expected tree in `stress_packets.txt`. The capture has:
+   - 10 hand-made packets: a Frame with 3 `Any` readings, a map and a Timestamp; a `oneof` command; a proto2 status; `Any` recursion 4 levels deep; heuristic; Decode As; malformed;
+   - every sample as a packet. Sample types without their own port go on the heuristic port, wrapped in an `Any`.
+5. It dissects the capture with `tshark` and checks every packet.
+
+With `--install`, the stress schema and port map go into your plugins folder,
+and the studio settings point at the stress protos. The ports are
+`udp:5100=fleet.envelope.Envelope`, `tcp:5101=fleet.telemetry.Frame` and
+`udp:5102=fleet.status.Status`, the heuristic `Any` port is `udp/5199`, and
+Decode As uses `udp/5103` → `fleet.cmd.Command`. Then reload Lua plugins and
+open `stress.pcap`. `live_test.py setup --reset-config` switches back to the
+small test schema.
+
 ## Command line
 
 Every menu action maps to a backend subcommand. All of them accept

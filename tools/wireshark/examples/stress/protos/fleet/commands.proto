@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package fleet.cmd;
+
+import "validate.proto";
+import "types.proto";
+
+message Move {
+    fleet.types.GeoPoint target = 1;
+    float speed_mps = 2 [(validate.rules).float = {gte: 0, lte: 50}];
+}
+
+message Stop {
+    bool emergency = 1;
+}
+
+message SetMode {
+    enum Mode {
+        MODE_IDLE = 0;
+        MODE_AUTO = 1;
+        MODE_MANUAL = 2;
+    }
+    Mode mode = 1 [(validate.rules).enum.defined_only = true];
+}
+
+message Command {
+    uint32 id = 1;
+    oneof action {
+        Move move = 2;
+        Stop stop = 3;
+        SetMode set_mode = 4;
+        bytes raw = 5;
+    }
+    repeated string tags = 6 [(validate.rules).repeated = {max_items: 4}];
+    fleet.types.Severity priority = 7;
+}

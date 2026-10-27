@@ -358,17 +358,18 @@ def installed_dissector():
     return path if os.path.isfile(path) else None
 
 
-def tshark_base(tshark, isolated, workdir):
+def tshark_base(tshark, isolated, workdir, port_map=PORT_MAP, protos_root=FIXTURES):
     """Command prefix and environment for running tshark with the dissector."""
 
-    argv = [tshark, '-o', 'nanopb.port_map:' + PORT_MAP]
+    argv = [tshark, '-o', 'nanopb.port_map:' + port_map]
     env = dict(os.environ)
     if isolated:
-        if installed_dissector():
-            raise RuntimeError('an installed nanopb_any_dissector.lua would clash with the repo copy; '
-                               'run without --isolated (after live_test.py setup)')
+        # A throwaway personal config dir: no installed plugins (they would
+        # clash with the repo copy) and no user preferences.
+        env['WIRESHARK_CONFIG_DIR'] = os.path.join(workdir, 'wireshark-config')
+        os.makedirs(env['WIRESHARK_CONFIG_DIR'], exist_ok=True)
         schema = os.path.join(workdir, 'schema.luadata')
-        status, _, err = run_backend('schema', '--protos-root', FIXTURES, '--out', schema)
+        status, _, err = run_backend('schema', '--protos-root', protos_root, '--out', schema)
         if status != 0:
             raise RuntimeError('schema failed: %s' % err)
         env['NANOPB_WS_SCHEMA'] = schema
@@ -397,7 +398,8 @@ def split_frames(text):
     return dict((k, '\n'.join(v)) for k, v in frames.items())
 
 
-def verify(pcap, cases, isolated=False, frames=None):
+def verify(pcap, cases, isolated=False, frames=None, port_map=PORT_MAP, protos_root=FIXTURES,
+           decode_as_port=DECODE_AS_PORT, decode_as_message=DECODE_AS_MESSAGE):
     """Returns a list of (case_number, case, [problems]).
 
     ``frames`` maps case number -> frame number (default: identical, as in
@@ -408,9 +410,9 @@ def verify(pcap, cases, isolated=False, frames=None):
         raise RuntimeError('tshark not found (install Wireshark with tshark, or set TSHARK=<path>)')
     workdir = tempfile.mkdtemp(prefix='nanopb_ws_verify_')
     try:
-        base, env = tshark_base(tshark, isolated, workdir)
-        decode_as = ['-d', 'udp.port==%d,nanopb' % DECODE_AS_PORT,
-                     '-o', 'nanopb.default_message:' + DECODE_AS_MESSAGE]
+        base, env = tshark_base(tshark, isolated, workdir, port_map, protos_root)
+        decode_as = ['-d', 'udp.port==%d,nanopb' % decode_as_port,
+                     '-o', 'nanopb.default_message:' + decode_as_message]
         views = {}
         for key, extra in (('normal', []), ('decode_as', decode_as)):
             status, out = run(base + extra + ['-r', pcap, '-V'], env)
@@ -478,7 +480,8 @@ def main(argv=None):
     p = sub.add_parser('verify', help='check a capture with tshark')
     p.add_argument('--pcap', default='nanopb_live_test.pcap')
     p.add_argument('--isolated', action='store_true',
-                   help='load the dissector from this repo with a fresh schema instead of the installed copy')
+                   help='load the dissector from this repo with a fresh schema in a throwaway Wireshark '
+                        'config, instead of the installed copy')
 
     p = sub.add_parser('live', help='capture loopback with tshark while sending, then verify')
     p.add_argument('--interface', default=None, help='capture interface (default: the loopback one)')

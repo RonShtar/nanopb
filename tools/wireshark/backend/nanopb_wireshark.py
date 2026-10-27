@@ -300,54 +300,85 @@ def cmd_gen_data(args):
         raise BackendError('unknown format(s): %s (use bin,c,hex)' % ', '.join(sorted(unknown)))
     wanted = [m.strip() for m in (args.messages or '').split(',') if m.strip()]
     results = []
+    errors = []
     for name in select_units(args):
         unit = Unit(args.protos_root, name, args.include)
         outdir = os.path.join(args.out, name, 'data')
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
-        includes = [p for p in unit.includes if os.path.isdir(p)]
         produced = []
-        for proto in unit.protos:
-            gen = DataGenerator(os.path.join(unit.dir, proto), includes)
-            for short in gen.get_messages():
-                msg = gen.registry.resolve_message(short).full_name
-                if wanted and msg not in wanted and short not in wanted:
-                    continue
-                for i in range(args.count):
-                    seed = None if args.seed is None else args.seed + i
+        gen = unit_data_generator(unit, DataGenerator)
+        for msg in unit.messages():
+            short = msg.split('.')[-1]
+            if wanted and msg not in wanted and short not in wanted:
+                continue
+            for i in range(args.count):
+                seed = None if args.seed is None else args.seed + i
+                try:
                     if args.invalid:
                         data_dict = gen.generate_invalid(msg, violate_field=args.field,
                                                          violate_rule=args.rule, seed=seed)
                     else:
                         data_dict = gen.generate_valid(msg, seed=seed)
                     data = gen.encode_to_binary(msg, data_dict)
-                    ident = c_identifier(msg.replace('.', '_'))
-                    if args.count > 1:
-                        ident += '_%d' % i
-                    if args.invalid:
-                        ident += '_invalid'
-                    files = []
-                    if 'bin' in formats:
-                        with open(os.path.join(outdir, ident + '.bin'), 'wb') as handle:
-                            handle.write(data)
-                        files.append(ident + '.bin')
-                    if 'c' in formats:
-                        with open(os.path.join(outdir, ident + '.h'), 'w', newline='\n') as handle:
-                            handle.write(c_array_header(ident, data))
-                        files.append(ident + '.h')
-                    if 'hex' in formats:
-                        with open(os.path.join(outdir, ident + '.hex'), 'w', newline='\n') as handle:
-                            handle.write(data.hex() + '\n')
-                        files.append(ident + '.hex')
-                    with open(os.path.join(outdir, ident + '.txt'), 'w', newline='\n') as handle:
-                        json.dump(data_dict, handle, indent=2, default=repr)
-                        handle.write('\n')
-                    files.append(ident + '.txt')
-                    produced.append({'message': msg, 'size': len(data), 'files': files})
+                except Exception as exc:
+                    errors.append('%s: %s' % (msg, exc))
+                    break
+                ident = c_identifier(msg.replace('.', '_'))
+                if args.count > 1:
+                    ident += '_%d' % i
+                if args.invalid:
+                    ident += '_invalid'
+                files = write_sample(outdir, ident, data, data_dict, formats)
+                produced.append({'message': msg, 'size': len(data), 'files': files})
         if wanted and not produced:
-            raise BackendError('none of %s found in unit %s' % (', '.join(wanted), name))
+            raise BackendError('nothing generated for %s in unit %s%s'
+                               % (', '.join(wanted), name, ''.join('\n  ' + e for e in errors)))
         results.append({'unit': name, 'dir': outdir, 'messages': produced})
-    return {'units': results}
+    if errors and not any(r['messages'] for r in results):
+        raise BackendError('no data generated:\n  ' + '\n  '.join(errors))
+    return {'units': results, 'errors': errors}
+
+
+def write_sample(outdir, ident, data, data_dict, formats):
+    files = []
+    if 'bin' in formats:
+        with open(os.path.join(outdir, ident + '.bin'), 'wb') as handle:
+            handle.write(data)
+        files.append(ident + '.bin')
+    if 'c' in formats:
+        with open(os.path.join(outdir, ident + '.h'), 'w', newline='\n') as handle:
+            handle.write(c_array_header(ident, data))
+        files.append(ident + '.h')
+    if 'hex' in formats:
+        with open(os.path.join(outdir, ident + '.hex'), 'w', newline='\n') as handle:
+            handle.write(data.hex() + '\n')
+        files.append(ident + '.hex')
+    with open(os.path.join(outdir, ident + '.txt'), 'w', newline='\n') as handle:
+        json.dump(data_dict, handle, indent=2, default=repr)
+        handle.write('\n')
+    files.append(ident + '.txt')
+    return files
+
+
+def unit_data_generator(unit, DataGenerator):
+    """A DataGenerator that sees every message of the unit at once.
+
+    DataGenerator loads one .proto and its imports; Any rules may name types
+    from files that file doesn't import, so load a throwaway proto that
+    imports the whole unit.
+    """
+
+    tmpdir = tempfile.mkdtemp(prefix='nanopb_ws_unit_')
+    try:
+        path = os.path.join(tmpdir, 'nanopb_ws_unit_all.proto')
+        with open(path, 'w', newline='\n') as handle:
+            handle.write('syntax = "proto3";\n')
+            for name in unit.names:
+                handle.write('import "%s";\n' % name)
+        return DataGenerator(path, [p for p in unit.includes if os.path.isdir(p)])
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

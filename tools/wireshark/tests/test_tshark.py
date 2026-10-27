@@ -2,9 +2,8 @@
 
 Skipped unless tshark is found (PATH, TSHARK=<path>, or the default
 Windows install folder). Loads the dissector from this repository with
-`-X lua_script:`, so it is also skipped when a copy is installed in the
-personal plugins folder (the two would clash); use
-`live_test.py verify` for that setup.
+`-X lua_script:` inside a throwaway WIRESHARK_CONFIG_DIR, so installed
+plugins and user preferences don't interfere.
 """
 
 import os
@@ -23,8 +22,6 @@ TSHARK = live_test.find_tshark()
 
 
 @unittest.skipIf(TSHARK is None, 'tshark not found')
-@unittest.skipIf(live_test.installed_dissector() is not None,
-                 'nanopb_any_dissector.lua installed in personal plugins; run live_test.py verify instead')
 class TsharkTests(unittest.TestCase):
     def test_live_capture(self):
         tmp = tempfile.mkdtemp(prefix='nanopb_ws_tshark_')

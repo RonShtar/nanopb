@@ -1,0 +1,3 @@
+# Project-specific Any storage; overrides tools/wireshark/backend/include/google/protobuf/any.options.
+google.protobuf.Any.type_url max_size:96
+google.protobuf.Any.value max_size:512

@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package fleet.envelope;
+
+import "validate.proto";
+import "google/protobuf/any.proto";
+import "types.proto";
+import "telemetry.proto";
+import "commands.proto";
+import "status.proto";
+
+// Recursion through Any: a Batch can carry Envelopes (or Batches) again.
+message Batch {
+    repeated google.protobuf.Any items = 1 [(validate.rules).repeated = {max_items: 3}];
+}
+
+message Envelope {
+    fleet.types.Version version = 1 [(validate.rules).required = true];
+    oneof body {
+        fleet.telemetry.Frame frame = 2;
+        fleet.cmd.Command command = 3;
+        fleet.status.Status status = 4;
+        google.protobuf.Any extension = 5;
+        Batch batch = 6;
+    }
+    fleet.types.Severity severity = 7;
+    bytes signature = 8 [(validate.rules).bytes.max_len = 16];
+}

@@ -1,0 +1,5 @@
+fleet.telemetry.Frame.readings max_count:3
+fleet.telemetry.Frame.counters max_count:4
+fleet.telemetry.Frame.CountersEntry.key max_size:12
+fleet.telemetry.Health.faults max_count:3
+fleet.telemetry.Health.Fault.detail max_size:24

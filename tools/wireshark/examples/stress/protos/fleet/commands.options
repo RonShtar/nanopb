@@ -1,0 +1,2 @@
+fleet.cmd.Command.raw max_size:32
+fleet.cmd.Command.tags max_count:4 max_size:12

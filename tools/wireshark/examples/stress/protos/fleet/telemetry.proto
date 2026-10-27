@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package fleet.telemetry;
+
+import "validate.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+import "types.proto";
+
+message Health {
+    enum Level {
+        LEVEL_OK = 0;
+        LEVEL_DEGRADED = 1;
+        LEVEL_FAILED = 2;
+    }
+    message Fault {
+        uint32 code = 1;
+        string detail = 2 [(validate.rules).string.max_len = 23];
+    }
+    Level level = 1;
+    repeated Fault faults = 2;
+}
+
+message Frame {
+    fleet.types.DeviceId device = 1 [(validate.rules).required = true];
+    uint32 seq = 2;
+    google.protobuf.Timestamp ts = 3;
+    repeated google.protobuf.Any readings = 4 [(validate.rules).repeated = {max_items: 3}];
+    map<string, int32> counters = 5;
+    Health health = 6;
+    google.protobuf.Any primary = 7 [
+        (validate.rules).any.in = "type.googleapis.com/fleet.sensors.Imu",
+        (validate.rules).any.in = "type.googleapis.com/fleet.sensors.Battery",
+        (validate.rules).any.in = "type.googleapis.com/fleet.sensors.Gps"
+    ];
+}
