@@ -137,6 +137,15 @@ To use the pb_syshdr.h, define `PB_SYSTEM_HEADER` as
 custom include file, which should provide all the dependencies listed
 above.
 
+Wireshark integration
+---------------------
+
+The [tools/wireshark](https://github.com/nanopb/nanopb/tree/master/tools/wireshark)
+directory has Lua plugins for Wireshark. One generates merged nanopb C code
+(with validation) and encoded sample data from a directory of `.proto` files.
+The other is a dissector that decodes nested messages and `google.protobuf.Any`
+payloads recursively. See its README for installation.
+
 Running the test cases
 ----------------------
 

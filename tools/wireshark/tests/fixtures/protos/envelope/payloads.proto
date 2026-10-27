@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package demo.payloads;
+
+message Ping {
+    uint32 id = 1;
+}
+
+message Command {
+    string name = 1;
+    int64 arg = 2;
+    Ping inner = 3;
+}
