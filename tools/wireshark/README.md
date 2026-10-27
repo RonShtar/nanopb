@@ -126,6 +126,15 @@ The dissector picks the root message of a packet in this order:
 3. `google.protobuf.Any`, if **Treat unknown payload as Any** is enabled (the default) and the payload is shaped like an `Any`.
 4. A raw field-number / wire-type tree.
 
+On ports that are **not** in the map, **Detect Any on any port (heuristic)**
+(on by default) claims a UDP/TCP payload only when all of these hold:
+
+- it is a well-formed `google.protobuf.Any`,
+- its `type_url` names a message in the schema,
+- its value is valid protobuf.
+
+Other traffic is left alone.
+
 Whenever it meets an `Any`, it reads `type_url`, looks up the part after the
 last `/` (e.g. `demo.payloads.Command`) in the schema, and decodes `value` as
 that message, recursively. This also works for an `Any` inside a message
@@ -142,13 +151,44 @@ Limitations:
 - Each UDP datagram or TCP segment payload is decoded as one whole message. There is no TCP reassembly or length-prefix framing.
 - Groups (proto2) are reported as unsupported.
 
-### Testing the dissector
+## Live test in Wireshark
 
-    python tools/wireshark/backend/nanopb_wireshark.py gen-data --protos-root tools/wireshark/tests/fixtures/protos --unit envelope --messages Envelope --formats hex --out out
-    # text2pcap wants an offset + hex dump:
-    python -c "import sys; d=open(sys.argv[1]).read().strip(); print('000000 ' + ' '.join(d[i:i+2] for i in range(0, len(d), 2)))" out/envelope/data/demo_envelope_Envelope.hex > dump.txt
-    text2pcap -u 40000,5000 dump.txt envelope.pcap
-    tshark -r envelope.pcap -V -O nanopb
+`tests/live/live_test.py` checks both plugins in your real Wireshark. Its test
+packets (`tests/live/cases.py`) have exactly known contents:
+
+- `Any` → `Command`,
+- nested `Any` → `Envelope` → `Any` → `Ping`,
+- a TCP Telemetry packet with every scalar kind,
+- a bare `Any` on an unmapped port (heuristic),
+- an unknown `Any` type,
+- a malformed packet,
+- a Decode As case,
+- 5 generated Envelopes.
+
+1. Install the plugins and point the studio at the test protos:
+
+       python tools/wireshark/tests/live/live_test.py setup
+
+   This writes to your personal plugins folder. Add `--reset-config` if the
+   studio is already configured for your own protos. Then reload Lua plugins
+   in Wireshark (Ctrl+Shift+L).
+2. Get the packets into Wireshark, either way:
+   - `live_test.py pcap` writes `nanopb_live_test.pcap`; open it. Packet *N* is case *N*.
+   - Or capture on loopback, which on Windows is the Npcap *Adapter for loopback traffic capture* and on Linux is `lo`, while running `live_test.py send` (`--repeat N`, `--interval S`).
+3. Go through [`tests/live/CHECKLIST.md`](tests/live/CHECKLIST.md). For every packet it lists the expected tree lines, expert info and a display filter, plus steps for the preferences, Decode As and every Tools > nanopb menu item.
+
+If `tshark` is installed (Windows: `C:\Program Files\Wireshark\tshark.exe` is found automatically), the same checks run by themselves:
+
+    python tools/wireshark/tests/live/live_test.py verify --pcap nanopb_live_test.pcap   # the pcap from step 2
+    python tools/wireshark/tests/live/live_test.py live                                  # capture loopback + send + verify
+
+Both print PASS/FAIL per packet. Add `--isolated` to load the dissector from
+this repository with a fresh schema instead of the installed copy. This only
+works when no copy is installed, since the two would clash.
+`live_test.py checklist` regenerates `CHECKLIST.md` after you change the cases.
+
+Tested with Wireshark/tshark 3.6.7 (Lua 5.2) on Windows: `verify` and `live`
+pass 12/12.
 
 ## Command line
 
@@ -176,7 +216,6 @@ Output is JSON followed by a final `__EXIT__=<status>` line, which the Lua side 
 
     python -m unittest discover -s tools/wireshark/tests -v
 
-`test_backend.py` needs only the generator dependencies. `test_dissector.py`
-runs both Lua plugins against a mock Wireshark API (`tests/wireshark_mock.lua`)
-using `pip install lupa`. It is skipped if `lupa` is missing. It doesn't replace
-a check in a real Wireshark.
+- `test_backend.py` needs only the generator dependencies.
+- `test_dissector.py` runs both Lua plugins and the live test cases against a mock Wireshark API (`tests/wireshark_mock.lua`). It needs `pip install lupa` and is skipped without it.
+- `test_tshark.py` dissects the live test capture with a real `tshark`. It is skipped when `tshark` isn't found, or when a copy of the dissector is installed in the personal plugins folder.

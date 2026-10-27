@@ -53,8 +53,12 @@ local config = {
 }
 
 local function load_config()
-    local chunk = loadfile(CONFIG_PATH)
-    if not chunk then return end
+    -- Wireshark's loadfile raises an error for missing files.
+    local f = io.open(CONFIG_PATH, "r")
+    if not f then return end
+    f:close()
+    local loaded, chunk = pcall(loadfile, CONFIG_PATH)
+    if not loaded or not chunk then return end
     local ok, saved = pcall(chunk)
     if ok and type(saved) == "table" then
         for _, k in ipairs(KEYS) do

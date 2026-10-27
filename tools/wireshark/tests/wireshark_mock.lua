@@ -48,8 +48,8 @@ Range.__index = Range
 function Range:uint() local v = 0 for i = 1, #self.s do v = v * 256 + self.s:byte(i) end return v end
 function Range:le_uint() return (string.unpack("<I" .. #self.s, self.s)) end
 function Range:le_int() return (string.unpack("<i" .. #self.s, self.s)) end
-function Range:le_float() return (string.unpack("<f", self.s)) end
-function Range:le_double() return (string.unpack("<d", self.s)) end
+-- As in Wireshark, le_float reads a 4-byte float or an 8-byte double.
+function Range:le_float() return (string.unpack(#self.s == 8 and "<d" or "<f", self.s)) end
 function Range:le_uint64() return u64((string.unpack("<i8", self.s))) end
 function Range:le_int64() return i64((string.unpack("<i8", self.s))) end
 function Range:string() return self.s end
@@ -86,7 +86,11 @@ function Item:add(field, range, value)
     if field.is_proto then
         text = value or field.description
     elseif value ~= nil then
+        -- Like Wireshark 3.6: bytes fields only take their value from the range.
+        assert(field.kind ~= "bytes", "bytes ProtoField added with a value argument")
         text = field.name .. ": " .. value_text(field, value)
+    elseif field.kind == "bytes" and range then
+        text = field.name .. ": " .. tostring(ByteArray.new(range.s))
     else
         text = field.name
     end
@@ -122,6 +126,10 @@ function Proto(name, description)
         __index = function(_, k) return values[k] end,
     })
     local p = { name = name, description = description, is_proto = true, prefs = prefs, pref_values = values }
+    function p:register_heuristic(list, fn)
+        M.heuristics = M.heuristics or {}
+        M.heuristics[list] = fn
+    end
     M.protos = M.protos or {}
     M.protos[name] = p
     return p

@@ -37,9 +37,14 @@ end
 local SEP = package.config:sub(1, 1)
 local DATA_DIR = script_dir() .. SEP .. "nanopb"
 
+-- Wireshark's loadfile raises an error for missing files instead of
+-- returning nil, so check first and guard the call.
 local function load_data(path)
-    local chunk = loadfile(path)
-    if not chunk then return nil end
+    local f = io.open(path, "r")
+    if not f then return nil end
+    f:close()
+    local loaded, chunk = pcall(loadfile, path)
+    if not loaded or not chunk then return nil end
     local ok, value = pcall(chunk)
     if ok and type(value) == "table" then return value end
     return nil
@@ -157,6 +162,8 @@ nanopb.prefs.default_message = Pref.string("Default message", "",
     "Root message for payloads without a port map entry (e.g. with Decode As). Empty = none")
 nanopb.prefs.any_fallback = Pref.bool("Treat unknown payload as Any", true,
     "Decode payloads without a root message as google.protobuf.Any")
+nanopb.prefs.heuristic = Pref.bool("Detect Any on any port (heuristic)", true,
+    "Decode UDP/TCP payloads on unmapped ports that are a google.protobuf.Any of a known type")
 nanopb.prefs.max_depth = Pref.uint("Maximum nesting depth", 32, "Guard against runaway recursion")
 
 local port_map = { udp = {}, tcp = {} }
@@ -275,7 +282,9 @@ end
 local function add_scalar(tree, msg_name, number, fd, range, value, text)
     local pf = typed_fields[msg_name] and typed_fields[msg_name][number]
     local item
-    if pf then
+    if pf and value == nil then
+        item = tree:add(pf, range)
+    elseif pf then
         item = tree:add(pf, range, value)
     else
         item = tree:add(f_field, range, text)
@@ -315,7 +324,7 @@ local function decode_scalar(tvb, pos, limit, wire, fd, tree, msg_name, number)
         if pos + 8 > limit then return nil end
         local r = tvb(pos, 8)
         local value
-        if t == T.DOUBLE then value = r:le_double()
+        if t == T.DOUBLE then value = r:le_float()  -- le_float reads 4- and 8-byte ranges
         elseif t == T.SFIXED64 then value = r:le_int64()
         else value = r:le_uint64() end
         add_scalar(tree, msg_name, number, fd, r, value, string.format("%s: %s", fd.name, tostring(value)))
@@ -324,33 +333,38 @@ local function decode_scalar(tvb, pos, limit, wire, fd, tree, msg_name, number)
     return nil
 end
 
-local function decode_any(tvb, offset, length, tree, depth, pinfo)
-    -- Find type_url (1) and value (2) without building a tree first.
+-- Parse a google.protobuf.Any: returns type_url, type_name, value offset and
+-- length (value may be nil), or nil if the range is not shaped like an Any.
+local function parse_any(tvb, offset, length)
     local limit = offset + length
     local pos = offset
     local type_url, value_off, value_len
     while pos < limit do
         local key, klen = read_varint(tvb, pos, limit)
-        if not key then return false end
+        if not key then return nil end
         pos = pos + klen
         local number = key:rshift(3):tonumber()
         local wire = key:band(UInt64(7)):tonumber()
-        if wire ~= 2 then return false end
+        if wire ~= 2 or (number ~= 1 and number ~= 2) then return nil end
         local len, llen = read_varint(tvb, pos, limit)
-        if not len then return false end
+        if not len then return nil end
         pos = pos + llen
         len = len:tonumber()
-        if pos + len > limit then return false end
+        if pos + len > limit then return nil end
         if number == 1 then
-            type_url = tvb(pos, len):string(ENC_UTF_8)
-        elseif number == 2 then
+            type_url = len > 0 and tvb(pos, len):string(ENC_UTF_8) or ""
+        else
             value_off, value_len = pos, len
         end
         pos = pos + len
     end
-    if not type_url then return false end
+    if not type_url or type_url == "" then return nil end
+    return type_url, (type_url:match("([^/]+)$") or type_url), value_off, value_len
+end
 
-    local type_name = type_url:match("([^/]+)$") or type_url
+local function decode_any(tvb, offset, length, tree, depth, pinfo)
+    local type_url, type_name, value_off, value_len = parse_any(tvb, offset, length)
+    if not type_url then return false end
     tree:add(f_type_url, tvb(offset, length), type_url)
     tree:append_text(" -> " .. type_name)
     if not value_off then return true end
@@ -414,9 +428,15 @@ decode_message = function(tvb, offset, length, msg_name, tree, depth, pinfo)
                 add_scalar(tree, msg_name, number, fd, whole, value,
                     string.format("%s: %s", fd.name, value))
             elseif fd and fd.type == T.BYTES then
-                local value = len > 0 and tvb(pos, len):bytes() or ByteArray.new()
-                add_scalar(tree, msg_name, number, fd, whole, value,
-                    string.format("%s: %s", fd.name, tostring(value)))
+                -- Bytes fields take their value from the range (older
+                -- Wireshark rejects a ByteArray value argument).
+                if len > 0 then
+                    local r = tvb(pos, len)
+                    add_scalar(tree, msg_name, number, fd, r, nil,
+                        string.format("%s: %s", fd.name, tostring(r:bytes())))
+                else
+                    tree:add(f_field, whole, fd.name):set_text(string.format("%s: <empty> [#%d]", fd.name, number))
+                end
             elseif fd and fd.label == LABEL_REPEATED and
                     (VARINT_TYPES[fd.type] or FIXED32_TYPES[fd.type] or FIXED64_TYPES[fd.type]) then
                 local sub = tree:add(f_field, whole, fd.name)
@@ -468,22 +488,19 @@ end
 
 -- Quick structural check used before trying the Any fallback.
 local function looks_like_any(tvb, offset, length)
-    local limit = offset + length
-    local pos = offset
-    local seen_url = false
-    while pos < limit do
-        local key, klen = read_varint(tvb, pos, limit)
-        if not key then return false end
-        pos = pos + klen
-        local number = key:rshift(3):tonumber()
-        if key:band(UInt64(7)):tonumber() ~= 2 or (number ~= 1 and number ~= 2) then return false end
-        local len, llen = read_varint(tvb, pos, limit)
-        if not len then return false end
-        pos = pos + llen + len:tonumber()
-        if pos > limit then return false end
-        if number == 1 then seen_url = true end
+    return parse_any(tvb, offset, length) ~= nil
+end
+
+-- Stricter check for the heuristic dissector: an Any whose type is in the
+-- schema and whose value is well-formed protobuf.
+local function is_known_any(tvb)
+    local length = tvb:len()
+    if length < 4 then return false end
+    local type_url, type_name, value_off, value_len = parse_any(tvb, 0, length)
+    if not type_url or not type_url:find("/", 1, true) or not schema.messages[type_name] then
+        return false
     end
-    return seen_url
+    return value_off == nil or wire_ok(tvb, value_off, value_len)
 end
 
 -- ---------------------------------------------------------------------------
@@ -502,12 +519,12 @@ local function root_message(pinfo, tvb)
     return nil
 end
 
-function nanopb.dissector(tvb, pinfo, tree)
+local function dissect(tvb, pinfo, tree, forced_root)
     local length = tvb:len()
     if length == 0 then return 0 end
     pinfo.cols.protocol = "NANOPB"
 
-    local msg_name = root_message(pinfo, tvb)
+    local msg_name = forced_root or root_message(pinfo, tvb)
     local root = tree:add(nanopb, tvb(), "nanopb Protobuf")
     if not schema_ok then root:add_proto_expert_info(e_no_schema) end
 
@@ -523,6 +540,21 @@ function nanopb.dissector(tvb, pinfo, tree)
     return length
 end
 
+function nanopb.dissector(tvb, pinfo, tree)
+    return dissect(tvb, pinfo, tree, nil)
+end
+
+-- Heuristic: claim UDP/TCP payloads on unmapped ports that are a
+-- google.protobuf.Any of a type known to the schema.
+local function heuristic(tvb, pinfo, tree)
+    if not nanopb.prefs.heuristic or not schema_ok then return false end
+    if not is_known_any(tvb) then return false end
+    dissect(tvb, pinfo, tree, ANY)
+    return true
+end
+
 DissectorTable.get("udp.port"):add_for_decode_as(nanopb)
 DissectorTable.get("tcp.port"):add_for_decode_as(nanopb)
+nanopb:register_heuristic("udp", heuristic)
+nanopb:register_heuristic("tcp", heuristic)
 apply_ports()

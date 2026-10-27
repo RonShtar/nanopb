@@ -2,25 +2,28 @@
 
 Needs ``pip install lupa`` (Lua 5.4 inside Python); skipped otherwise.
 This checks decoding logic and the studio -> backend flow; it does not
-replace a manual test in a real Wireshark.
+replace a check in a real Wireshark (see tests/live).
 """
 
 import os
+import re
 import shutil
-import struct
 import sys
 import tempfile
 import unittest
 
-from helpers import (FIXTURES, REPO_ROOT, TESTS_DIR, TOOL_DIR, any_of, f_bytes, f_fixed32,
-                     f_fixed64, f_sint, f_varint, run_backend, varint)
+from helpers import FIXTURES, REPO_ROOT, TESTS_DIR, TOOL_DIR, f_bytes, f_varint, run_backend
+
+sys.path.insert(0, os.path.join(TESTS_DIR, 'live'))
+import cases as live_cases  # noqa: E402
+import live_test  # noqa: E402
 
 try:
     import lupa.lua54 as lupa
 except ImportError:  # pragma: no cover
     lupa = None
 
-UDP, TCP = 3, 2
+PORT_TYPE = {'udp': 3, 'tcp': 2}
 
 
 def lua_path(path):
@@ -42,18 +45,51 @@ class DissectorTests(LuaTestCase):
     def setUp(self):
         super(DissectorTests, self).setUp()
         status, _, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir', self.tmp,
-                                     '--port-map', 'udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry')
+                                     '--port-map', live_cases.PORT_MAP)
         self.assertEqual(status, 0, err)
         self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
         self.proto = self.mock.protos['nanopb']
 
-    def dissect(self, data, port_type=UDP, port=5000):
+    def route(self, transport, port, data, decode_as=False):
+        """Dispatch like Wireshark: port table, then heuristics. Returns tree text or None."""
+
         tvb = self.mock.tvb(data)
         tree = self.mock.tree()
-        pinfo = self.mock.pinfo(port_type, port)
-        consumed = self.proto.dissector(tvb, pinfo, tree)
-        self.assertEqual(consumed, len(data))
-        return self.mock.render(tree), pinfo
+        pinfo = self.mock.pinfo(PORT_TYPE[transport], port)
+        if decode_as or self.mock.tables[transport + '.port'].entries[port] is not None:
+            self.assertEqual(self.proto.dissector(tvb, pinfo, tree), len(data))
+        elif not self.mock.heuristics[transport](tvb, pinfo, tree):
+            return None
+        return self.mock.render(tree)
+
+    def run_case(self, case):
+        if case.how == 'decode_as':
+            self.assertIsNone(self.route(case.transport, case.port, case.payload),
+                              'decode-as case must not be claimed without Decode As')
+            self.proto.pref_values['default_message'] = live_cases.DECODE_AS_MESSAGE
+        text = self.route(case.transport, case.port, case.payload, decode_as=case.how == 'decode_as')
+        self.assertIsNotNone(text, case.name)
+        low = text.lower()
+        for line in case.expect:
+            self.assertIn(line.lower(), low, '%s\n%s' % (case.name, text))
+        for line in case.experts:
+            self.assertIn(line.lower(), low, '%s\n%s' % (case.name, text))
+        if not case.experts:
+            self.assertNotIn('!', text, '%s\n%s' % (case.name, text))
+        return text
+
+    def test_live_cases(self):
+        for case in live_cases.all_cases(generated=3):
+            with self.subTest(case=case.name):
+                self.proto.pref_values['default_message'] = ''
+                self.run_case(case)
+
+    def test_filters_use_registered_fields(self):
+        abbrs = set(f.abbr for f in self.proto.fields.values())
+        abbrs |= set(e.abbr for e in self.proto.experts.values())
+        for case in live_cases.CASES:
+            for name in re.findall(r'nanopb[\w.]*', case.filter or ''):
+                self.assertIn(name, abbrs, case.filter)
 
     def test_ports_registered(self):
         same = self.lua.eval('rawequal')
@@ -61,78 +97,53 @@ class DissectorTests(LuaTestCase):
         self.assertTrue(same(self.mock.tables['tcp.port'].entries[7000], self.proto))
         self.assertTrue(self.mock.tables['udp.port'].decode_as)
 
-    def test_any_resolves_payload_type(self):
-        ping = f_varint(1, 7)
-        command = f_bytes(1, 'go') + f_varint(2, -5) + f_bytes(3, ping)
-        envelope = (f_varint(1, 3) + f_bytes(2, any_of('demo.payloads.Command', command))
-                    + f_bytes(3, f_varint(1, 9)))
-        text, pinfo = self.dissect(envelope)
-        self.assertIn('nanopb Protobuf: demo.envelope.Envelope', text)
-        self.assertIn('version: 3', text)
-        self.assertIn('body (2): google.protobuf.Any -> demo.payloads.Command', text)
-        self.assertIn('Any type_url: type.googleapis.com/demo.payloads.Command', text)
-        self.assertIn('value: Any -> demo.payloads.Command', text)
-        self.assertIn('name: go', text)
-        self.assertIn('arg: -5', text)
-        self.assertIn('inner (3): demo.payloads.Ping', text)
-        self.assertIn('id: 7', text)
-        self.assertIn('last_ping (3): demo.payloads.Ping', text)
-        self.assertIn('id: 9', text)
-        self.assertNotIn('!', text)
-        self.assertEqual(pinfo.cols.info.value, 'nanopb demo.envelope.Envelope (%d bytes)' % len(envelope))
+    def test_heuristic_rejects_other_traffic(self):
+        for data in (b'GET / HTTP/1.1\r\n\r\n', f_varint(1, 5),
+                     f_bytes(1, 'type.googleapis.com/no.Such') + f_bytes(2, b'\x08\x01'),
+                     f_bytes(1, 'type.googleapis.com/demo.payloads.Ping') + f_bytes(2, b'\x0a\x05')):
+            self.assertIsNone(self.route('udp', 6000, data), data)
 
-    def test_nested_any_recursion(self):
-        inner = f_varint(1, 1) + f_bytes(2, any_of('demo.payloads.Ping', f_varint(1, 42)))
-        outer = f_varint(1, 2) + f_bytes(2, any_of('demo.envelope.Envelope', inner))
-        text, _ = self.dissect(outer)
-        self.assertIn('value: Any -> demo.envelope.Envelope', text)
-        self.assertIn('value: Any -> demo.payloads.Ping', text)
-        self.assertIn('id: 42', text)
-        self.assertNotIn('!', text)
+    def test_heuristic_pref_off(self):
+        self.proto.pref_values['heuristic'] = False
+        case = [c for c in live_cases.CASES if c.how == 'heuristic'][0]
+        self.assertIsNone(self.route(case.transport, case.port, case.payload))
 
-    def test_root_any_fallback_on_unmapped_port(self):
-        data = any_of('demo.payloads.Ping', f_varint(1, 99))
-        text, _ = self.dissect(data, UDP, 6000)
-        self.assertIn('nanopb Protobuf: google.protobuf.Any', text)
-        self.assertIn('id: 99', text)
-
-    def test_default_message_pref(self):
-        self.proto.pref_values['default_message'] = 'demo.payloads.Ping'
-        text, _ = self.dissect(f_varint(1, 5), UDP, 6000)
-        self.assertIn('nanopb Protobuf: demo.payloads.Ping', text)
-        self.assertIn('id: 5', text)
-
-    def test_unknown_any_type(self):
-        envelope = f_bytes(2, any_of('other.Thing', b'\x08\x01'))
-        text, _ = self.dissect(envelope)
-        self.assertIn('type other.Thing not in schema', text)
-        self.assertIn('!nanopb.any.unknown_type', text)
-
-    def test_scalar_types_enum_packed(self):
-        header = f_varint(1, 1) + f_fixed64(2, 'Q', 1234567890123) + f_bytes(3, 's1')
-        reading = f_varint(1, 1) + f_fixed32(2, 'f', 21.5) + f_sint(3, -3)
-        packed = varint(((1 << 64) - 1)) + varint(300)  # int32 -1 is a 10-byte varint
-        telemetry = (f_bytes(1, header) + f_bytes(2, 'dev') + f_bytes(3, reading) + f_bytes(4, packed)
-                     + f_bytes(5, b'\x01\x02') + f_fixed64(6, 'd', 0.25) + f_varint(7, 1))
-        text, _ = self.dissect(telemetry, TCP, 7000)
-        for expected in ('seq: 1', 'timestamp_us: 1234567890123', 'source: s1', 'device_name: dev',
-                         'unit: UNIT_CELSIUS (1)', 'value: 21.5', 'offset: -3', 'raw (4): packed [2]',
-                         'raw: -1', 'raw: 300', 'blob: 0102', 'ratio: 0.25', 'healthy: true'):
-            self.assertIn(expected, text)
-        self.assertNotIn('!', text)
-
-    def test_unknown_fields_and_malformed(self):
-        text, _ = self.dissect(f_varint(1, 1) + f_varint(15, 77) + f_bytes(14, f_varint(1, 2)))
+    def test_unknown_fields(self):
+        text = self.route('udp', 5000, f_varint(1, 1) + f_varint(15, 77) + f_bytes(14, f_varint(1, 2)))
         self.assertIn('field_15: 77', text)
         self.assertIn('field 14: 2 bytes', text)
-        text, _ = self.dissect(f_varint(1, 1) + b'\x12\x10\x01')  # length beyond end
-        self.assertIn('!nanopb.malformed: Length exceeds message', text)
 
-    def test_typed_filter_fields(self):
-        abbrs = set(f.abbr for f in self.proto.fields.values())
-        for name in ('nanopb.demo.payloads.Ping.id', 'nanopb.demo.telemetry.Telemetry.device_name',
-                     'nanopb.type_url', 'nanopb.message'):
-            self.assertIn(name, abbrs)
+
+class PcapSelfCheck(LuaTestCase):
+    """The pcap written for Wireshark carries exactly the case payloads, and
+    they dissect as expected when routed by their headers."""
+
+    def test_pcap_round_trip(self):
+        cases = live_cases.all_cases(generated=2)
+        path = os.path.join(self.tmp, 'live.pcap')
+        live_test.write_pcap(path, cases)
+        packets = live_test.read_pcap(path)
+        self.assertEqual(len(packets), len(cases))
+        dissector = DissectorTests('route')
+        dissector.lua, dissector.mock, dissector.tmp = self.lua, self.mock, self.tmp
+        status, _, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir', self.tmp,
+                                     '--port-map', live_cases.PORT_MAP)
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        dissector.proto = self.mock.protos['nanopb']
+        for i, (case, (transport, sport, dport, payload, csum_ok)) in enumerate(zip(cases, packets)):
+            with self.subTest(case=case.name):
+                self.assertEqual((transport, dport, payload), (case.transport, case.port, case.payload))
+                self.assertEqual(sport, live_test.SRC_PORT_BASE + i)
+                self.assertTrue(csum_ok)
+                dissector.proto.pref_values['default_message'] = ''
+                dissector.run_case(case)
+
+    def test_checklist_lists_every_case(self):
+        cases = live_cases.all_cases(generated=1)
+        text = live_test.checklist_markdown(cases)
+        for i, case in enumerate(cases, 1):
+            self.assertIn('### Packet %d: %s' % (i, case.name), text)
 
 
 class StudioTests(LuaTestCase):
