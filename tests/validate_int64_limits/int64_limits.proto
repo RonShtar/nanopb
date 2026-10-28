@@ -1,0 +1,13 @@
+/*
+ * 64-bit rule constants at the edges of their range. They must be emitted
+ * as INT64_C/UINT64_C so the validator compiles cleanly and compares exactly.
+ */
+syntax = "proto3";
+import "validate.proto";
+message Big {
+  uint64 a = 1 [(validate.rules).uint64 = {lte: 18000000000000000000}];
+  int64 b = 2 [(validate.rules).int64 = {gte: -9223372036854775808}];
+  repeated uint64 c = 3 [(validate.rules).repeated.items.uint64 = {lt: 18446744073709551615, not_in: [18446744073709551614]}];
+  sint64 d = 4 [(validate.rules).sint64 = {in: [-9223372036854775808, 5]}];
+  fixed64 e = 5 [(validate.rules).fixed64.not_in = 18446744073709551615];
+}
