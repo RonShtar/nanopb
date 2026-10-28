@@ -1,0 +1,18 @@
+// Rules that nanopb-validate cannot enforce in C (gen-c refuses them). The
+// dissector shows them as "not checked" and never drops a packet for them.
+syntax = "proto3";
+
+package unenforced;
+
+import "validate.proto";
+
+message Form {
+    option (validate.message) = { requires: ["name"] };
+
+    string name = 1 [(validate.rules).string = {pattern: "^[a-z]+$", min_len: 2}];
+    oneof contact {
+        string phone = 2 [(validate.rules).oneof_required = true];
+        string mail = 3;
+    }
+    map<string, string> extra = 4 [(validate.rules).map.no_sparse = true];
+}

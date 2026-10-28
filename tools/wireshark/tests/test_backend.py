@@ -15,6 +15,8 @@ import unittest
 from helpers import FIXTURES, TOOL_DIR, f_bytes, f_varint, run_backend
 
 STRESS_PROTOS = os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')
+RULES_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules')
+UNENFORCED_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules_unenforced')
 STRESS_PORTS = 'udp:5100=fleet.envelope.Envelope,tcp:5101=fleet.telemetry.Frame,udp:5102=fleet.status.Status'
 
 
@@ -79,6 +81,61 @@ class BackendTests(unittest.TestCase):
         for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(google_protobuf_Any',
                        'pb_validate_demo_envelope_Envelope'):
             self.assertIn(symbol, source)
+
+    def schema_messages(self, root):
+        from nanopb_wireshark import DEFAULT_NANOPB_ROOT, setup_nanopb, write_schema
+        setup_nanopb(DEFAULT_NANOPB_ROOT)
+        return write_schema(root, [], os.path.join(self.tmp, 'schema.luadata'))
+
+    def test_schema_exports_rules(self):
+        from nanopb_wireshark import int64_key
+        messages = self.schema_messages(RULES_PROTOS)
+
+        def field(msg, name):
+            return next(f for f in messages['rules.' + msg]['fields'].values() if f['name'] == name)
+
+        def rules(msg, name):
+            return dict((r['id'], r) for r in field(msg, name)['rules'])
+
+        self.assertEqual(rules('Numbers', 'i64')['int64.gte']['key'], int64_key(-5000000000, True))
+        self.assertEqual(rules('Numbers', 'u64')['uint64.lte']['key'], '7ce66c50e2840000')
+        self.assertEqual(rules('Numbers', 's64')['sint64.not_in']['keys'], ['7fffffffffffffff'])
+        # float constants are float32 values, as C compares them.
+        self.assertEqual(rules('Numbers', 'ratio')['float.lte']['v'], 0.10000000149011612)
+        self.assertEqual(rules('Numbers', 'flag')['bool.const']['v'], False)
+        self.assertEqual(rules('Strings', 'magic')['bytes.const']['v'], b'\xca\xfe')
+        self.assertEqual(rules('Lists', 'nums')['repeated.items']['items'],
+                         [{'id': 'int32.gte', 'kind': 'GTE', 'v': 0}])
+        self.assertEqual(rules('Lists', 'nums')['repeated.max_items']['v'], 4)
+
+        self.assertEqual(field('Numbers', 'i32')['presence'], 'implicit')
+        self.assertEqual(field('Envelope', 'opt')['presence'], 'explicit')
+        self.assertEqual(field('Envelope', 'inner')['presence'], 'explicit')
+        self.assertEqual((field('Envelope', 'small')['presence'], field('Envelope', 'small')['oneof']),
+                         ('oneof', 'body'))
+        self.assertEqual((field('Lists', 'nums')['presence'], field('Lists', 'nums')['max_count']),
+                         ('repeated', 4))
+        self.assertEqual(field('Strings', 'name')['max_size'], 15)  # max_size 16 includes the NUL
+        self.assertEqual(field('Strings', 'name')['storage'], 'static')
+
+        with open(os.path.join(self.tmp, 'schema.luadata')) as handle:
+            text = handle.read()
+        self.assertIn('v = "\\202\\254"', text)  # 0xca 0xfe as Lua decimal escapes
+        self.assertIn('key = "7ce66c50e2840000"', text)
+
+    def test_schema_unsupported_rules(self):
+        messages = self.schema_messages(UNENFORCED_PROTOS)
+        form = messages['unenforced.Form']
+        by_name = dict((f['name'], f) for f in form['fields'].values())
+        name_rules = [(r['id'], r['kind']) for r in by_name['name']['rules']]
+        # pattern is not checked, min_len on the same field still is.
+        self.assertEqual(sorted(name_rules), [('string.min_len', 'MIN_LEN'), ('string.pattern', 'UNSUPPORTED')])
+        self.assertEqual([(r['id'], r['kind']) for r in by_name['phone']['rules']],
+                         [('oneof_required', 'UNSUPPORTED')])
+        self.assertEqual([(r['id'], r['kind']) for r in by_name['extra']['rules']],
+                         [('map.no_sparse', 'UNSUPPORTED')])
+        self.assertEqual(form['message_rules'], [{'id': 'message.requires', 'kind': 'UNSUPPORTED',
+                                                  'fields': ['name']}])
 
     def test_gen_c_exports_packet_filters(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', self.tmp)

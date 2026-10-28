@@ -647,26 +647,177 @@ def lua_str(value):
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n') + '"'
 
 
-def build_schema(fds_list):
+# Field types whose values the dissector compares as 64-bit keys (True = signed).
+INT64_TYPES = {3: True, 16: True, 18: True, 4: False, 6: False}  # INT64, SFIXED64, SINT64; UINT64, FIXED64
+
+# Rule kinds nanopb-validate has no C emitter for: generating C code fails on
+# them, so they never reject a packet. The dissector lists them as not checked.
+UNSUPPORTED_KINDS = ('ONEOF_REQUIRED', 'NO_SPARSE')
+UNSUPPORTED_OPTIONS = ('pattern', 'min_bytes', 'max_bytes')
+
+
+def int64_key(value, signed):
+    """Order-preserving 16-digit hex key of a 64-bit integer (signed: offset by 2^63)."""
+
+    value = int(value)
+    if signed:
+        value += 1 << 63
+    return '%016x' % (value & ((1 << 64) - 1))
+
+
+VALUE_KINDS = ('GT', 'GTE', 'LT', 'LTE', 'EQ', 'IN', 'NOT_IN')
+
+
+def rule_entry(rule_id, kind, params, field_type):
+    entry = {'id': rule_id, 'kind': kind}
+    # Only comparisons with the field's value use 64-bit keys, not counts or lengths.
+    wide = field_type in INT64_TYPES and kind in VALUE_KINDS
+
+    def scalar(value):
+        if wide and isinstance(value, int) and not isinstance(value, bool):
+            return int64_key(value, INT64_TYPES[field_type])
+        return value
+
+    if 'value' in params:
+        entry['key' if wide and not isinstance(params['value'], bool) else 'v'] = scalar(params['value'])
+    if 'values' in params:
+        entry['keys' if wide else 'list'] = [scalar(v) for v in params['values']]
+    if 'seconds' in params:
+        entry['seconds'] = int(params['seconds'])
+    if 'item_rules' in params:
+        entry['items'] = [rule_entry(i.get('constraint_id', ''), i.get('rule'), i, field_type)
+                          for i in params['item_rules']]
+    if kind in UNSUPPORTED_KINDS:
+        entry['kind'] = 'UNSUPPORTED'
+    return entry
+
+
+def field_rule_entries(field):
+    """The field's validate.proto rules as dissector rule entries."""
+
+    import nanopb_validator
+
+    rules_option = field_rules(field)
+    if rules_option is None:
+        return []
+    option = type(rules_option)()
+    option.CopyFrom(rules_option)
+    entries = []
+    for kind in ('string', 'bytes'):
+        if option.HasField(kind):
+            sub = getattr(option, kind)
+            for name in UNSUPPORTED_OPTIONS:
+                if name in sub.DESCRIPTOR.fields_by_name and sub.HasField(name):
+                    entries.append({'id': '%s.%s' % (kind, name), 'kind': 'UNSUPPORTED'})
+                    sub.ClearField(name)
+    rules = nanopb_validator.FieldValidator(field, option).rules
+    return [rule_entry(r.constraint_id, r.rule_type, r.params, field.type) for r in rules] + entries
+
+
+def message_rule_entries(msg):
+    """requires / mutex / at_least: no C enforcement, shown as not checked."""
+
+    from google.protobuf import descriptor_pb2
+    from nanopb_data_generator import _load_validate_pb2
+
+    validate_pb2 = _load_validate_pb2()
+    options = descriptor_pb2.MessageOptions.FromString(msg.options.SerializeToString())
+    if not options.HasExtension(validate_pb2.message):
+        return []
+    rules = options.Extensions[validate_pb2.message]
+    entries = [{'id': 'message.requires', 'kind': 'UNSUPPORTED', 'fields': [f]} for f in rules.requires]
+    entries += [{'id': 'message.mutex', 'kind': 'UNSUPPORTED', 'fields': list(g.fields)} for g in rules.mutex]
+    entries += [{'id': 'message.at_least', 'kind': 'UNSUPPORTED', 'fields': list(a.fields)}
+                for a in rules.at_least]
+    return entries
+
+
+def field_presence(field, syntax):
+    """How the C struct tracks presence: repeated, oneof, explicit (has_ flag), required, implicit."""
+
+    if field.label == 3:
+        return 'repeated'
+    if field.HasField('oneof_index') and not field.proto3_optional:
+        return 'oneof'
+    if field.proto3_optional or field.type in (10, 11):
+        return 'explicit'
+    if syntax != 'proto3':
+        return 'required' if field.label == 2 else 'explicit'
+    return 'implicit'
+
+
+def field_storage(info):
+    """nanopb storage of a field: static, pointer, callback or ignore (from its .options)."""
+
+    if info is None:
+        return {'storage': 'static'}
+    storage = info.storage
+    if storage == 'static':
+        # Without a size nanopb falls back to a callback, which pb_validate skips.
+        if info.label == 3 and not info.max_count:
+            storage = 'callback'
+        elif info.type in (9, 12) and not info.max_size:
+            storage = 'callback'
+    result = {'storage': storage}
+    if storage == 'static':
+        if info.type in (9, 12) and info.max_size:
+            result['max_size'] = info.max_size
+            if info.type == 12 and info.fixed_length:
+                result['fixed_length'] = True
+        if info.label == 3 and info.max_count:
+            result['max_count'] = info.max_count
+    return result
+
+
+def nanopb_field_info(units):
+    """{(message, field number): ProtoFieldInfo} from the units' .options files."""
+
+    from nanopb_data_generator import DataGenerator
+
+    infos = {}
+    for unit in units:
+        try:
+            gen = unit_data_generator(unit, DataGenerator)
+        except Exception:  # sizes stay unknown; the rules still work
+            continue
+        for full_name, msg in gen.registry.messages_by_full_name.items():
+            for info in msg.fields.values():
+                infos.setdefault((full_name.lstrip('.'), info.number), info)
+    return infos
+
+
+def build_schema(fds_list, field_infos=None):
     messages = {}
     enums = {}
+    field_infos = field_infos or {}
 
     def add_enum(prefix, enum):
         enums[prefix + enum.name] = dict((v.number, v.name) for v in enum.value)
 
-    def add_message(prefix, msg):
+    def add_message(prefix, msg, syntax):
         full = prefix + msg.name
         fields = {}
         for fld in msg.field:
-            fields[fld.number] = {
+            entry = {
                 'name': fld.name,
                 'type': fld.type,
                 'label': fld.label,
                 'type_name': fld.type_name.lstrip('.'),
+                'presence': field_presence(fld, syntax),
             }
+            if entry['presence'] == 'oneof':
+                entry['oneof'] = msg.oneof_decl[fld.oneof_index].name
+            entry.update(field_storage(field_infos.get((full, fld.number))))
+            rules = field_rule_entries(fld)
+            if rules:
+                entry['rules'] = rules
+            fields[fld.number] = entry
         messages[full] = {'fields': fields, 'map_entry': msg.options.map_entry}
+        message_rules = message_rule_entries(msg)
+        if message_rules:
+            messages[full]['message_rules'] = message_rules
         for nested in msg.nested_type:
-            add_message(full + '.', nested)
+            add_message(full + '.', nested, syntax)
         for enum in msg.enum_type:
             add_enum(full + '.', enum)
 
@@ -678,10 +829,64 @@ def build_schema(fds_list):
             seen.add(fdesc.name)
             prefix = fdesc.package + '.' if fdesc.package else ''
             for msg in fdesc.message_type:
-                add_message(prefix, msg)
+                add_message(prefix, msg, fdesc.syntax or 'proto2')
             for enum in fdesc.enum_type:
                 add_enum(prefix, enum)
     return messages, enums
+
+
+LUA_KEYWORDS = frozenset('and break do else elseif end false for function goto if in local nil not or '
+                         'repeat return then true until while'.split())
+
+
+def lua_bytes(data):
+    """Lua string literal for text or bytes (decimal escapes work in Lua 5.1 - 5.4)."""
+
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+    out = []
+    for b in bytearray(data):
+        if b in (0x22, 0x5c):
+            out.append('\\' + chr(b))
+        elif 32 <= b < 127:
+            out.append(chr(b))
+        else:
+            out.append('\\%03d' % b)
+    return '"' + ''.join(out) + '"'
+
+
+def lua_value(value):
+    if value is None:
+        return 'nil'
+    if isinstance(value, bool):
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        return str(value) if abs(value) < 1 << 53 else repr(float(value))
+    if isinstance(value, float):
+        if value != value:
+            return '(0/0)'
+        if value in (float('inf'), float('-inf')):
+            return 'math.huge' if value > 0 else '-math.huge'
+        return repr(value)
+    if isinstance(value, (str, bytes)):
+        return lua_bytes(value)
+    if isinstance(value, (list, tuple)):
+        return '{ ' + ', '.join(lua_value(v) for v in value) + ' }'
+    if isinstance(value, dict):
+        items = []
+        for key in value:
+            if value[key] is None:
+                continue
+            if isinstance(key, str) and re.match(r'^[A-Za-z_]\w*$', key) and key not in LUA_KEYWORDS:
+                items.append('%s = %s' % (key, lua_value(value[key])))
+            else:
+                items.append('[%s] = %s' % (lua_value(key), lua_value(value[key])))
+        return '{ ' + ', '.join(items) + ' }'
+    raise TypeError('cannot render %r as Lua' % (value,))
+
+
+FIELD_KEYS = ('name', 'type', 'label', 'type_name', 'presence', 'oneof', 'storage', 'max_size',
+              'max_count', 'fixed_length', 'rules')
 
 
 def render_schema_lua(messages, enums):
@@ -689,12 +894,14 @@ def render_schema_lua(messages, enums):
            'return {\n  messages = {\n']
     for name in sorted(messages):
         msg = messages[name]
-        out.append('    [%s] = { map_entry = %s, fields = {\n'
-                   % (lua_str(name), 'true' if msg['map_entry'] else 'false'))
+        rules = msg.get('message_rules')
+        out.append('    [%s] = { map_entry = %s,%s fields = {\n'
+                   % (lua_str(name), 'true' if msg['map_entry'] else 'false',
+                      ' message_rules = %s,' % lua_value(rules) if rules else ''))
         for number in sorted(msg['fields']):
             f = msg['fields'][number]
-            out.append('      [%d] = { name = %s, type = %d, label = %d, type_name = %s },\n'
-                       % (number, lua_str(f['name']), f['type'], f['label'], lua_str(f['type_name'])))
+            parts = ['%s = %s' % (k, lua_value(f[k])) for k in FIELD_KEYS if f.get(k) is not None]
+            out.append('      [%d] = { %s },\n' % (number, ', '.join(parts)))
         out.append('    } },\n')
     out.append('  },\n  enums = {\n')
     for name in sorted(enums):
@@ -710,7 +917,7 @@ def write_schema(protos_root, extra_includes, path):
         raise BackendError('no subdirectory of %s contains .proto files' % protos_root)
     # Always know google.protobuf.Any, even if no unit imports it.
     any_fds = compile_descriptor_set(['google/protobuf/any.proto'], [DEFAULT_INCLUDE])
-    messages, enums = build_schema([u.fds for u in units] + [any_fds])
+    messages, enums = build_schema([u.fds for u in units] + [any_fds], nanopb_field_info(units))
     directory = os.path.dirname(os.path.abspath(path))
     if not os.path.isdir(directory):
         os.makedirs(directory)
