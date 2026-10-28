@@ -406,9 +406,9 @@ class StudioTests(LuaTestCase):
 
     def test_menus_registered(self):
         names = set(self.mock.menus.keys())
-        self.assertEqual(len(names), 6)
-        self.assertIn('nanopb/Generate C (merged + validation)...', names)
-        self.assertNotIn('nanopb/Settings...', names)
+        self.assertEqual(names, {'nanopb/Generate C (merged + validation)...',
+                                 'nanopb/Generate test packets (passed + dropped)...',
+                                 'nanopb/Install or update dissector...', 'nanopb/About'})
 
     def test_generate_c_through_backend(self):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
@@ -439,25 +439,44 @@ class StudioTests(LuaTestCase):
         self.assertIn('Select at least one unit.', picker.text)
         self.assertFalse(os.path.exists(self.out))
 
-    def test_generate_data_through_backend(self):
-        picker = self.picker('nanopb/Generate raw data...', 'Generate raw data')
-        picker.buttons['telemetry']()
-        picker.buttons['Generate']()
-        window = self.last_window()
-        self.assertTrue(window.text.startswith('OK'), window.text)
-        files = os.listdir(os.path.join(self.out, 'envelope', 'data'))
-        for ext in ('.bin', '.h', '.hex', '.txt'):
-            self.assertIn('demo_payloads_Ping' + ext, files)
-        self.assertFalse(os.path.exists(os.path.join(self.out, 'telemetry')))
+    def record_gui_calls(self):
+        self.lua.execute('''
+            gui_calls = {}
+            local function record(...) gui_calls[#gui_calls + 1] = table.concat({ ... }, "|") end
+            function open_capture_file(path, filter) record("open", path, filter) end
+            function reload_lua_plugins() record("reload") end
+            function set_filter(text) record("filter", text) end
+            function apply_filter() record("apply") end
+        ''')
+        return self.lua.eval('gui_calls')
 
-    def test_generate_invalid_data_through_backend(self):
-        picker = self.picker('nanopb/Generate invalid raw data...', 'Generate invalid raw data')
-        picker.buttons['envelope']()
+    def test_generate_test_packets_one_button(self):
+        calls = self.record_gui_calls()
+        title = 'Generate test packets'
+        picker = self.picker('nanopb/Generate test packets (passed + dropped)...', title)
         picker.buttons['Generate']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
-        files = os.listdir(os.path.join(self.out, 'telemetry', 'data'))
-        self.assertTrue(any('_invalid' in f for f in files), files)
+        self.assertRegex(window.text, r'\d+ packets: \d+ expected PASSED, \d+ expected DROPPED')
+        pcap = os.path.join(self.out, 'nanopb_test_packets.pcapng')
+        self.assertTrue(os.path.isfile(pcap))
+        # The dissector and schema are refreshed next to the studio, the capture
+        # is opened, then (schema changed) the plugins are reloaded.
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb', 'schema.luadata')))
+        self.assertEqual([calls[i] for i in range(1, len(calls) + 1)], ['open|%s|' % pcap, 'reload'])
+        window.buttons['Show dropped only']()
+        self.assertEqual(calls[len(calls)], 'apply')  # Lua tables are 1-based
+        self.assertEqual(calls[len(calls) - 1], 'filter|nanopb.validation == "dropped"')
+        self.assertIsNotNone(window.buttons['Open output folder'])
+        # The ports gen-packets picked are kept for the dissector and Generate C.
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            self.assertIn('udp:15000=demo.envelope.Envelope', handle.read())
+
+        # Same protos again: nothing to reload.
+        picker = self.picker('nanopb/Generate test packets (passed + dropped)...', title)
+        before = len(calls)
+        picker.buttons['Generate']()
+        self.assertEqual([calls[i] for i in range(before + 1, len(calls) + 1)], ['open|%s|' % pcap])
 
     def test_install_dissector_next_to_studio(self):
         self.answer('Install / update dissector', FIXTURES, 'udp:5000=demo.envelope.Envelope')
