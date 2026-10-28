@@ -245,12 +245,46 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn('unknown format', err)
 
-    def test_install_studio_writes_config(self):
+    def test_install_studio_self_contained(self):
+        config_path = os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')
+        os.makedirs(os.path.dirname(config_path))
+        with open(config_path, 'w') as handle:
+            handle.write('return {\n  protos_root = "C:\\\\my \\"protos\\"",\n  port_map = "udp:1=a.B",\n}\n')
         status, result, err = run_backend('install-studio', '--plugins-dir', self.tmp)
         self.assertEqual(status, 0, err)
-        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb_studio.lua')))
-        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
-            self.assertIn('nanopb_root', handle.read())
+        for name in ('nanopb_studio.lua', 'nanopb_any_dissector.lua'):
+            self.assertTrue(os.path.isfile(os.path.join(self.tmp, name)))
+        project = os.path.join(self.tmp, 'nanopb', 'project')
+        for rel in ('pb.h', 'pb_validate.c', 'pb_filter_macros.h', 'generator/nanopb_generator.py',
+                    'generator/proto/validate.proto', 'tools/wireshark/backend/nanopb_wireshark.py',
+                    'tools/wireshark/nanopb_any_dissector.lua.src', 'INSTALL_INFO.json'):
+            self.assertTrue(os.path.isfile(os.path.join(project, rel)), rel)
+        lua_files = [f for _, _, files in os.walk(os.path.join(self.tmp, 'nanopb'))
+                     for f in files if f.endswith('.lua')]
+        self.assertEqual(lua_files, [])
+
+        from nanopb_wireshark import read_lua_config
+        config = read_lua_config(config_path)
+        self.assertEqual(config['project'], project)
+        self.assertEqual(config['nanopb_root'], '')
+        self.assertEqual(config['protos_root'], 'C:\\my "protos"')  # kept from before
+        self.assertEqual(config['port_map'], 'udp:1=a.B')
+
+        # The copy works on its own, without the checkout.
+        out = os.path.join(self.tmp, 'out')
+        run = subprocess.run([sys.executable, os.path.join(project, 'tools', 'wireshark', 'backend',
+                                                           'nanopb_wireshark.py'),
+                              'gen-c', '--protos-root', FIXTURES, '--unit', 'envelope', '--out', out],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertTrue(run.stdout.rstrip().endswith('__EXIT__=0'), run.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(out, 'envelope', 'pb_validate.c')))
+
+    def test_install_studio_dev(self):
+        status, result, err = run_backend('install-studio', '--plugins-dir', self.tmp, '--dev')
+        self.assertEqual(status, 0, err)
+        from nanopb_wireshark import DEFAULT_NANOPB_ROOT, read_lua_config
+        config = read_lua_config(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata'))
+        self.assertEqual(config['nanopb_root'], DEFAULT_NANOPB_ROOT)
 
 
 if __name__ == '__main__':

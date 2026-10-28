@@ -54,41 +54,16 @@ LOOPBACK = socket.inet_aton('127.0.0.1')
 # ---------------------------------------------------------------------------
 
 
-def ip_checksum(data):
-    if len(data) % 2:
-        data += b'\x00'
-    total = sum(struct.unpack('!%dH' % (len(data) // 2), data))
-    while total >> 16:
-        total = (total & 0xffff) + (total >> 16)
-    return (~total) & 0xffff
+ip_checksum = nanopb_wireshark.ip_checksum
 
 
 def frame(case, index):
-    sport = SRC_PORT_BASE + index
-    if case.transport == 'udp':
-        proto = 17
-        l4 = struct.pack('!HHHH', sport, case.port, 8 + len(case.payload), 0) + case.payload
-    else:
-        proto = 6
-        header = struct.pack('!HHIIBBHHH', sport, case.port, 1000 + index, 1, 5 << 4, 0x18, 65535, 0, 0)
-        pseudo = LOOPBACK + LOOPBACK + struct.pack('!BBH', 0, proto, len(header) + len(case.payload))
-        csum = ip_checksum(pseudo + header + case.payload)
-        l4 = header[:16] + struct.pack('!H', csum) + header[18:] + case.payload
-    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(l4), index + 1, 0x4000, 64, proto, 0,
-                     LOOPBACK, LOOPBACK)
-    ip = ip[:10] + struct.pack('!H', ip_checksum(ip)) + ip[12:]
-    eth = b'\x00' * 12 + b'\x08\x00'
-    return eth + ip + l4
+    return nanopb_wireshark.ethernet_frame(case.transport, case.port, case.payload, index)
 
 
 def write_pcap(path, cases):
-    with open(path, 'wb') as handle:
-        handle.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
-        start = int(time.time())
-        for i, case in enumerate(cases):
-            data = frame(case, i)
-            handle.write(struct.pack('<IIII', start + i, 0, len(data), len(data)))
-            handle.write(data)
+    packets = [nanopb_wireshark.Packet(c.transport, c.port, c.payload) for c in cases]
+    nanopb_wireshark.write_pcap(path, packets, start=int(time.time()))
 
 
 LINK_HEADER = {0: 4, 1: 14, 101: 0, 113: 16, 228: 0}  # NULL, Ethernet, RAW, Linux SLL, IPv4
