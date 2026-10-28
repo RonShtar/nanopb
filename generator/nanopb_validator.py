@@ -1430,8 +1430,23 @@ class ItemsRuleEmitter(RuleEmitter):
         for item_rule in item_rules:
             rule_type = item_rule.get('rule')
             constraint_id = item_rule.get('constraint_id', '')
-            
-            if rule_type == RULE_MIN_LEN and pbtype == 'STRING':
+            emitted = len(code)
+
+            if rule_type == RULE_EQ and pbtype == 'STRING':
+                expected = item_rule.get('value', '')
+                if isinstance(expected, bytes):
+                    expected = expected.decode('utf-8', 'replace')
+                code += '        /* repeated.items string.const validation */\n'
+                code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
+                code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
+                code += '            if (strcmp(msg->%s[__pb_i], "%s") != 0) {\n' % (field_name, _escape_c_string(expected))
+                code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must equal specified constant");\n' % constraint_id
+                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                code += '            }\n'
+                code += '            pb_validate_context_pop_index(&ctx);\n'
+                code += '        }\n'
+
+            elif rule_type == RULE_MIN_LEN and pbtype == 'STRING':
                 value = item_rule.get('value', 0)
                 code += '        PB_VALIDATE_REPEATED_ITEMS_STR_MIN_LEN(ctx, msg, %s, %d, "%s");\n' % (
                     field_name, value, constraint_id)
@@ -1599,7 +1614,14 @@ class ItemsRuleEmitter(RuleEmitter):
                     code += '            }\n'
                     code += '            pb_validate_context_pop_index(&ctx);\n'
                     code += '        }\n'
-        
+
+            if len(code) == emitted:
+                # A declared per-item rule must never turn into no check.
+                raise ValidationRuleNotImplementedError(
+                    'validate.proto option "repeated.items.%s" on field "%s" has no C-runtime '
+                    'enforcement for this field type yet. Remove it from the .proto, or wait '
+                    'for support.' % (constraint_id, field_name))
+
         return code
 
 

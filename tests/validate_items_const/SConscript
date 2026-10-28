@@ -1,0 +1,28 @@
+# Build and run validate_items_const test suite
+# repeated.items const rules must be enforced for string, bool and numeric items.
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+pb_files = test_env.NanopbProto(["items_const", "items_const.options"])
+test_env.SideEffect("items_const_validate.c", pb_files)
+test_env.SideEffect("items_const_validate.h", pb_files)
+
+test_prog = test_env.Program(
+    ["test_items_const.c", "items_const.pb.c", "items_const_validate.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)
