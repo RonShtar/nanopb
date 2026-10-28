@@ -154,10 +154,12 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 ## 4. Tools > nanopb menu
 
-- [ ] **About** shows the plugins folder, and the protos directory = the test fixtures.
-- [ ] **List proto units** lists `envelope` and `telemetry` with their messages.
-- [ ] **Generate C (merged + validation)**, units empty, runtime `y`, validation `y`: OK; **Open output folder** shows `envelope/` and `telemetry/` with `<unit>.c`, `<unit>.h` and `pb_*.c`.
-- [ ] **Generate raw data**, unit `envelope`, messages `Envelope`, formats `bin,c,hex`, count `3`, seed `1`: OK; `envelope/data/` holds `demo_envelope_Envelope_0..2.{bin,h,hex,txt}`.
-- [ ] **Generate raw data** with unit `nope`: shows FAILED with "unknown unit(s) nope".
-- [ ] **Install or update dissector**, port map `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`: OK, then plugins reload and packets still decode.
+- [ ] There is no **Settings** item. **About** shows the plugins folder, and the last input directory = the test fixtures.
+- [ ] **List proto units**, input prefilled with the fixtures: lists `envelope` and `telemetry` with their messages.
+- [ ] **Generate C (merged + validation)**: the dialog only asks for input and output. The unit list shows `[x] envelope` and `[x] telemetry`; click `telemetry` (now `[ ]`), press **Generate**: OK; **Open output folder** shows only `envelope/` with `envelope.c`, `envelope.h` and the separate `pb*.c/.h` runtime files including `pb_validate.c`.
+- [ ] In the same unit list press **Select none**, then **Generate**: the list says "Select at least one unit." and nothing is generated.
+- [ ] **Generate raw data**, keep only `envelope`: OK; `envelope/data/` holds `demo_envelope_Envelope.{bin,h,hex,txt}`.
+- [ ] **Generate invalid raw data**, keep only `telemetry`: OK; `telemetry/data/` holds `*_invalid.*` files.
+- [ ] **Generate C** with input `nope`: shows FAILED with "is not a directory".
+- [ ] **Install or update dissector**, input prefilled, port map `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`: OK, then plugins reload and packets still decode.
 - [ ] Optional: drop one of the generated `.bin` files into a hex editor and compare with the `.hex` file; the `.txt` lists the encoded values.

@@ -164,30 +164,70 @@ class StudioTests(LuaTestCase):
         windows = self.mock.windows
         return windows[len(windows)]
 
+    def picker(self, menu, title, input_dir=FIXTURES):
+        self.answer(title, input_dir, self.out)
+        self.mock.menus[menu]()
+        window = self.last_window()
+        self.assertEqual(window.title, title + ': choose units')
+        return window
+
     def test_menus_registered(self):
         names = set(self.mock.menus.keys())
         self.assertEqual(len(names), 6)
         self.assertIn('nanopb/Generate C (merged + validation)...', names)
+        self.assertNotIn('nanopb/Settings...', names)
 
     def test_generate_c_through_backend(self):
-        self.answer('Generate C (merged, with validation)', 'envelope', 'n', 'y')
-        self.mock.menus['nanopb/Generate C (merged + validation)...']()
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
+        self.assertIn('[x] envelope', picker.text)
+        self.assertIn('[x] telemetry', picker.text)
+        picker.buttons['telemetry']()
+        self.assertIn('[ ] telemetry', picker.text)
+        picker.buttons['Generate']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
-        self.assertTrue(os.path.isfile(os.path.join(self.out, 'envelope', 'envelope.c')))
         self.assertIsNotNone(window.buttons['Open output folder'])
+        self.assertEqual(os.listdir(self.out), ['envelope'])
+        files = set(os.listdir(os.path.join(self.out, 'envelope')))
+        # One merged file for the protos + validation; the runtime stays as separate files.
+        self.assertTrue({'envelope.c', 'envelope.h', 'pb.h', 'pb_decode.c', 'pb_encode.c',
+                         'pb_validate.c', 'pb_validate.h'} <= files, files)
+        with open(os.path.join(self.out, 'envelope', 'envelope.c')) as handle:
+            self.assertIn('pb_validate_demo_envelope_Envelope', handle.read())
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            self.assertIn(self.out.replace('\\', '\\\\'), handle.read())
+
+    def test_generate_with_nothing_selected(self):
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
+        picker.buttons['Select none']()
+        windows = len(self.mock.windows)
+        picker.buttons['Generate']()
+        self.assertEqual(len(self.mock.windows), windows)  # no result window
+        self.assertIn('Select at least one unit.', picker.text)
+        self.assertFalse(os.path.exists(self.out))
 
     def test_generate_data_through_backend(self):
-        self.answer('Generate raw data', 'envelope', 'Ping', 'bin,hex', '2', '7', 'n', '', '')
-        self.mock.menus['nanopb/Generate raw data...']()
+        picker = self.picker('nanopb/Generate raw data...', 'Generate raw data')
+        picker.buttons['telemetry']()
+        picker.buttons['Generate']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
-        self.assertEqual(sorted(os.listdir(os.path.join(self.out, 'envelope', 'data'))),
-                         ['demo_payloads_Ping_0.bin', 'demo_payloads_Ping_0.hex', 'demo_payloads_Ping_0.txt',
-                          'demo_payloads_Ping_1.bin', 'demo_payloads_Ping_1.hex', 'demo_payloads_Ping_1.txt'])
+        files = os.listdir(os.path.join(self.out, 'envelope', 'data'))
+        for ext in ('.bin', '.h', '.hex', '.txt'):
+            self.assertIn('demo_payloads_Ping' + ext, files)
+        self.assertFalse(os.path.exists(os.path.join(self.out, 'telemetry')))
+
+    def test_generate_invalid_data_through_backend(self):
+        picker = self.picker('nanopb/Generate invalid raw data...', 'Generate invalid raw data')
+        picker.buttons['envelope']()
+        picker.buttons['Generate']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        files = os.listdir(os.path.join(self.out, 'telemetry', 'data'))
+        self.assertTrue(any('_invalid' in f for f in files), files)
 
     def test_install_dissector_next_to_studio(self):
-        self.answer('Install / update dissector', 'udp:5000=demo.envelope.Envelope')
+        self.answer('Install / update dissector', FIXTURES, 'udp:5000=demo.envelope.Envelope')
         self.mock.menus['nanopb/Install or update dissector...']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
@@ -198,11 +238,12 @@ class StudioTests(LuaTestCase):
             self.assertIn('udp:5000=demo.envelope.Envelope', handle.read())
 
     def test_backend_failure_is_reported(self):
-        self.answer('Generate C (merged, with validation)', 'nope', 'n', 'y')
+        missing = os.path.join(self.tmp, 'nope')
+        self.answer('Generate C (merged + validation)', missing, self.out)
         self.mock.menus['nanopb/Generate C (merged + validation)...']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('FAILED'), window.text)
-        self.assertIn('unknown unit(s) nope', window.text)
+        self.assertIn('is not a directory', window.text)
 
 
 if __name__ == '__main__':

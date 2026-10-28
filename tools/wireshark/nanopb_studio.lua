@@ -4,9 +4,14 @@
 -- validation) and encoded sample data from a directory of .proto units, and
 -- install/update nanopb_any_dissector.lua with a matching schema.
 --
+-- Every action asks only for the input (protos) and output directories, then
+-- lists the units found in the input so you can pick which ones to generate.
+--
 -- All work is done by tools/wireshark/backend/nanopb_wireshark.py in the
--- configured nanopb checkout; this file only collects input and shows output.
--- Settings are stored in nanopb/studio_config.luadata next to this file.
+-- nanopb checkout recorded by `nanopb_wireshark.py install-studio`; this file
+-- only collects input and shows output. The checkout, the Python executable and
+-- the last used directories are kept in nanopb/studio_config.luadata next to
+-- this file.
 --
 -- Works with Wireshark 3.6+ (Lua 5.2 - 5.4) on Windows and Linux.
 
@@ -14,7 +19,7 @@ if not gui_enabled() then return end
 
 if set_plugin_info then
     set_plugin_info({
-        version = "1.0.0",
+        version = "1.1.0",
         description = "nanopb code / sample data generator and dissector installer",
         repository = "https://github.com/nanopb/nanopb",
     })
@@ -38,7 +43,7 @@ local function join(...)
 end
 
 -- ---------------------------------------------------------------------------
--- Settings
+-- Stored state
 -- ---------------------------------------------------------------------------
 
 local KEYS = { "python", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map" }
@@ -79,7 +84,7 @@ local function save_config()
     mkdir(DATA_DIR)
     local f, err = io.open(CONFIG_PATH, "w")
     if not f then return false, err end
-    f:write("-- nanopb studio settings (edit via Tools > nanopb > Settings)\nreturn {\n")
+    f:write("-- nanopb studio state (written by install-studio and the Tools > nanopb dialogs)\nreturn {\n")
     for _, k in ipairs(KEYS) do
         f:write(string.format("  %s = %q,\n", k, config[k] or ""))
     end
@@ -123,7 +128,9 @@ end
 local function run_backend(args)
     if config.nanopb_root == "" or not file_exists(backend_path()) then
         return false, "nanopb project path is not set or has no tools/wireshark/backend.\n" ..
-            "Open Tools > nanopb > Settings."
+            "From the nanopb checkout run\n\n" ..
+            "    python tools/wireshark/backend/nanopb_wireshark.py install-studio\n\n" ..
+            "and reload Lua plugins (Ctrl+Shift+L)."
     end
     local parts = { quote(config.python), quote(backend_path()), "--nanopb-root", quote(config.nanopb_root) }
     for _, a in ipairs(args) do parts[#parts + 1] = quote(a) end
@@ -137,7 +144,8 @@ local function run_backend(args)
     local status = out:match("__EXIT__=(%d+)%s*$")
     out = out:gsub("\n?__EXIT__=%d+%s*$", "")
     if status == nil then
-        return false, "Backend did not run. Check the Python path in Settings.\n\n" .. cmd .. "\n\n" .. out
+        return false, "Backend did not run. Check the Python path in " .. CONFIG_PATH .. "\n\n" ..
+            cmd .. "\n\n" .. out
     end
     return status == "0", out
 end
@@ -145,6 +153,7 @@ end
 local function add_common(args)
     args[#args + 1] = "--protos-root"
     args[#args + 1] = config.protos_root
+    -- Not asked for in the dialogs; can be set by hand in the state file.
     for inc in string.gmatch(config.extra_includes or "", "[^;]+") do
         inc = inc:match("^%s*(.-)%s*$")
         if inc ~= "" then
@@ -175,14 +184,6 @@ local function show(title, ok, text, folder)
     end
 end
 
-local function require_protos()
-    if config.protos_root == "" then
-        show("nanopb", false, "Set the protos directory first (Tools > nanopb > Settings).")
-        return false
-    end
-    return true
-end
-
 local unpack_ = table.unpack or unpack
 
 -- Newer Wireshark versions accept {label, default} tables in new_dialog; fall
@@ -196,99 +197,138 @@ local function dialog(title, fields, action)
     end
 end
 
-local function yes(value)
-    value = (value or ""):lower()
-    return value == "y" or value == "yes" or value == "1" or value == "true"
+local function trim(value)
+    return ((value or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+-- ---------------------------------------------------------------------------
+-- Directory dialog and unit picker
+-- ---------------------------------------------------------------------------
+
+-- Ask for the input directory, and the output directory if `with_output`.
+-- An empty input keeps the last one used. Values of `extra` fields are passed
+-- to `action`.
+local function ask_dirs(title, with_output, extra, action)
+    local fields = { { "Input: protos directory (one subdirectory per unit)", config.protos_root } }
+    if with_output then
+        fields[#fields + 1] = { "Output directory (empty = <input>/../nanopb_out)", config.output_dir }
+    end
+    local first_extra = #fields + 1
+    for _, f in ipairs(extra or {}) do fields[#fields + 1] = f end
+    dialog(title, fields, function(...)
+        local values = { ... }
+        local input = trim(values[1])
+        if input ~= "" then config.protos_root = input end
+        if with_output then config.output_dir = trim(values[2]) end
+        if config.protos_root == "" then
+            show(title, false, "Enter the input protos directory.")
+            return
+        end
+        save_config()
+        action(unpack_(values, first_extra, #fields))
+    end)
+end
+
+local function parse_unit_names(text)
+    local list = text:match('"units"%s*:%s*%[(.-)%]')
+    local names = {}
+    for name in string.gmatch(list or "", '"(.-)"') do
+        names[#names + 1] = (name:gsub("\\\\", "\\"))
+    end
+    return names
+end
+
+-- Show the units of the input directory as a toggle list. `generate` gets the
+-- comma separated selection and returns ok, output text.
+local function pick_units(title, generate)
+    local ok, text = run_backend(add_common({ "units", "--names-only" }))
+    if not ok then
+        show(title, false, text)
+        return
+    end
+    local names = parse_unit_names(text)
+    if #names == 0 then
+        show(title, false, "No subdirectory of " .. config.protos_root .. " contains .proto files.")
+        return
+    end
+    local selected = {}
+    for _, name in ipairs(names) do selected[name] = true end
+
+    local win = TextWindow.new(title .. ": choose units")
+    local function render(note)
+        local lines = {
+            "Click a unit to select or deselect it, then press Generate.",
+            "",
+            "Input:  " .. config.protos_root,
+            "Output: " .. output_dir(),
+            "",
+        }
+        for _, name in ipairs(names) do
+            lines[#lines + 1] = (selected[name] and "  [x] " or "  [ ] ") .. name
+        end
+        if note then
+            lines[#lines + 1] = ""
+            lines[#lines + 1] = note
+        end
+        win:set(table.concat(lines, "\n"))
+    end
+    local function select_all(value)
+        for _, name in ipairs(names) do selected[name] = value end
+        render()
+    end
+    for _, name in ipairs(names) do
+        win:add_button(name, function()
+            selected[name] = not selected[name]
+            render()
+        end)
+    end
+    win:add_button("Select all", function() select_all(true) end)
+    win:add_button("Select none", function() select_all(false) end)
+    win:add_button("Generate", function()
+        local chosen = {}
+        for _, name in ipairs(names) do
+            if selected[name] then chosen[#chosen + 1] = name end
+        end
+        if #chosen == 0 then
+            render("Select at least one unit.")
+            return
+        end
+        local done, out = generate(table.concat(chosen, ","))
+        render(done and ("Generated: " .. table.concat(chosen, ", ")) or "FAILED, see the result window.")
+        show(title, done, out, output_dir())
+    end)
+    render()
 end
 
 -- ---------------------------------------------------------------------------
 -- Menu actions
 -- ---------------------------------------------------------------------------
 
-local function settings()
-    dialog("nanopb settings", {
-        { "nanopb project path (checkout with generator/)", config.nanopb_root },
-        { "Protos directory (one subdirectory per unit)", config.protos_root },
-        { "Output directory (empty = <protos>/../nanopb_out)", config.output_dir },
-        { "Extra proto include dirs (; separated)", config.extra_includes },
-        { "Python executable", config.python },
-    }, function(root, protos, out, includes, python)
-        config.nanopb_root = root or ""
-        config.protos_root = protos or ""
-        config.output_dir = out or ""
-        config.extra_includes = includes or ""
-        if python and python ~= "" then config.python = python end
-        local saved, err = save_config()
-        local notes = {}
-        if not saved then notes[#notes + 1] = "Could not save settings: " .. tostring(err) end
-        if not file_exists(backend_path()) then
-            notes[#notes + 1] = "Warning: " .. backend_path() .. " not found."
-        end
-        local ok, text = run_backend(add_common({ "units" }))
-        notes[#notes + 1] = text
-        show("nanopb settings", saved and ok, table.concat(notes, "\n\n"))
-    end)
-end
-
-local function list_units()
-    if not require_protos() then return end
-    local ok, text = run_backend(add_common({ "units" }))
-    show("nanopb units", ok, text)
-end
-
 local function gen_c()
-    if not require_protos() then return end
-    dialog("Generate C (merged, with validation)", {
-        { "Units (comma separated, empty = all)", "" },
-        { "Copy nanopb runtime sources (y/n)", "y" },
-        { "Validation code (y/n)", "y" },
-    }, function(units, runtime, validate)
-        local args = add_common({ "gen-c", "--out", output_dir() })
-        if units and units ~= "" then args[#args + 1] = "--unit"; args[#args + 1] = units end
-        if yes(runtime) then args[#args + 1] = "--with-runtime" end
-        if not yes(validate) then args[#args + 1] = "--no-validate" end
-        local ok, text = run_backend(args)
-        show("nanopb: generate C", ok, text, output_dir())
+    local title = "Generate C (merged + validation)"
+    ask_dirs(title, true, nil, function()
+        pick_units(title, function(units)
+            return run_backend(add_common({ "gen-c", "--out", output_dir(), "--unit", units }))
+        end)
     end)
 end
 
-local function gen_data()
-    if not require_protos() then return end
-    dialog("Generate raw data", {
-        { "Units (comma separated, empty = all)", "" },
-        { "Messages (comma separated, empty = all)", "" },
-        { "Formats (bin,c,hex)", "bin,c,hex" },
-        { "Samples per message", "1" },
-        { "Seed (empty = random)", "" },
-        { "Invalid data (y/n)", "n" },
-        { "Invalid: fields to violate (comma separated)", "" },
-        { "Invalid: rules to violate (comma separated)", "" },
-    }, function(units, messages, formats, count, seed, invalid, vfields, vrules)
-        local args = add_common({ "gen-data", "--out", output_dir() })
-        local function opt(flag, value)
-            if value and value ~= "" then args[#args + 1] = flag; args[#args + 1] = value end
-        end
-        opt("--unit", units)
-        opt("--messages", messages)
-        opt("--formats", formats)
-        opt("--count", count)
-        opt("--seed", seed)
-        if yes(invalid) then
-            args[#args + 1] = "--invalid"
-            for f in string.gmatch(vfields or "", "[^,%s]+") do opt("--field", f) end
-            for r in string.gmatch(vrules or "", "[^,%s]+") do opt("--rule", r) end
-        end
-        local ok, text = run_backend(args)
-        show("nanopb: generate raw data", ok, text, output_dir())
+local function gen_data(invalid)
+    local title = invalid and "Generate invalid raw data" or "Generate raw data"
+    ask_dirs(title, true, nil, function()
+        pick_units(title, function(units)
+            local args = add_common({ "gen-data", "--out", output_dir(), "--unit", units })
+            if invalid then args[#args + 1] = "--invalid" end
+            return run_backend(args)
+        end)
     end)
 end
 
 local function install_dissector()
-    if not require_protos() then return end
-    dialog("Install / update dissector", {
+    ask_dirs("Install / update dissector", false, {
         { "Port map (e.g. udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd)", config.port_map },
     }, function(port_map)
-        config.port_map = port_map or ""
+        config.port_map = trim(port_map)
         save_config()
         local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR,
             "--port-map", config.port_map })
@@ -306,22 +346,29 @@ local function install_dissector()
     end)
 end
 
+local function list_units()
+    ask_dirs("List proto units", false, nil, function()
+        local ok, text = run_backend(add_common({ "units" }))
+        show("nanopb units", ok, text)
+    end)
+end
+
 local function about()
     show("nanopb studio", true, table.concat({
         "Plugins folder: " .. PLUGINS_DIR,
-        "Settings file: " .. CONFIG_PATH,
-        "nanopb project: " .. (config.nanopb_root ~= "" and config.nanopb_root or "(not set)"),
-        "Protos directory: " .. (config.protos_root ~= "" and config.protos_root or "(not set)"),
-        "Output directory: " .. (output_dir() ~= "" and output_dir() or "(not set)"),
+        "State file: " .. CONFIG_PATH,
+        "nanopb project: " .. (config.nanopb_root ~= "" and config.nanopb_root or "(not set, run install-studio)"),
+        "Last input directory: " .. (config.protos_root ~= "" and config.protos_root or "(none)"),
+        "Last output directory: " .. (output_dir() ~= "" and output_dir() or "(none)"),
         "Python: " .. config.python,
         "",
         "See tools/wireshark/README.md in the nanopb repository.",
     }, "\n"))
 end
 
-register_menu("nanopb/Settings...", settings, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/List proto units", list_units, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate C (merged + validation)...", gen_c, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/Generate raw data...", gen_data, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/Generate raw data...", function() gen_data(false) end, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/Generate invalid raw data...", function() gen_data(true) end, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Install or update dissector...", install_dissector, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/List proto units...", list_units, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/About", about, MENU_TOOLS_UNSORTED)

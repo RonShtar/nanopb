@@ -34,7 +34,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         for unit in ('envelope', 'telemetry'):
             unit_dir = os.path.join(self.tmp, unit)
-            self.assertEqual(sorted(os.listdir(unit_dir)), [unit + '.c', unit + '.h'])
+            generated = [f for f in os.listdir(unit_dir) if not f.startswith('pb')]
+            self.assertEqual(sorted(generated), [unit + '.c', unit + '.h'])
             with open(os.path.join(unit_dir, unit + '.h')) as handle:
                 header = handle.read()
             with open(os.path.join(unit_dir, unit + '.c')) as handle:
@@ -58,6 +59,26 @@ class BackendTests(unittest.TestCase):
         for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(google_protobuf_Any',
                        'pb_validate_demo_envelope_Envelope'):
             self.assertIn(symbol, source)
+
+    def test_gen_c_copies_runtime_as_separate_files(self):
+        status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
+                                          '--out', self.tmp)
+        self.assertEqual(status, 0, err)
+        files = set(os.listdir(os.path.join(self.tmp, 'telemetry')))
+        self.assertEqual(files, {'telemetry.c', 'telemetry.h', 'pb.h', 'pb_common.h', 'pb_common.c',
+                                 'pb_encode.h', 'pb_encode.c', 'pb_decode.h', 'pb_decode.c',
+                                 'pb_validate.h', 'pb_validate.c', 'pb_filter_macros.h'})
+
+    def test_gen_c_no_runtime(self):
+        status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
+                                          '--out', self.tmp, '--no-runtime')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(set(os.listdir(os.path.join(self.tmp, 'telemetry'))), {'telemetry.c', 'telemetry.h'})
+
+    def test_units_names_only(self):
+        status, result, err = run_backend('units', '--protos-root', FIXTURES, '--names-only')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'], ['envelope', 'telemetry'])
 
     def test_gen_c_with_runtime_and_without_validation(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',

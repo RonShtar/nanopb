@@ -41,7 +41,7 @@ my_protos/
 ```
 
 - Imports may be relative to the unit (`import "payloads.proto";`) or to the protos directory (`import "envelope/payloads.proto";`).
-- Extra include directories can be set in Settings.
+- Extra include directories can be added as `extra_includes = "dir1;dir2"` in `<plugins>/nanopb/studio_config.luadata`.
 - Imported files from outside the unit, such as `google/protobuf/any.proto`, are generated and merged into the unit too. Each unit is self-contained.
 - If no `google/protobuf/any.options` is found on the include path, `Any` gets static storage of `type_url` 128 / `value` 256 bytes (`backend/include/google/protobuf/any.options`). Your own file takes precedence.
 
@@ -56,34 +56,38 @@ my_protos/
    | Windows | `%APPDATA%\Wireshark\plugins` |
    | Linux | `~/.local/lib/wireshark/plugins` |
 
-2. Install the studio plugin. Either let the backend copy it and pre-fill the Python and project paths:
+2. Install the studio plugin with the Python that has the generator dependencies. This records that Python and this checkout in `<plugins>/nanopb/studio_config.luadata`:
 
        python tools/wireshark/backend/nanopb_wireshark.py install-studio
 
-   (add `--plugins-dir <folder>` if your folder differs), or copy `tools/wireshark/nanopb_studio.lua` into that folder yourself. On Linux a symlink also works.
+   (add `--plugins-dir <folder>` if your folder differs).
 
 3. Restart Wireshark, or use **Analyze > Reload Lua Plugins** (Ctrl+Shift+L).
 
-4. Open **Tools > nanopb > Settings...** and set:
-   - **nanopb project path**: this repository's root (the folder containing `generator/`)
-   - **Protos directory**: the directory with your unit subdirectories
-   - **Output directory**: where generated files go (empty = `<protos>/../nanopb_out`)
-   - **Extra proto include dirs**: `;`-separated, optional
-   - **Python executable**: e.g. `python`, `python3` or a full path
+There is no settings dialog. Each **Tools > nanopb** action asks for:
 
-   Saving runs **List proto units**, so you see straight away whether everything resolves. Settings are stored in `<plugins>/nanopb/studio_config.luadata`.
+- **Input**: the protos directory with your unit subdirectories
+- **Output directory**: where generated files go (empty = `<input>/../nanopb_out`)
+
+Both fields start with the last values you used. The generate actions then
+open a list of the units found in the input. Click a unit to select or
+deselect it (all units start selected), or use **Select all** / **Select none**.
+Then press **Generate**.
 
 ## Generating C code
 
-**Tools > nanopb > Generate C (merged + validation)...**
+**Tools > nanopb > Generate C (merged + validation)...**: input, output, then pick the units.
 
-- **Units**: comma-separated, or empty for all.
-- **Copy nanopb runtime sources (y/n)**: also copies `pb.h`, `pb_common.*`, `pb_encode.*`, `pb_decode.*` and, with validation, `pb_validate.*`, so the output folder builds on its own.
-- **Validation code (y/n)**: includes the code produced by the validate plugin (see `docs/validation.md`).
+Each unit gets its own `<output>/<unit>/` folder:
 
-The result is `<output>/<unit>/<unit>.c` and `<unit>.h`. They contain every
-`.pb.c/.pb.h` and `_validate.c/.h` of the unit and its dependencies, in
-dependency order, with the includes between them removed. Drag the folder into
+- `<unit>.c` / `<unit>.h`: **all protos of the unit merged into one file, with
+  validation**. They contain every `.pb.c/.pb.h` and `_validate.c/.h` (from the
+  validate plugin, see `docs/validation.md`) of the unit and its dependencies,
+  in dependency order, with the includes between them removed.
+- The nanopb runtime as separate, unmodified files: `pb.h`, `pb_common.*`,
+  `pb_encode.*`, `pb_decode.*`, `pb_validate.*` and `pb_filter_macros.h`.
+
+The folder builds on its own. Drag it into
 your firmware project, compile `<unit>.c` (plus the runtime `.c` files), and
 add the folder to the include path, because the generated code uses
 `#include <pb.h>`:
@@ -92,15 +96,16 @@ add the folder to the include path, because the generated code uses
 
 ## Generating raw data
 
-**Tools > nanopb > Generate raw data...** writes encoded sample messages from
+**Tools > nanopb > Generate raw data...** (input, output, then pick the units) writes one encoded sample of every top-level message, from
 `generator/nanopb_data_generator.py` (see `docs/DATA_GENERATOR.md`). The values
 are random, but they respect your validation rules and nanopb limits
 (`max_size`, `max_count`, ...).
 
-- **Messages**: short (`Envelope`) or full (`demo.envelope.Envelope`) names; empty = all top-level messages.
-- **Formats**: any of `bin`, `c`, `hex`.
-- **Samples per message** and **Seed**: give reproducible series (sample *i* uses seed + *i*).
-- **Invalid data**: generates messages that break a validation rule. You can choose which fields and rules to violate.
+**Tools > nanopb > Generate invalid raw data...** does the same with messages
+that break a validation rule (`*_invalid.*`).
+
+To choose messages, formats, counts, seeds or which field/rule to violate, use
+`gen-data` on the [command line](#command-line).
 
 Output goes to `<output>/<unit>/data/`, named after the C type (`demo_envelope_Envelope.*`):
 
@@ -117,7 +122,7 @@ Output goes to `<output>/<unit>/data/`, named after the C type (`demo_envelope_E
 On versions without `reload_lua_plugins()`, press Ctrl+Shift+L yourself. Run it
 again whenever your `.proto` files change.
 
-The dialog asks for a **port map**, for example `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`.
+The dialog asks for the input directory and a **port map**, for example `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`.
 
 The dissector picks the root message of a packet in this order:
 
@@ -221,7 +226,7 @@ It goes through these steps:
 5. It dissects the capture with `tshark` and checks every packet.
 
 With `--install`, the stress schema and port map go into your plugins folder,
-and the studio settings point at the stress protos. The ports are
+and the studio's last input directory points at the stress protos. The ports are
 `udp:5100=fleet.envelope.Envelope`, `tcp:5101=fleet.telemetry.Frame` and
 `udp:5102=fleet.status.Status`, the heuristic `Any` port is `udp/5199`, and
 Decode As uses `udp/5103` → `fleet.cmd.Command`. Then reload Lua plugins and
@@ -234,8 +239,8 @@ Every menu action maps to a backend subcommand. All of them accept
 `--protos-root`, `-I <extra include>`, and `--nanopb-root` (default: this
 checkout).
 
-    python tools/wireshark/backend/nanopb_wireshark.py units             --protos-root P
-    python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--with-runtime] [--no-validate]
+    python tools/wireshark/backend/nanopb_wireshark.py units             --protos-root P [--names-only]
+    python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--no-runtime] [--no-validate]
     python tools/wireshark/backend/nanopb_wireshark.py gen-data          --protos-root P --out O [--unit U] [--messages A,B] [--formats bin,c,hex] [--count N] [--seed S] [--invalid [--field F] [--rule R]]
     python tools/wireshark/backend/nanopb_wireshark.py schema            --protos-root P --out schema.luadata
     python tools/wireshark/backend/nanopb_wireshark.py install-dissector --protos-root P [--plugins-dir D] [--port-map MAP]
@@ -245,7 +250,7 @@ Output is JSON followed by a final `__EXIT__=<status>` line, which the Lua side 
 
 ## Troubleshooting
 
-- **"Backend did not run"**: the Python path in Settings is wrong, or points to the Windows Store stub.
+- **"Backend did not run"**: the `python` path in `<plugins>/nanopb/studio_config.luadata` is wrong, or points to the Windows Store stub. Run `install-studio` again with the right Python.
 - **`protoc failed`**: run the same subcommand in a terminal to see the full protoc error. Also check that `grpcio-tools` and `protobuf` are installed for *that* Python.
 - **Menu or dissector missing**: check **Help > About Wireshark > Plugins** for load errors, and make sure the files are in the *Personal Lua Plugins* folder.
 - **`pb_callback_t` in the generated header**: a string, bytes or repeated field has no `max_size` / `max_count` in its `.options` file.

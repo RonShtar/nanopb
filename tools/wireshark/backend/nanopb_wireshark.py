@@ -12,7 +12,8 @@ Subcommands (all print a JSON summary on success, errors go to stderr):
 
   units             list units and their messages
   gen-c             generate one merged <unit>.c / <unit>.h per unit,
-                    including validation code
+                    including validation code, next to separate copies of
+                    the nanopb runtime (pb_*.c / pb_*.h, pb_validate.*)
   gen-data          generate sample encoded messages (.bin / C array / hex)
   schema            write the Lua schema used by nanopb_any_dissector.lua
   install-dissector copy the dissector and its schema into a plugins dir
@@ -260,7 +261,7 @@ def cmd_gen_c(args):
         finally:
             shutil.rmtree(gendir, ignore_errors=True)
         files = [header, source]
-        if args.with_runtime:
+        if not args.no_runtime:
             runtime = RUNTIME_FILES + (VALIDATE_RUNTIME_FILES if validate else ())
             for fname in runtime:
                 src = os.path.join(args.nanopb_root, fname)
@@ -531,6 +532,8 @@ def cmd_install_studio(args):
 
 
 def cmd_units(args):
+    if args.names_only:
+        return {'protos_root': os.path.abspath(args.protos_root), 'units': find_units(args.protos_root)}
     result = []
     for name in find_units(args.protos_root):
         unit = Unit(args.protos_root, name, args.include)
@@ -559,12 +562,15 @@ def build_parser():
 
     p = sub.add_parser('units', help='list units and messages')
     protos_args(p)
+    p.add_argument('--names-only', action='store_true', help='only list unit names (no proto compile)')
     p.set_defaults(func=cmd_units)
 
     p = sub.add_parser('gen-c', help='generate merged C code with validation')
     protos_args(p, unit=True)
     p.add_argument('--out', required=True, help='output directory (one subdirectory per unit)')
-    p.add_argument('--with-runtime', action='store_true', help='also copy the nanopb runtime sources')
+    p.add_argument('--no-runtime', action='store_true', help='do not copy the nanopb runtime sources')
+    # Copying the runtime used to be opt-in; the flag is still accepted.
+    p.add_argument('--with-runtime', action='store_true', help=argparse.SUPPRESS)
     p.add_argument('--no-validate', action='store_true', help='skip validation code')
     p.set_defaults(func=cmd_gen_c)
 
