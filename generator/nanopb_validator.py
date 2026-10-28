@@ -1500,12 +1500,7 @@ class ItemsRuleEmitter(RuleEmitter):
             elif rule_type == RULE_ENUM_DEFINED:
                 # Previously dropped without a trace, so repeated enum fields
                 # accepted undefined values even with items.enum.defined_only.
-                enum_vals = []
-                ctype = getattr(field, 'ctype', None)
-                for e in getattr(proto_file, 'enums', []) or []:
-                    if e.names == ctype or str(e.names) == str(ctype):
-                        enum_vals = [int(v) for (_, v) in getattr(e, 'values', [])]
-                        break
+                enum_vals = _enum_values(proto_file, getattr(field, 'ctype', None), constraint_id)
                 if enum_vals:
                     arr_values = ', '.join(str(v) for v in enum_vals)
                     code += '        /* repeated.items enum.defined_only validation */\n'
@@ -1804,6 +1799,25 @@ class InNotInRuleEmitter(RuleEmitter):
                         '        }\n') % (condition_str, rule_ir.constraint_id, values_str)
 
 
+def _enum_values(proto_file: Any, ctype: Any, constraint_id: str) -> List[int]:
+    """Values of the enum ``ctype``, defined in ``proto_file`` or one of its dependencies.
+
+    Raises ValidationRuleNotImplementedError when the enum cannot be found, so a
+    declared defined_only rule never silently turns into no check at all.
+    """
+    for e in getattr(proto_file, 'enums', []) or []:
+        if str(e.names) == str(ctype):
+            return [int(v) for (_, v) in getattr(e, 'values', [])]
+    dep = (getattr(proto_file, 'dependencies', None) or {}).get(str(ctype))
+    if dep is not None and hasattr(dep, 'values') and hasattr(dep, 'names'):
+        return [int(v) for (_, v) in dep.values]
+    raise ValidationRuleNotImplementedError(
+        'validate.proto option "%s" names enum "%s", whose values are not known '
+        'while generating %s. Generate the .proto that defines it in the same '
+        'invocation, or remove the rule.'
+        % (constraint_id, ctype, getattr(getattr(proto_file, 'fdesc', None), 'name', '?')))
+
+
 class EnumDefinedRuleEmitter(RuleEmitter):
     """Emits C code for enum defined_only rule."""
     
@@ -1811,39 +1825,22 @@ class EnumDefinedRuleEmitter(RuleEmitter):
         if not rule_ir.rule.params.get('value', True):
             return ''
         
-        try:
-            enum_vals = []
-            field = rule_ir.context.field
-            ctype = getattr(field, 'ctype', None)
-            
-            for e in getattr(proto_file, 'enums', []) or []:
-                try:
-                    if e.names == ctype or str(e.names) == str(ctype):
-                        enum_vals = [int(v) for (_, v) in getattr(e, 'values', [])]
-                        break
-                except Exception:
-                    continue
-            
-            if enum_vals:
-                arr_values = ', '.join(str(v) for v in enum_vals)
-                field_name = rule_ir.field_name
-                ctx = rule_ir.context
-                
-                if ctx.is_oneof and not ctx.is_anonymous:
-                    field_access = '%s.%s' % (ctx.oneof_name, field_name)
-                    return ('    static const int __pb_%s_vals[] = { %s };\n'
-                            '    if (!pb_validate_enum_defined_only((int)msg->%s, __pb_%s_vals, (pb_size_t)(sizeof(__pb_%s_vals)/sizeof(__pb_%s_vals[0])))) {\n'
-                            '        PB_VALIDATE_RECORD(ctx, "%s", "Value must be a defined enum value");\n'
-                            '        if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
-                            '    }\n') % (field_name, arr_values, field_access, field_name, field_name, field_name, rule_ir.constraint_id)
-                else:
-                    return ('    static const int __pb_%s_vals[] = { %s };\n'
-                            '    PB_VALIDATE_ENUM_DEFINED_ONLY(ctx, msg, %s, __pb_%s_vals, "%s");\n'
-                           ) % (field_name, arr_values, field_name, field_name, rule_ir.constraint_id)
-        except Exception:
-            pass
-        
-        return ''
+        field = rule_ir.context.field
+        enum_vals = _enum_values(proto_file, getattr(field, 'ctype', None), rule_ir.constraint_id)
+        arr_values = ', '.join(str(v) for v in enum_vals)
+        field_name = rule_ir.field_name
+        ctx = rule_ir.context
+
+        if ctx.is_oneof and not ctx.is_anonymous:
+            field_access = '%s.%s' % (ctx.oneof_name, field_name)
+            return ('    static const int __pb_%s_vals[] = { %s };\n'
+                    '    if (!pb_validate_enum_defined_only((int)msg->%s, __pb_%s_vals, (pb_size_t)(sizeof(__pb_%s_vals)/sizeof(__pb_%s_vals[0])))) {\n'
+                    '        PB_VALIDATE_RECORD(ctx, "%s", "Value must be a defined enum value");\n'
+                    '        if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
+                    '    }\n') % (field_name, arr_values, field_access, field_name, field_name, field_name, rule_ir.constraint_id)
+        return ('    static const int __pb_%s_vals[] = { %s };\n'
+                '    PB_VALIDATE_ENUM_DEFINED_ONLY(ctx, msg, %s, __pb_%s_vals, "%s");\n'
+               ) % (field_name, arr_values, field_name, field_name, rule_ir.constraint_id)
 
 
 class RuleEmitterRegistry:

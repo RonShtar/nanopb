@@ -1,0 +1,9 @@
+/* Enum defined in a file of its own, used with defined_only from paint.proto. */
+syntax = "proto3";
+
+package x;
+
+enum Color {
+    RED = 0;
+    GREEN = 1;
+}

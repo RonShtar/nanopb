@@ -1,0 +1,30 @@
+# Build and run validate_enum_import test suite
+# enum.defined_only must be enforced for enums defined in an imported .proto.
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+colors_files = test_env.NanopbProto("colors")
+paint_files = test_env.NanopbProto(["paint", "paint.options"])
+test_env.SideEffect("paint_validate.c", paint_files)
+test_env.SideEffect("paint_validate.h", paint_files)
+test_env.Depends(paint_files, colors_files)
+
+test_prog = test_env.Program(
+    ["test_validate_enum_import.c", "colors.pb.c", "paint.pb.c", "paint_validate.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)
