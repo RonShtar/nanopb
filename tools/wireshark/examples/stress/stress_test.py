@@ -61,7 +61,8 @@ def step(text):
 
 def generate(out, count, seed):
     step('gen-c: merge unit %s into one .c/.h' % UNIT)
-    status, result, err = run_backend('gen-c', '--protos-root', PROTOS, '--unit', UNIT, '--out', out)
+    status, result, err = run_backend('gen-c', '--protos-root', PROTOS, '--unit', UNIT, '--out', out,
+                                      '--with-runtime')
     if status:
         raise SystemExit(err)
     unit = result['units'][0]

@@ -258,7 +258,15 @@ local function parse_unit_names(text)
     for name in string.gmatch(list or "", '"(.-)"') do
         names[#names + 1] = (name:gsub("\\\\", "\\"))
     end
-    return names
+    -- "merged_into": { "shared": [ "fleet" ] } -> merged["shared"] = "fleet"
+    local merged = {}
+    local object = text:match('"merged_into"%s*:%s*(%b{})') or ""
+    for name, users in string.gmatch(object, '"([^"]+)"%s*:%s*%[(.-)%]') do
+        local list_users = {}
+        for user in string.gmatch(users, '"(.-)"') do list_users[#list_users + 1] = user end
+        merged[name] = table.concat(list_users, ", ")
+    end
+    return names, merged
 end
 
 -- Show the units of the input directory as a toggle list. `generate` gets the
@@ -270,25 +278,29 @@ local function pick_units(title, generate)
         show(title, false, text)
         return
     end
-    local names = parse_unit_names(text)
+    local names, merged = parse_unit_names(text)
     if #names == 0 then
         show(title, false, "No subdirectory of " .. config.protos_root .. " contains .proto files.")
         return
     end
+    -- A unit imported by another is already merged into that one's .c/.h;
+    -- generating both would link the same code twice.
     local selected = {}
-    for _, name in ipairs(names) do selected[name] = true end
+    for _, name in ipairs(names) do selected[name] = merged[name] == nil end
 
     local win = TextWindow.new(title .. ": choose units")
     local function render(note)
         local lines = {
             "Click a unit to select or deselect it, then press Generate.",
+            "Wireshark does not respond for a few seconds while it generates.",
             "",
             "Input:  " .. config.protos_root,
             "Output: " .. output_dir(),
             "",
         }
         for _, name in ipairs(names) do
-            lines[#lines + 1] = (selected[name] and "  [x] " or "  [ ] ") .. name
+            local note = merged[name] and ("   (already merged into " .. merged[name] .. ")") or ""
+            lines[#lines + 1] = (selected[name] and "  [x] " or "  [ ] ") .. name .. note
         end
         if note then
             lines[#lines + 1] = ""

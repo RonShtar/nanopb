@@ -302,7 +302,7 @@ def checklist_markdown(cases):
             '- [ ] **Generate C (merged + validation)**: the dialog only asks for input and output. The unit list '
             'shows `[x] envelope` and `[x] telemetry`; click `telemetry` (now `[ ]`), press **Generate**: OK, and '
             'the result lists `demo_envelope_Envelope_filter_udp`; **Open output folder** shows only `envelope/` '
-            'with `envelope.c`, `envelope.h` and the separate `pb*.c/.h` runtime files including `pb_validate.c`.',
+            'with just `envelope.c` and `envelope.h`.',
             '- [ ] In the same unit list press **Select none**, then **Generate**: the list says '
             '"Select at least one unit." and nothing is generated.',
             '- [ ] **Generate test packets**, both units: the result says how many packets are expected PASSED and '

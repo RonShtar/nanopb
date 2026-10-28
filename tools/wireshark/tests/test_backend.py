@@ -223,7 +223,7 @@ class BackendTests(unittest.TestCase):
         for unit, entries in by_unit.items():
             out = os.path.join(self.tmp, 'c_' + unit)
             status, result, err = run_backend('gen-c', '--protos-root', root, '--unit', unit, '--out', out,
-                                              '--no-filter')
+                                              '--no-filter', '--with-runtime')
             self.assertEqual(status, 0, err)
             unit_dir = os.path.join(out, unit)
             with open(os.path.join(unit_dir, unit + '.h')) as handle:
@@ -305,7 +305,7 @@ class BackendTests(unittest.TestCase):
     @unittest.skipIf(find_cc() is None, 'no C compiler (gcc/clang/cc, CC, or pip install ziglang)')
     def test_gen_c_output_builds_and_filters(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
-                                          '--out', self.tmp)
+                                          '--out', self.tmp, '--with-runtime')
         self.assertEqual(status, 0, err)
         unit_dir = os.path.join(self.tmp, 'telemetry')
         # device_name has min_len 1: without it the packet is rejected.
@@ -331,18 +331,18 @@ class BackendTests(unittest.TestCase):
         run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
         self.assertEqual(run.stdout.split(), ['0', '-1'])
 
-    def test_gen_c_copies_runtime_as_separate_files(self):
+    def test_gen_c_with_runtime_copies_it_as_separate_files(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
-                                          '--out', self.tmp)
+                                          '--out', self.tmp, '--with-runtime')
         self.assertEqual(status, 0, err)
         files = set(os.listdir(os.path.join(self.tmp, 'telemetry')))
         self.assertEqual(files, {'telemetry.c', 'telemetry.h', 'pb.h', 'pb_common.h', 'pb_common.c',
                                  'pb_encode.h', 'pb_encode.c', 'pb_decode.h', 'pb_decode.c',
                                  'pb_validate.h', 'pb_validate.c', 'pb_filter_macros.h'})
 
-    def test_gen_c_no_runtime(self):
+    def test_gen_c_writes_only_generated_files_by_default(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
-                                          '--out', self.tmp, '--no-runtime')
+                                          '--out', self.tmp)
         self.assertEqual(status, 0, err)
         self.assertEqual(set(os.listdir(os.path.join(self.tmp, 'telemetry'))), {'telemetry.c', 'telemetry.h'})
 
@@ -350,6 +350,21 @@ class BackendTests(unittest.TestCase):
         status, result, err = run_backend('units', '--protos-root', FIXTURES, '--names-only')
         self.assertEqual(status, 0, err)
         self.assertEqual(result['units'], ['envelope', 'telemetry'])
+        self.assertEqual(result['merged_into'], {})
+
+    def test_units_imported_by_another_unit(self):
+        status, result, err = run_backend('units', '--protos-root', STRESS_PROTOS, '--names-only')
+        self.assertEqual(status, 0, err)
+        # fleet imports "shared/units.proto": fleet.c already contains shared's code.
+        self.assertEqual(result['merged_into'], {'shared': ['fleet']})
+
+    def test_gen_c_predicts_filter_modes(self):
+        from nanopb_wireshark import predicted_mode, Unit, DEFAULT_NANOPB_ROOT, setup_nanopb
+        setup_nanopb(DEFAULT_NANOPB_ROOT)
+        unit = Unit(STRESS_PROTOS, 'fleet', [])
+        self.assertEqual(predicted_mode(unit, 'fleet.envelope.Envelope'), 'single')  # Any + oneof
+        self.assertEqual(predicted_mode(unit, 'fleet.telemetry.Frame'), 'single')    # two Any
+        self.assertEqual(predicted_mode(unit, 'fleet.status.Status'), 'auto')
 
     def test_gen_c_with_runtime_and_without_validation(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
@@ -461,7 +476,7 @@ class BackendTests(unittest.TestCase):
                               'gen-c', '--protos-root', FIXTURES, '--unit', 'envelope', '--out', out],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertTrue(run.stdout.rstrip().endswith('__EXIT__=0'), run.stdout)
-        self.assertTrue(os.path.isfile(os.path.join(out, 'envelope', 'pb_validate.c')))
+        self.assertEqual(sorted(os.listdir(os.path.join(out, 'envelope'))), ['envelope.c', 'envelope.h'])
 
     def test_install_studio_dev(self):
         status, result, err = run_backend('install-studio', '--plugins-dir', self.tmp, '--dev')

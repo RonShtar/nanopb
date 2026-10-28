@@ -421,14 +421,22 @@ class StudioTests(LuaTestCase):
         self.assertTrue(window.text.startswith('OK'), window.text)
         self.assertIsNotNone(window.buttons['Open output folder'])
         self.assertEqual(os.listdir(self.out), ['envelope'])
-        files = set(os.listdir(os.path.join(self.out, 'envelope')))
-        # One merged file for the protos + validation; the runtime stays as separate files.
-        self.assertTrue({'envelope.c', 'envelope.h', 'pb.h', 'pb_decode.c', 'pb_encode.c',
-                         'pb_validate.c', 'pb_validate.h'} <= files, files)
+        # Only the generated files: all protos of the unit merged, with validation.
+        self.assertEqual(sorted(os.listdir(os.path.join(self.out, 'envelope'))), ['envelope.c', 'envelope.h'])
         with open(os.path.join(self.out, 'envelope', 'envelope.c')) as handle:
             self.assertIn('pb_validate_demo_envelope_Envelope', handle.read())
         with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
             self.assertIn(self.out.replace('\\', '\\\\'), handle.read())
+
+    def test_unit_merged_into_another_starts_deselected(self):
+        stress = os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
+                             input_dir=stress)
+        self.assertIn('[x] fleet', picker.text)
+        self.assertIn('[ ] shared   (already merged into fleet)', picker.text)
+        picker.buttons['Generate']()
+        self.assertTrue(self.last_window().text.startswith('OK'), self.last_window().text)
+        self.assertEqual(os.listdir(self.out), ['fleet'])
 
     def test_generate_with_nothing_selected(self):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')

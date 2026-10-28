@@ -12,8 +12,8 @@ Subcommands (all print a JSON summary on success, errors go to stderr):
 
   units             list units and their messages
   gen-c             generate one merged <unit>.c / <unit>.h per unit,
-                    including validation code, next to separate copies of
-                    the nanopb runtime (pb_*.c / pb_*.h, pb_validate.*)
+                    including validation code and packet filters
+                    (--with-runtime also copies pb_*.c / pb_*.h)
   gen-data          generate sample encoded messages (.bin / C array / hex)
   gen-packets       one capture with valid (PASSED) and invalid (DROPPED)
                     packets of every message, plus a JSON manifest
@@ -268,6 +268,34 @@ def plugin_error(text):
     return text.strip()
 
 
+def predicted_mode(unit, entry):
+    """Filter mode nanopb-validate will accept for ``entry``, decided up front.
+
+    Dispatch needs exactly one Any field (with an any.in allow-list) or one
+    oneof. Anything else is ambiguous, and the filter decodes and validates
+    the entrypoint itself ('single'). Predicting this saves a generator run
+    per entrypoint; run_generator_with_filters still falls back if wrong.
+    """
+
+    msg = None
+    for fdesc in unit.fds.file:
+        prefix = fdesc.package + '.' if fdesc.package else ''
+        for candidate in fdesc.message_type:
+            if prefix + candidate.name == entry:
+                msg = candidate
+    if msg is None:
+        return 'auto'
+    any_fields = [f for f in msg.field if f.type_name.lstrip('.') == 'google.protobuf.Any']
+    oneofs = set(f.oneof_index for f in msg.field if f.HasField('oneof_index') and not f.proto3_optional)
+    if len(any_fields) + len(oneofs) > 1 or any(f.label == 3 for f in any_fields):
+        return 'single'
+    if any_fields:
+        rules = field_rules(any_fields[0])
+        if rules is None or not rules.HasField('any') or not list(getattr(rules.any, 'in')):
+            return 'single'
+    return 'auto'
+
+
 def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
     """Run the generator with as many of ``entries`` as the filter generator accepts.
 
@@ -278,9 +306,13 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
     Returns (log, {message: mode}, {message: error}).
     """
 
+    def mode_of(spec):
+        name, _, mode = spec.partition(':')
+        return name, mode or 'auto'
+
     try:
         log = run_generator(nanopb_root, unit, outdir, validate, entries)
-        return log, dict((e, 'auto') for e in entries), {}
+        return log, dict(mode_of(e) for e in entries), {}
     except BackendError:
         if not entries:
             raise
@@ -296,16 +328,17 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
             shutil.rmtree(trial, ignore_errors=True)
 
     modes, errors, specs = {}, {}, []
-    for entry in entries:
-        error = accepted(entry)
+    for spec in entries:
+        name, mode = mode_of(spec)
+        error = accepted(spec)
         if error is None:
-            modes[entry] = 'auto'
-            specs.append(entry)
-        elif accepted(entry + ':single') is None:
-            modes[entry] = 'single'
-            specs.append(entry + ':single')
+            modes[name] = mode
+            specs.append(spec)
+        elif mode != 'single' and accepted(name + ':single') is None:
+            modes[name] = 'single'
+            specs.append(name + ':single')
         else:
-            errors[entry] = error
+            errors[name] = error
     shutil.rmtree(outdir, ignore_errors=True)
     os.makedirs(outdir)
     return run_generator(nanopb_root, unit, outdir, validate, specs), modes, errors
@@ -371,17 +404,18 @@ def cmd_gen_c(args):
         entries, source_of_entries = [], None
         if validate and not args.no_filter:
             entries, source_of_entries = unit_entrypoints(unit, args.port_map)
+        specs = [e + (':single' if predicted_mode(unit, e) == 'single' else '') for e in entries]
         gendir = tempfile.mkdtemp(prefix='nanopb_ws_gen_')
         try:
             log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
-                                                                   validate, entries)
+                                                                   validate, specs)
             header, source, parts = merge_unit(unit, gendir, outdir, validate)
         finally:
             shutil.rmtree(gendir, ignore_errors=True)
         with open(os.path.join(outdir, header)) as handle:
             filters = re.findall(r'^int (\w+_filter_udp)\(', handle.read(), re.M)
         files = [header, source]
-        if not args.no_runtime:
+        if args.with_runtime:
             runtime = RUNTIME_FILES + (VALIDATE_RUNTIME_FILES if validate else ())
             for fname in runtime:
                 src = os.path.join(args.nanopb_root, fname)
@@ -1328,9 +1362,32 @@ def cmd_install_studio(args):
             'mode': 'dev (uses %s)' % config['nanopb_root'] if args.dev else 'self-contained'}
 
 
+IMPORT_RE = re.compile(r'^\s*import\s+(?:public\s+|weak\s+)?"([^"]+)"', re.M)
+
+
+def merged_into(protos_root, units):
+    """{unit: [units that import it]}: their merged .c/.h already contain it.
+
+    Found by scanning import lines, so it needs no protoc run.
+    """
+
+    result = {}
+    for name in units:
+        unit_dir = os.path.join(protos_root, name)
+        for proto in unit_protos(unit_dir):
+            with open(os.path.join(unit_dir, proto), encoding='utf-8', errors='replace') as handle:
+                for path in IMPORT_RE.findall(handle.read()):
+                    other = path.split('/', 1)[0]
+                    if '/' in path and other != name and other in units and name not in result.get(other, []):
+                        result.setdefault(other, []).append(name)
+    return result
+
+
 def cmd_units(args):
     if args.names_only:
-        return {'protos_root': os.path.abspath(args.protos_root), 'units': find_units(args.protos_root)}
+        units = find_units(args.protos_root)
+        return {'protos_root': os.path.abspath(args.protos_root), 'units': units,
+                'merged_into': merged_into(args.protos_root, units)}
     result = []
     for name in find_units(args.protos_root):
         unit = Unit(args.protos_root, name, args.include)
@@ -1365,9 +1422,10 @@ def build_parser():
     p = sub.add_parser('gen-c', help='generate merged C code with validation')
     protos_args(p, unit=True)
     p.add_argument('--out', required=True, help='output directory (one subdirectory per unit)')
-    p.add_argument('--no-runtime', action='store_true', help='do not copy the nanopb runtime sources')
-    # Copying the runtime used to be opt-in; the flag is still accepted.
-    p.add_argument('--with-runtime', action='store_true', help=argparse.SUPPRESS)
+    p.add_argument('--with-runtime', action='store_true',
+                   help='also copy the nanopb runtime (pb*.c/.h, pb_validate.*) next to the generated files')
+    # Not copying is the default now; the old flag is still accepted.
+    p.add_argument('--no-runtime', action='store_true', help=argparse.SUPPRESS)
     p.add_argument('--no-validate', action='store_true', help='skip validation code')
     p.add_argument('--port-map', default=None,
                    help='messages mapped here get a packet filter (default: unreferenced root messages)')

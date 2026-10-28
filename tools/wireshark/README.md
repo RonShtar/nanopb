@@ -84,14 +84,18 @@ selected), or use **Select all** / **Select none**, then press **Generate**.
 
 ### Generating C code
 
-Each unit gets its own `<output>/<unit>/` folder:
+Each unit gets `<output>/<unit>/<unit>.c` and `<unit>.h`, and nothing else:
+**all protos of the unit merged into one file, with validation**. They contain
+every `.pb.c/.pb.h` and `_validate.c/.h` (from the validate plugin, see
+`docs/validation.md`) of the unit and of everything it imports, in dependency
+order, with the includes between them removed.
 
-- `<unit>.c` / `<unit>.h`: **all protos of the unit merged into one file, with
-  validation**. They contain every `.pb.c/.pb.h` and `_validate.c/.h` (from the
-  validate plugin, see `docs/validation.md`) of the unit and its dependencies,
-  in dependency order, with the includes between them removed.
-- The nanopb runtime as separate, unmodified files: `pb.h`, `pb_common.*`,
-  `pb_encode.*`, `pb_decode.*`, `pb_validate.*` and `pb_filter_macros.h`.
+A unit that another unit imports (e.g. `shared`, imported by `fleet` as
+`shared/units.proto`) is already inside the importer's files, so the unit list
+starts with it deselected and marked "already merged into fleet". Generating
+both and linking them together would define the same symbols twice.
+
+Generating takes a few seconds per unit; Wireshark does not respond meanwhile.
 
 The merged header exports, for every message,
 
@@ -113,11 +117,15 @@ as a field or Any payload). An entrypoint whose dispatch would be ambiguous
 (e.g. two `Any` fields) gets a `single`-mode filter: decode and validate the
 entrypoint itself. The result window lists the exported filters.
 
-The folder builds on its own. Drag it into your firmware project, compile
-`<unit>.c` plus the runtime `.c` files, and add the folder to the include path,
-because the generated code uses `#include <pb.h>`:
+Drag `<unit>.c` and `<unit>.h` into a firmware project that already has the
+nanopb runtime (`pb.h`, `pb_common.*`, `pb_encode.*`, `pb_decode.*`,
+`pb_validate.*`, `pb_filter_macros.h` from this repository) on its include
+path; the generated code uses `#include <pb.h>`:
 
-    gcc -I out/envelope -c out/envelope/*.c
+    gcc -I out/envelope -I path/to/nanopb -c out/envelope/envelope.c
+
+`gen-c --with-runtime` on the command line also copies those runtime files
+next to the generated ones, so the folder builds on its own.
 
 ### Generating test packets
 
@@ -304,7 +312,7 @@ Every menu action maps to a backend subcommand. All of them accept
 `--protos-root`, `-I <extra include>`, and `--nanopb-root` (default: the
 checkout or installed copy containing the script).
 
-    python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--port-map MAP] [--no-filter] [--no-runtime] [--no-validate]
+    python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--port-map MAP] [--no-filter] [--with-runtime] [--no-validate]
     python tools/wireshark/backend/nanopb_wireshark.py gen-packets       --protos-root P --out O [--unit U] [--port-map MAP] [--any-port 15999] [--valid 2] [--max-invalid 40] [--seed 1] [--format pcapng|pcap] [--plugins-dir D | --no-install]
     python tools/wireshark/backend/nanopb_wireshark.py install-dissector --protos-root P [--plugins-dir D] [--port-map MAP]
     python tools/wireshark/backend/nanopb_wireshark.py install-studio    [--plugins-dir D] [--dev]
