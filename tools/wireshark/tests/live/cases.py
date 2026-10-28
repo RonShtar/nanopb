@@ -28,12 +28,14 @@ DECODE_AS_MESSAGE = 'demo.payloads.Ping'
 
 class Case(object):
     def __init__(self, name, transport, port, payload, expect, experts=(), filter=None,
-                 how='port', note=''):
+                 how='port', note='', verdict='passed'):
         self.name = name
         self.transport = transport
         self.port = port
         self.payload = payload
-        self.expect = list(expect)
+        # The validation verdict the nanopb packet filter would reach.
+        self.verdict = verdict
+        self.expect = list(expect) + ['Validation: ' + verdict.upper()]
         self.experts = list(experts)
         self.filter = filter
         # 'port' = port map, 'heuristic' = Any heuristic, 'decode_as' = needs
@@ -72,7 +74,8 @@ CASES = [
          filter='nanopb.type_url contains "Command"'),
     Case('Nested Any: Envelope -> Any(Envelope -> Any(Ping))', 'udp', 5000, _nested_any(),
          ['value: Any -> demo.envelope.Envelope', 'value: Any -> demo.payloads.Ping', 'id: 42'],
-         filter='nanopb.demo.payloads.Ping.id == 42'),
+         experts=['body: any.in - must be type_url in'], filter='nanopb.demo.payloads.Ping.id == 42',
+         verdict='dropped', note='body only allows Ping and Command (any.in), not an Envelope.'),
     Case('Telemetry, every scalar kind (TCP)', 'tcp', 7000, _telemetry(),
          ['nanopb Protobuf: demo.telemetry.Telemetry', 'seq: 1', 'timestamp_us: 1234567890123',
           'source: s1', 'device_name: dev', 'unit: UNIT_CELSIUS (1)', 'value: 21.5', 'offset: -3',
@@ -86,10 +89,12 @@ CASES = [
     Case('Any with a type that is not in the schema', 'udp', 5000,
          f_varint(1, 1) + f_bytes(2, any_of('other.Thing', b'\x08\x01')),
          ['body (2): google.protobuf.Any -> other.Thing', 'value: 2 bytes (type other.Thing not in schema)'],
-         experts=['Any type not in schema: other.Thing'], filter='nanopb.any.unknown_type'),
+         experts=['Any type not in schema: other.Thing', 'body: any.in - must be type_url in'],
+         filter='nanopb.any.unknown_type', verdict='dropped'),
     Case('Malformed: length runs past the end', 'udp', 5000, f_varint(1, 1) + b'\x12\x10\x01',
          ['nanopb Protobuf: demo.envelope.Envelope', 'version: 1'],
-         experts=['Length exceeds message'], filter='nanopb.malformed'),
+         experts=['Length exceeds message', 'decode.malformed - length exceeds message'],
+         filter='nanopb.malformed', verdict='dropped'),
     Case('Plain Ping on port %d (Decode As)' % DECODE_AS_PORT, 'udp', DECODE_AS_PORT, f_varint(1, 5),
          ['nanopb Protobuf: demo.payloads.Ping', 'id: 5'],
          filter='nanopb.demo.payloads.Ping.id == 5', how='decode_as',

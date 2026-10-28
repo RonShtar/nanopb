@@ -48,6 +48,7 @@ HEURISTIC_PORT = 5199   # bare google.protobuf.Any of any other message
 DECODE_AS_PORT = 5103   # plain fleet.cmd.Command, only with Decode As
 DECODE_AS_MESSAGE = 'fleet.cmd.Command'
 URL = 'type.googleapis.com/'
+ANY_VALUE_MAX_SIZE = 512  # protos/google/protobuf/any.options
 
 
 def step(text):
@@ -318,7 +319,7 @@ def showcase_cases(out):
              filter='nanopb.fleet.cmd.Command.id == 77', how='decode_as'),
         Case('Malformed Envelope (truncated nested Frame)', udp[0], udp[1], env_frame.SerializeToString()[:40],
              ['nanopb Protobuf: fleet.envelope.Envelope'], experts=['Length exceeds message'],
-             filter='nanopb.malformed'),
+             filter='nanopb.malformed', verdict='dropped'),
     ]
 
 
@@ -334,8 +335,13 @@ def sample_cases(samples):
         else:
             url = (URL + msg).encode()
             payload = b'\x0a' + varint(len(url)) + url + b'\x12' + varint(len(data)) + data
+            # The project's any.options gives Any.value 512 bytes: a nanopb
+            # receiver cannot decode a bigger payload, so it is dropped.
+            too_big = len(data) > ANY_VALUE_MAX_SIZE
             cases.append(Case('sample %s (as Any)' % ident, 'udp', HEURISTIC_PORT, payload,
-                              ['value: Any -> %s' % msg], filter='nanopb.message == "%s"' % msg, how='heuristic'))
+                              ['value: Any -> %s' % msg], filter='nanopb.message == "%s"' % msg, how='heuristic',
+                              experts=['value: nanopb.max_size'] if too_big else (),
+                              verdict='dropped' if too_big else 'passed'))
     return cases
 
 

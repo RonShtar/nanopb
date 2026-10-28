@@ -28,17 +28,20 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
   - [ ] `id: 7`
   - [ ] `last_ping (3): demo.payloads.Ping`
   - [ ] `id: 9`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.type_url contains "Command"` shows this packet
 
 ### Packet 2: Nested Any: Envelope -> Any(Envelope -> Any(Ping))
 
 - Transport: UDP port 5000 (port map)
+- Note: body only allows Ping and Command (any.in), not an Envelope.
 - The tree contains:
   - [ ] `value: Any -> demo.envelope.Envelope`
   - [ ] `value: Any -> demo.payloads.Ping`
   - [ ] `id: 42`
-  - [ ] no expert info from nanopb
+  - [ ] `Validation: DROPPED`
+  - [ ] expert info `body: any.in - must be type_url in`
 - [ ] Display filter `nanopb.demo.payloads.Ping.id == 42` shows this packet
 
 ### Packet 3: Telemetry, every scalar kind (TCP)
@@ -59,6 +62,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
   - [ ] `blob: 0102`
   - [ ] `ratio: 0.25`
   - [ ] `healthy: true`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.demo.telemetry.Telemetry.device_name == "dev" && nanopb.demo.telemetry.Reading.offset == -3` shows this packet
 
@@ -70,6 +74,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
   - [ ] `nanopb Protobuf: google.protobuf.Any`
   - [ ] `value: Any -> demo.payloads.Ping`
   - [ ] `id: 99`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.demo.payloads.Ping.id == 99` shows this packet
 
@@ -79,7 +84,9 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `body (2): google.protobuf.Any -> other.Thing`
   - [ ] `value: 2 bytes (type other.Thing not in schema)`
+  - [ ] `Validation: DROPPED`
   - [ ] expert info `Any type not in schema: other.Thing`
+  - [ ] expert info `body: any.in - must be type_url in`
 - [ ] Display filter `nanopb.any.unknown_type` shows this packet
 
 ### Packet 6: Malformed: length runs past the end
@@ -88,7 +95,9 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.envelope.Envelope`
   - [ ] `version: 1`
+  - [ ] `Validation: DROPPED`
   - [ ] expert info `Length exceeds message`
+  - [ ] expert info `decode.malformed - length exceeds message`
 - [ ] Display filter `nanopb.malformed` shows this packet
 
 ### Packet 7: Plain Ping on port 6001 (Decode As)
@@ -98,6 +107,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.payloads.Ping`
   - [ ] `id: 5`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.demo.payloads.Ping.id == 5` shows this packet
 
@@ -107,6 +117,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.message == "demo.envelope.Envelope"` shows this packet
 
@@ -116,6 +127,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.message == "demo.envelope.Envelope"` shows this packet
 
@@ -125,6 +137,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.message == "demo.envelope.Envelope"` shows this packet
 
@@ -134,6 +147,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.message == "demo.envelope.Envelope"` shows this packet
 
@@ -143,6 +157,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - The tree contains:
   - [ ] `nanopb Protobuf: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
+  - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
 - [ ] Display filter `nanopb.message == "demo.envelope.Envelope"` shows this packet
 

@@ -8,11 +8,13 @@ replace a check in a real Wireshark (see tests/live).
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
 
-from helpers import FIXTURES, REPO_ROOT, TESTS_DIR, TOOL_DIR, f_bytes, f_varint, run_backend
+from helpers import (FIXTURES, REPO_ROOT, TESTS_DIR, TOOL_DIR, any_of, f_bytes, f_fixed32, f_fixed64, f_sint,
+                     f_varint, run_backend, varint)
 
 sys.path.insert(0, os.path.join(TESTS_DIR, 'live'))
 import cases as live_cases  # noqa: E402
@@ -112,6 +114,208 @@ class DissectorTests(LuaTestCase):
         text = self.route('udp', 5000, f_varint(1, 1) + f_varint(15, 77) + f_bytes(14, f_varint(1, 2)))
         self.assertIn('field_15: 77', text)
         self.assertIn('field 14: 2 bytes', text)
+
+
+RULES_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules')
+RULES_PORT = 5300
+NOW = 1700000000
+
+
+def inner(code=1, tag='t-a'):
+    return f_varint(1, code) + f_bytes(2, tag)
+
+
+def envelope(body=b'', inner_msg=None, at=1000, extra=b''):
+    """A valid rules.Envelope (small=1 in the oneof) unless parts are replaced."""
+
+    data = f_bytes(1, inner() if inner_msg is None else inner_msg) if inner_msg is not False else b''
+    data += body if body else f_varint(6, 1)
+    data += extra
+    if at is not None:
+        data += f_bytes(8, f_varint(1, at))
+    return data
+
+
+VALID_NUMBERS = f_fixed64(7, 'Q', 10)
+VALID_STRINGS = (f_bytes(1, 'ab') + f_bytes(2, 'a@b.c') + f_bytes(7, 'a') + f_bytes(8, 'ok!') + f_bytes(9, 'v1')
+                 + f_bytes(10, b'\x01') + f_bytes(11, b'\xca\xfe') + f_bytes(12, b'\x01'))
+
+
+class ValidationTests(LuaTestCase):
+    """Dissector verdicts on the rules fixture, against the semantics of pb_validate."""
+
+    def setUp(self):
+        super(ValidationTests, self).setUp()
+        status, _, err = run_backend('install-dissector', '--protos-root', RULES_PROTOS, '--plugins-dir', self.tmp,
+                                     '--port-map', 'udp:%d=rules.Envelope' % RULES_PORT)
+        self.assertEqual(status, 0, err)
+        self.mock.now = NOW
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        self.proto = self.mock.protos['nanopb']
+
+    def verdict(self, data):
+        tree = self.mock.tree()
+        pinfo = self.mock.pinfo(PORT_TYPE['udp'], RULES_PORT)
+        self.proto.dissector(self.mock.tvb(data), pinfo, tree)
+        text = self.mock.render(tree)
+        problems = re.findall(r'^    (\S+): ([\w.]+) - ', text, re.M)
+        return ('dropped' if 'Validation: DROPPED' in text else 'passed'), problems, text, pinfo.cols.info.value
+
+    def assertPasses(self, data):
+        verdict, problems, text, _ = self.verdict(data)
+        self.assertEqual(verdict, 'passed', text)
+
+    def assertDrops(self, data, path, rule):
+        verdict, problems, text, _ = self.verdict(data)
+        self.assertEqual(verdict, 'dropped', text)
+        self.assertIn((path, rule), problems, text)
+
+    def numbers(self, *fields):
+        return envelope(body=f_bytes(3, VALID_NUMBERS + b''.join(fields)))
+
+    def strings(self, *fields):
+        return envelope(body=f_bytes(4, VALID_STRINGS + b''.join(fields)))
+
+    def lists(self, *fields):
+        return envelope(body=f_bytes(5, f_varint(1, 1) + b''.join(fields)))
+
+    def test_valid_envelope_passes(self):
+        verdict, _, text, info = self.verdict(envelope())
+        self.assertEqual(verdict, 'passed', text)
+        self.assertTrue(info.endswith('[PASSED]'), info)
+        self.assertRegex(text, r'Validation: PASSED \(\d+ checks\)')
+
+    def test_presence(self):
+        self.assertDrops(envelope(inner_msg=False), 'inner', 'required')
+        self.assertDrops(envelope(inner_msg=inner(code=0)), 'inner.code', 'uint32.gte')
+        # optional field: absent is fine, present is checked
+        self.assertPasses(envelope())
+        self.assertDrops(envelope(extra=f_varint(2, 4)), 'opt', 'uint32.gte')
+        self.assertPasses(envelope(extra=f_varint(2, 5)))
+        # oneof arm is checked only when selected
+        self.assertDrops(envelope(body=f_varint(6, 4)), 'small', 'uint32.lte')
+
+    def test_implicit_fields_are_checked_at_their_default(self):
+        # x64 (fixed64 gte 10) is absent, so it is 0 and fails, as in the C struct.
+        self.assertDrops(envelope(body=f_bytes(3, b'')), 'numbers.x64', 'fixed64.gte')
+        self.assertPasses(self.numbers())
+
+    def test_numbers(self):
+        self.assertDrops(self.numbers(f_varint(1, -10)), 'numbers.i32', 'int32.gt')
+        self.assertDrops(self.numbers(f_sint(2, 13)), 'numbers.s32', 'sint32.not_in')
+        self.assertDrops(self.numbers(f_varint(3, 3)), 'numbers.u32', 'uint32.in')
+        self.assertPasses(self.numbers(f_varint(4, -5000000000)))
+        self.assertDrops(self.numbers(f_varint(4, -5000000001)), 'numbers.i64', 'int64.gte')
+        self.assertPasses(self.numbers(f_varint(5, 9000000000000000000)))
+        self.assertDrops(self.numbers(f_varint(5, (1 << 64) - 1)), 'numbers.u64', 'uint64.lte')
+        self.assertDrops(self.numbers(f_sint(6, -1)), 'numbers.s64', 'sint64.not_in')
+        self.assertPasses(self.numbers(f_sint(6, -(1 << 63))))
+        self.assertDrops(self.numbers(f_fixed32(8, 'i', 1)), 'numbers.sf32', 'sfixed32.lte')
+        self.assertDrops(self.numbers(f_fixed64(10, 'd', -1.5)), 'numbers.dbl', 'double.gt')
+        self.assertDrops(self.numbers(f_varint(11, 1)), 'numbers.flag', 'bool.const')
+        self.assertDrops(self.numbers(f_varint(12, 2)), 'numbers.level', 'enum.not_in')
+        self.assertDrops(self.numbers(f_varint(12, 5)), 'numbers.level', 'enum.defined_only')
+
+    def test_float_constants_are_float32(self):
+        # C compares a float with (float)0.1, so 0.1f itself passes.
+        self.assertPasses(self.numbers(f_fixed32(9, 'f', 0.1)))
+        self.assertDrops(self.numbers(f_fixed32(9, 'f', 0.10001)), 'numbers.ratio', 'float.lte')
+        self.assertPasses(self.lists(f_bytes(6, struct.pack('<ff', 0.1, -3.0))))
+        self.assertDrops(self.lists(f_bytes(6, struct.pack('<ff', 0.0, 0.2))), 'lists.temps[1]', 'float.lte')
+
+    def test_strings(self):
+        self.assertPasses(self.strings())
+        self.assertDrops(envelope(body=f_bytes(4, b'')), 'strings.name', 'string.min_len')
+        self.assertDrops(self.strings(f_bytes(1, 'abcdefghijk')), 'strings.name', 'string.max_len')
+        # C sees the string up to the first NUL: "ab" is short enough.
+        self.assertPasses(self.strings(f_bytes(1, b'ab\x00cdefghijkl')))
+        self.assertDrops(self.strings(f_bytes(2, 'a..b@c')), 'strings.email', 'string.email')
+        self.assertPasses(self.strings(f_bytes(2, 'a@b')))
+        self.assertDrops(self.strings(f_bytes(3, '-bad.example')), 'strings.host', 'string.hostname')
+        self.assertPasses(self.strings(f_bytes(3, 'a-1.example')))
+        self.assertDrops(self.strings(f_bytes(4, '1.2.3.256')), 'strings.ip4', 'string.ipv4')
+        self.assertPasses(self.strings(f_bytes(5, '1::')))
+        self.assertPasses(self.strings(f_bytes(5, '::ffff:1.2.3.4')))
+        self.assertDrops(self.strings(f_bytes(5, '1:2:')), 'strings.ip6', 'string.ipv6')
+        self.assertDrops(self.strings(f_bytes(5, '1::2::3')), 'strings.ip6', 'string.ipv6')
+        self.assertPasses(self.strings(f_bytes(6, 'fe80::1')))
+        self.assertDrops(self.strings(f_bytes(6, 'host')), 'strings.addr', 'string.ip')
+        self.assertDrops(self.strings(f_bytes(7, 'd')), 'strings.code', 'string.in')
+        self.assertDrops(self.strings(f_bytes(8, 'okay')), 'strings.note', 'string.suffix')
+        self.assertDrops(self.strings(f_bytes(8, 'no!')), 'strings.note', 'string.contains')
+        self.assertDrops(self.strings(f_bytes(8, 'ok\xe9!')), 'strings.note', 'string.ascii')
+        self.assertDrops(self.strings(f_bytes(9, 'v2')), 'strings.version', 'string.const')
+
+    def test_bytes(self):
+        self.assertDrops(self.strings(f_bytes(10, b'\x02')), 'strings.blob', 'bytes.prefix')
+        self.assertDrops(self.strings(f_bytes(10, b'\x01\x00\x00\x00\x00')), 'strings.blob', 'bytes.max_len')
+        # bytes keep embedded NULs
+        self.assertPasses(self.strings(f_bytes(10, b'\x01\x00')))
+        self.assertDrops(self.strings(f_bytes(11, b'\xca')), 'strings.magic', 'bytes.const')
+        self.assertDrops(self.strings(f_bytes(12, b'\x03')), 'strings.kind', 'bytes.in')
+
+    def test_repeated(self):
+        self.assertDrops(envelope(body=f_bytes(5, b'')), 'lists.nums', 'repeated.min_items')
+        self.assertDrops(self.lists(f_varint(1, 1)), 'lists.nums[1]', 'repeated.unique')
+        self.assertDrops(self.lists(f_bytes(1, varint(2) + varint((1 << 64) - 1))), 'lists.nums[2]', 'int32.gte')
+        self.assertDrops(self.lists(f_bytes(2, '')), 'lists.words[0]', 'string.min_len')
+        self.assertDrops(self.lists(f_varint(3, 1), f_varint(3, 7)), 'lists.levels[1]', 'enum.defined_only')
+        self.assertDrops(self.lists(f_bytes(5, inner()), f_bytes(5, inner(code=100))), 'lists.inners[1].code',
+                         'uint32.lte')
+        pairs = b''.join(f_bytes(4, f_bytes(1, k) + f_varint(2, 1)) for k in ('a', 'b', 'c'))
+        self.assertDrops(self.lists(pairs), 'lists.counts', 'map.max_pairs')
+
+    def test_any(self):
+        self.assertPasses(envelope(extra=f_bytes(7, any_of('rules.Inner', inner()))))
+        self.assertDrops(envelope(extra=f_bytes(7, any_of('rules.Numbers', b''))), 'extra', 'any.in')
+        bad_payload = envelope(extra=f_bytes(7, any_of('rules.Inner', inner(code=0))))
+        self.assertDrops(bad_payload, 'extra<rules.Inner>.code', 'uint32.gte')
+        self.proto.pref_values['validate_any'] = False
+        self.assertPasses(bad_payload)
+
+    def test_timestamp_uses_capture_time(self):
+        self.assertPasses(envelope(at=NOW - 1))
+        self.assertDrops(envelope(at=NOW), 'at', 'timestamp.lt_now')
+
+    def test_nanopb_decode_failures(self):
+        self.assertDrops(self.strings(f_bytes(1, 'x' * 16)), 'strings.name', 'nanopb.max_size')
+        five = b''.join(f_varint(1, n) for n in (2, 3, 4, 5, 6))
+        self.assertDrops(self.lists(five), 'lists.nums', 'nanopb.max_count')
+        self.assertDrops(envelope(body=f_bytes(6, b'\x01')), 'small', 'decode.wire_type')
+        self.assertDrops(self.numbers(f_varint(1, 1 << 40)), 'numbers.i32', 'decode.int_range')
+        _, problems, text, info = self.verdict(envelope()[:-1])
+        self.assertIn('[DROPPED decode.malformed', info)
+
+    def test_validation_pref_off(self):
+        self.proto.pref_values['validate'] = False
+        _, _, text, info = self.verdict(envelope(body=f_varint(6, 4)))
+        self.assertNotIn('Validation', text)
+        self.assertNotIn('[', info)
+
+    def test_info_column_and_fields(self):
+        verdict, _, text, info = self.verdict(envelope(body=f_varint(6, 4)))
+        self.assertEqual(info, 'nanopb rules.Envelope (%d bytes) [DROPPED uint32.lte small]'
+                         % len(envelope(body=f_varint(6, 4))))
+        self.assertIn('!nanopb.validation.violation: small: uint32.lte - must be <= 3 (got 4)', text)
+        self.assertIn('Field: small', text)
+
+
+class UnenforcedRulesTests(LuaTestCase):
+    def test_not_checked_rules_never_drop(self):
+        status, _, err = run_backend('install-dissector', '--protos-root',
+                                     os.path.join(os.path.dirname(FIXTURES), 'rules_unenforced'),
+                                     '--plugins-dir', self.tmp, '--port-map', 'udp:5400=unenforced.Form')
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        proto = self.mock.protos['nanopb']
+        tree = self.mock.tree()
+        # name "AB" breaks the pattern but not min_len; no oneof arm and no name for "requires".
+        proto.dissector(self.mock.tvb(f_bytes(1, 'AB')), self.mock.pinfo(PORT_TYPE['udp'], 5400), tree)
+        text = self.mock.render(tree)
+        self.assertIn('Validation: PASSED', text)
+        for line in ('Not checked: unenforced.Form: message.requires', 'Not checked: name: string.pattern',
+                     'Not checked: phone: oneof_required', 'Not checked: extra: map.no_sparse'):
+            self.assertIn(line, text)
 
 
 class PcapSelfCheck(LuaTestCase):

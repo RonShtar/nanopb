@@ -15,6 +15,7 @@ local function raw(x) if type(x) == "table" then return x.v end return math.toin
 UInt64 = setmetatable({}, { __call = function(_, n) return u64(math.tointeger(n or 0)) end })
 Int64 = setmetatable({}, { __call = function(_, n) return i64(math.tointeger(n or 0)) end })
 function Int64.fromhex(h) return i64(math.tointeger(tonumber(h, 16) or 0) or 0) end
+function UInt64.fromhex(h) return u64(math.tointeger(tonumber(h, 16) or 0) or 0) end
 
 function U64:bor(o) return u64(self.v | raw(o)) end
 function U64:band(o) return u64(self.v & raw(o)) end
@@ -53,6 +54,7 @@ function Range:le_float() return (string.unpack(#self.s == 8 and "<d" or "<f", s
 function Range:le_uint64() return u64((string.unpack("<i8", self.s))) end
 function Range:le_int64() return i64((string.unpack("<i8", self.s))) end
 function Range:string() return self.s end
+function Range:raw() return self.s end
 function Range:bytes() return ByteArray.new(self.s) end
 function Range:len() return #self.s end
 
@@ -168,7 +170,7 @@ end }
 function M.pinfo(port_type, port)
     local info = { value = "" }
     function info:set(v) self.value = v end
-    return { port_type = port_type, match_uint = port, dst_port = port, src_port = 40000,
+    return { port_type = port_type, match_uint = port, dst_port = port, src_port = 40000, abs_ts = M.now or os.time(),
              cols = { protocol = "", info = info } }
 end
 
