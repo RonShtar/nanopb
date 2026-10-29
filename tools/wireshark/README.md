@@ -29,12 +29,12 @@ Each subdirectory of the protos directory that contains `.proto` files is a
 
 ```
 my_protos/
-  telemetry/            -> telemetry.c + telemetry.h
+  telemetry/            -> telemetry.pb.c/.h + telemetry_validate.c/.h
     common.proto
     common.options
     telemetry.proto
     telemetry.options
-  envelope/             -> envelope.c + envelope.h
+  envelope/             -> envelope.pb.c/.h + envelope_validate.c/.h
     envelope.proto      (import "payloads.proto"; import "google/protobuf/any.proto";)
     payloads.proto
 ```
@@ -77,18 +77,25 @@ selected), or use **Select all** / **Select none**, then press **Generate**.
 
 | Menu | Result |
 |------|--------|
-| Generate C (merged + validation) | `<output>/<unit>/<unit>.c/.h` plus the nanopb runtime |
+| Generate C (merged + validation) | `<output>/<unit>/<unit>.pb.c/.h` and `<unit>_validate.c/.h` |
 | Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark |
 | Install or update dissector | the dissector and schema, for real traffic |
 | About | paths, Python, port map |
 
 ### Generating C code
 
-Each unit gets `<output>/<unit>/<unit>.c` and `<unit>.h`, and nothing else:
-**all protos of the unit merged into one file, with validation**. They contain
-every `.pb.c/.pb.h` and `_validate.c/.h` (from the validate plugin, see
-`docs/validation.md`) of the unit and of everything it imports, in dependency
-order, with the includes between them removed.
+Each unit gets four files in `<output>/<unit>/`, and nothing else. All protos
+of the unit, and everything they import, are merged in dependency order, with
+the includes between them removed:
+
+| file | contents |
+|------|----------|
+| `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the packet filters `<Msg>_filter_udp` / `_tcp` and their core |
+| `<unit>_validate.h` / `<unit>_validate.c` | every validator `pb_validate_<msg>()` (all `_validate.h`/`_validate.c` from the validate plugin, see `docs/validation.md`) |
+
+`<unit>_validate.h` includes `<unit>.pb.h`; `<unit>.pb.c` includes
+`<unit>_validate.h` because the filters call the validators. Without
+`--no-validate` you always add all four files to your project.
 
 A unit that another unit imports (e.g. `shared`, imported by `fleet` as
 `shared/units.proto`) is already inside the importer's files, so the unit list
@@ -97,14 +104,14 @@ both and linking them together would define the same symbols twice.
 
 Generating takes a few seconds per unit; Wireshark does not respond meanwhile.
 
-The merged header exports, for every message,
+`<unit>_validate.h` exports, for every message,
 
 ```c
-bool pb_validate_<msg>(const <msg> *msg, pb_violations_t *violations);
+bool pb_validate_<msg>(const <msg> *msg, pb_violations_t *violations);  /* violations may be NULL */
 ```
 
-and, for each **protocol entrypoint**, a packet filter that decodes,
-validates and returns `0` (accept) or `-1` (drop):
+and `<unit>.pb.h`, for each **protocol entrypoint**, a packet filter that
+decodes, validates and returns `0` (accept) or `-1` (drop):
 
 ```c
 int <Msg>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
@@ -117,12 +124,22 @@ as a field or Any payload). An entrypoint whose dispatch would be ambiguous
 (e.g. two `Any` fields) gets a `single`-mode filter: decode and validate the
 entrypoint itself. The result window lists the exported filters.
 
-Drag `<unit>.c` and `<unit>.h` into a firmware project that already has the
-nanopb runtime (`pb.h`, `pb_common.*`, `pb_encode.*`, `pb_decode.*`,
-`pb_validate.*`, `pb_filter_macros.h` from this repository) on its include
-path; the generated code uses `#include <pb.h>`:
+Drag the four files into a firmware project that already has the nanopb
+runtime (`pb.h`, `pb_common.*`, `pb_encode.*`, `pb_decode.*`, `pb_validate.*`,
+`pb_filter_macros.h` from this repository) on its include path; the generated
+code uses `#include <pb.h>`:
 
-    gcc -I out/envelope -I path/to/nanopb -c out/envelope/envelope.c
+    gcc -I out/envelope -I path/to/nanopb -c out/envelope/envelope.pb.c out/envelope/envelope_validate.c
+
+The result window also prints, per unit, the smallest validation buffers that
+fit its schema, e.g. `-DPB_VALIDATE_MAX_PATH_DEPTH=2
+-DPB_VALIDATE_MAX_PATH_LENGTH=19` for the stress `fleet` unit (the defaults are
+16 and 128). A validator reports paths relative to its own message, so a path
+is at most a field name plus an array index. These shrink `pb_violations_t`
+(2.3 KB by default) and the per-validator context; they are optional and must
+be the same for every file of the build. For what else costs time and stack
+on the hot path, and the build switches that matter, see
+`docs/validation_performance.md`.
 
 `gen-c --with-runtime` on the command line also copies those runtime files
 next to the generated ones, so the folder builds on its own.
@@ -290,9 +307,9 @@ One command runs everything:
 
 It goes through these steps:
 
-1. `gen-c` merges all 36 generated files into `nanopb_stress_out/fleet/fleet.c` and `fleet.h`, and adds the nanopb runtime.
+1. `gen-c` merges all 36 generated files into `nanopb_stress_out/fleet/fleet.pb.c/.h` and `fleet_validate.c/.h`, and adds the nanopb runtime.
 2. `gen-data` writes samples for all 16 messages (`--count N` per message).
-3. It compiles `fleet.c` and the runtime with `-std=c11 -pedantic -Wall -Wextra -Werror -Wconversion -Wcast-qual`. Then a generated C program decodes, validates and re-encodes every sample. nanopb always encodes repeated scalars packed, so samples with unpacked fields are compared by decoded content, not bytes. The compiler comes from `CC`, `gcc`/`clang`, or `pip install ziglang`.
+3. It compiles `fleet.pb.c`, `fleet_validate.c` and the runtime with `-std=c11 -pedantic -Wall -Wextra -Werror -Wconversion -Wcast-qual`. Then a generated C program decodes, validates and re-encodes every sample. nanopb always encodes repeated scalars packed, so samples with unpacked fields are compared by decoded content, not bytes. The compiler comes from `CC`, `gcc`/`clang`, or `pip install ziglang`.
 4. It writes `nanopb_stress_out/stress.pcap`, and lists each packet with its expected tree in `stress_packets.txt`. The capture has:
    - 10 hand-made packets: a Frame with 3 `Any` readings, a map and a Timestamp; a `oneof` command; a proto2 status; `Any` recursion 4 levels deep; heuristic; Decode As; malformed;
    - every sample as a packet. Sample types without their own port go on the heuristic port, wrapped in an `Any` (samples larger than the project's 512-byte `Any.value` are expected to be DROPPED).
