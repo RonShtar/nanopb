@@ -1255,16 +1255,31 @@ class FilterOptions(object):
     happens to use internally.
     """
 
-    __slots__ = ('filter_message', 'filter_mode', 'filter_payloads')
+    __slots__ = ('filter_messages', 'filter_mode', 'filter_payloads', 'entry_modes')
 
-    def __init__(self, filter_message=None, filter_mode='auto', filter_payloads=()):
-        self.filter_message = filter_message
+    def __init__(self, filter_message=None, filter_mode='auto', filter_payloads=(),
+                 filter_messages=None, entry_modes=None):
+        if filter_messages is None:
+            filter_messages = (filter_message,) if filter_message else ()
+        self.filter_messages = tuple(filter_messages)
         self.filter_mode = filter_mode
         self.filter_payloads = tuple(filter_payloads)
+        # Per-entrypoint modes from "--filter=pkg.Msg:single;...".
+        self.entry_modes = dict(entry_modes or {})
+
+    @property
+    def filter_message(self):
+        """The entrypoint, when exactly one was requested (else the first)."""
+        return self.filter_messages[0] if self.filter_messages else None
 
     @property
     def wants_filter(self):
-        return bool(self.filter_message)
+        return bool(self.filter_messages)
+
+    def for_entry(self, name):
+        """Options describing just one of the requested entrypoints."""
+        return FilterOptions(name, self.entry_modes.get(name, self.filter_mode),
+                             self.filter_payloads)
 
 
 #: Options owned by this plugin.  Everything else in the argument list is handed
@@ -1325,7 +1340,9 @@ def split_own_options(args):
 
 def build_filter_options(raw):
     """Validate the raw strings collected by :func:`split_own_options`."""
-    filter_message = raw.get('filter_message') or None
+    # ';' separates entrypoints and payload types, because protoc already
+    # claims ',' for separating plugin options.
+    # An entrypoint may carry its own mode: "pkg.Msg:single".
     filter_mode = raw.get('filter_mode', 'auto') or 'auto'
     payloads = raw.get('filter_payloads') or ''
 
@@ -1335,11 +1352,41 @@ def build_filter_options(raw):
             "--filter-mode must be one of %s, got: '%s'"
             % ('|'.join(allowed_modes), filter_mode))
 
-    # ';' separates payload types, because protoc already claims ',' for
-    # separating plugin options.
+    messages = []
+    entry_modes = {}
+    for item in (raw.get('filter_message') or '').split(';'):
+        name, sep, mode = item.strip().partition(':')
+        name, mode = name.strip(), mode.strip()
+        if not name:
+            continue
+        if sep:
+            if mode not in allowed_modes:
+                raise GeneratorError(
+                    "--filter=%s: mode must be one of %s, got: '%s'"
+                    % (item.strip(), '|'.join(allowed_modes), mode))
+            if 'filter_mode' in raw:
+                raise GeneratorError(
+                    "--filter=%s gives a mode and --filter-mode gives another; use one."
+                    % item.strip())
+            entry_modes[name] = mode
+        messages.append(name)
+
     payload_list = [item.strip() for item in payloads.split(';') if item.strip()]
 
-    if filter_message is None:
+    duplicates = sorted(set(m for m in messages if messages.count(m) > 1))
+    if duplicates:
+        raise GeneratorError("--filter lists %s more than once." % ', '.join(duplicates))
+
+    if len(messages) > 1:
+        # Mode and allow-list describe one protocol shape; applying them to
+        # several entrypoints at once would silently guess for all but one.
+        if 'filter_mode' in raw or payload_list:
+            raise GeneratorError(
+                "--filter-mode and --filter-payloads apply to a single entrypoint, "
+                "but --filter names %d (%s). Generate those filters separately."
+                % (len(messages), '; '.join(messages)))
+
+    if not messages:
         if 'filter_mode' in raw:
             raise GeneratorError(
                 "--filter-mode was given without --filter. Name the protocol "
@@ -1349,7 +1396,8 @@ def build_filter_options(raw):
                 "--filter-payloads was given without --filter. Name the protocol "
                 "entrypoint with --filter=<fully.qualified.Message>.")
 
-    return FilterOptions(filter_message, filter_mode, payload_list)
+    return FilterOptions(filter_mode=filter_mode, filter_payloads=payload_list,
+                         filter_messages=messages, entry_modes=entry_modes)
 
 
 def parse_plugin_parameter(parameter):
@@ -1384,11 +1432,12 @@ def parse_plugin_parameter(parameter):
 
 
 def process_file(filename, fdesc, options, filter_options, index,
-                 other_files, validator_index):
+                 other_files, validator_index, generated_entries=None):
     """Produce every output this plugin owns, for one .proto file.
 
     Returns a list of (name, insertion_point_or_None, content) tuples ready to
-    be turned into CodeGeneratorResponse entries.
+    be turned into CodeGeneratorResponse entries.  The requested entrypoints
+    whose filter this file hosts are added to ``generated_entries``.
     """
     f = nanopb.parse_file(filename, fdesc, options)
     attach_validate_rules(f)
@@ -1406,10 +1455,17 @@ def process_file(filename, fdesc, options, filter_options, index,
             f.add_dependency(other_files[dep])
             deps += list(other_files[dep].fdesc.dependency)
 
-    # Resolve the filter once, up front. Every later stage reads this one model
+    # Resolve each filter once, up front. Every later stage reads this one model
     # rather than re-deriving protocol facts, so the header and the source can
     # never disagree about what the filter does.
-    spec = ProtocolAnalyzer(f, index, filter_options, validator_index).analyze()
+    specs = []
+    for name in filter_options.filter_messages:
+        spec = ProtocolAnalyzer(f, index, filter_options.for_entry(name),
+                                validator_index).analyze()
+        if spec is not None:
+            specs.append(spec)
+            if generated_entries is not None:
+                generated_entries.add(name)
 
     # Match nanopb's own output naming exactly, so our insertion targets line up.
     noext = os.path.splitext(filename)[0]
@@ -1421,7 +1477,7 @@ def process_file(filename, fdesc, options, filter_options, index,
     # 1. The standalone validator files.  Messages on the filter path get a
     #    validator even if they declare no rules, so the filter's direct calls
     #    always resolve.
-    force = spec.required_validators() if spec else ()
+    force = _dedupe(name for spec in specs for name in spec.required_validators())
     validator_gen = build_validator_generator(f, force)
     validate_headerdata = ''.join(validator_gen.generate_header())
     validate_sourcedata = ''.join(validator_gen.generate_source())
@@ -1431,8 +1487,10 @@ def process_file(filename, fdesc, options, filter_options, index,
         outputs.append((noext + '_validate' + options.source_extension,
                         None, validate_sourcedata))
 
-    # 2. The filter, spliced into the files nanopb already produced.
-    if spec is not None:
+    # 2. The filters, spliced into the files nanopb already produced. protoc
+    #    appends repeated insertions at one point in order, and every symbol is
+    #    namespaced by its entrypoint, so several filters share a file safely.
+    for spec in specs:
         emitter = FilterEmitter(spec)
         outputs.append((headername, 'eof', ''.join(emitter.header_lines())))
         outputs.append((sourcename, 'includes', ''.join(emitter.include_lines(f, options))))
@@ -1484,23 +1542,22 @@ def main_plugin():
             other_files[fdesc.name] = dep
 
         validator_index = ValidatorIndex()
-        generated_filter = False
+        generated_entries = set()
 
         for filename in request.file_to_generate:
             for fdesc in request.proto_file:
                 if fdesc.name == filename:
                     for name, insertion_point, content in process_file(
                             filename, fdesc, options, filter_options, index,
-                            other_files, validator_index):
-                        if insertion_point:
-                            generated_filter = True
+                            other_files, validator_index, generated_entries):
                         entry = response.file.add()
                         entry.name = name
                         if insertion_point:
                             entry.insertion_point = insertion_point
                         entry.content = content
 
-        if filter_options.wants_filter and not generated_filter:
+        missing = [m for m in filter_options.filter_messages if m not in generated_entries]
+        if missing:
             # The entrypoint resolved (the analyzer would have raised otherwise)
             # but lives in a file this invocation was not asked to generate, so
             # nobody emitted a filter. Silently producing none would leave the
@@ -1509,8 +1566,7 @@ def main_plugin():
                 "--filter=%s names a message defined in a file that is not being "
                 "generated in this invocation (%s). Run the plugin on the .proto "
                 "that defines the entrypoint."
-                % (filter_options.filter_message,
-                   ', '.join(request.file_to_generate)))
+                % (';'.join(missing), ', '.join(request.file_to_generate)))
 
     except GeneratorError as e:
         # Reported by protoc as a plugin failure, without a Python traceback.

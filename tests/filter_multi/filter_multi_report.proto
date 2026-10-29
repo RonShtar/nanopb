@@ -1,0 +1,16 @@
+/*
+ * A second .proto with its own filter entrypoint (--filter=Report), linked
+ * into the same binary as the filters of filter_multi.proto.
+ */
+
+syntax = "proto3";
+
+import "validate.proto";
+import "filter_multi.proto";
+
+option (validate.validate) = true;
+
+message Report {
+    Ping last = 1;
+    uint32 count = 2 [(validate.rules).uint32.lte = 10];
+}
