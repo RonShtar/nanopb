@@ -1,0 +1,33 @@
+/*
+ * Test proto for several filter entrypoints in one file:
+ * --filter=Command;Status generates Command_filter_* (oneof dispatch) and
+ * Status_filter_* (single message) side by side in filter_multi.pb.c.
+ */
+
+syntax = "proto3";
+
+import "validate.proto";
+import "nanopb.proto";
+
+option (validate.validate) = true;
+
+message Ping {
+    uint32 seq = 1 [(validate.rules).uint32.gte = 1];
+}
+
+message Login {
+    string user = 1 [(nanopb).max_size = 16, (validate.rules).string.min_len = 3];
+}
+
+/* Entrypoint 1: dispatches on the oneof */
+message Command {
+    oneof body {
+        Ping ping = 1;
+        Login login = 2;
+    }
+}
+
+/* Entrypoint 2: a plain message */
+message Status {
+    int32 code = 1 [(validate.rules).int32.gte = 0, (validate.rules).int32.lte = 99];
+}

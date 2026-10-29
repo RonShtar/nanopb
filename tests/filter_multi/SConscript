@@ -1,0 +1,47 @@
+# Build and run filter_multi test suite
+# Tests several filter entrypoints in one file (--filter=Command;Status) plus
+# a filter from another file (--filter=Report), all linked into one binary.
+
+Import("env")
+
+test_env = env.Clone()
+
+# Exclude validate.proto from #include list since it's only used for options
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "--filter=Command;Status")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+pb_files = test_env.NanopbProto("filter_multi")
+test_env.SideEffect("filter_multi_validate.c", pb_files)
+test_env.SideEffect("filter_multi_validate.h", pb_files)
+
+# The Report entrypoint lives in its own file, so it gets its own invocation.
+report_env = test_env.Clone()
+report_env.Replace(NANOPB_VALIDATE_FLAGS = "--filter=Report")
+report_files = report_env.NanopbProto("filter_multi_report")
+report_env.SideEffect("filter_multi_report_validate.c", report_files)
+report_env.SideEffect("filter_multi_report_validate.h", report_files)
+report_env.Depends(report_files, pb_files)
+
+sources = ["test_filter_multi.c",
+           "filter_multi.pb.c", "filter_multi_validate.c",
+           "filter_multi_report.pb.c", "filter_multi_report_validate.c"]
+
+test_prog = test_env.Program(
+    sources + [
+        "$COMMON/pb_encode.o",
+        "$COMMON/pb_decode.o",
+        "$COMMON/pb_common.o",
+        "pb_validate.o"
+    ]
+)
+
+test_env.RunTest(test_prog)
