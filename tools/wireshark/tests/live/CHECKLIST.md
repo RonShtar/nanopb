@@ -169,12 +169,11 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 ## 4. Tools > nanopb menu
 
-- [ ] There is no **Settings** item. **About** shows the plugins folder, and the last input directory = the test fixtures.
-- [ ] **List proto units**, input prefilled with the fixtures: lists `envelope` and `telemetry` with their messages.
-- [ ] **Generate C (merged + validation)**: the dialog only asks for input and output. The unit list shows `[x] envelope` and `[x] telemetry`; click `telemetry` (now `[ ]`), press **Generate**: OK; **Open output folder** shows only `envelope/` with `envelope.c`, `envelope.h` and the separate `pb*.c/.h` runtime files including `pb_validate.c`.
+- [ ] The menu has exactly **Generate C (merged + validation)**, **Generate test packets (passed + dropped)**, **Install or update dissector** and **About**. **About** shows the plugins folder, the installed project copy and the last input directory = the test fixtures.
+- [ ] **Generate C (merged + validation)**: the dialog only asks for input and output. The unit list shows `[x] envelope` and `[x] telemetry`; click `telemetry` (now `[ ]`), press **Generate**: OK, and the result lists `demo_envelope_Envelope_filter_udp`; **Open output folder** shows only `envelope/` with just `envelope.c` and `envelope.h`.
 - [ ] In the same unit list press **Select none**, then **Generate**: the list says "Select at least one unit." and nothing is generated.
-- [ ] **Generate raw data**, keep only `envelope`: OK; `envelope/data/` holds `demo_envelope_Envelope.{bin,h,hex,txt}`.
-- [ ] **Generate invalid raw data**, keep only `telemetry`: OK; `telemetry/data/` holds `*_invalid.*` files.
+- [ ] **Generate test packets**, both units: the result says how many packets are expected PASSED and DROPPED; `nanopb_test_packets.pcapng` opens by itself. Every packet has a **Validation: PASSED** or **Validation: DROPPED** subtree matching its packet comment (`expect=...`).
+- [ ] In that result window, **Show dropped only** applies `nanopb.validation == "dropped"` and only the DROPPED packets remain; **Show all** brings the others back.
+- [ ] Run **Generate test packets** again: the capture reopens without reloading Lua plugins (the schema did not change).
 - [ ] **Generate C** with input `nope`: shows FAILED with "is not a directory".
 - [ ] **Install or update dissector**, input prefilled, port map `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`: OK, then plugins reload and packets still decode.
-- [ ] Optional: drop one of the generated `.bin` files into a hex editor and compare with the `.hex` file; the `.txt` lists the encoded values.

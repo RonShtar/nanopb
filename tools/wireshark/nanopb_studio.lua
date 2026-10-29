@@ -184,12 +184,27 @@ local function open_folder(path)
     end
 end
 
-local function show(title, ok, text, folder)
+-- Result window; `buttons` is a list of { label, function } shown on success.
+local function show(title, ok, text, folder, buttons)
     local win = TextWindow.new(title)
     win:set((ok and "OK\n\n" or "FAILED\n\n") .. text)
-    if ok and folder then
-        win:add_button("Open output folder", function() open_folder(folder) end)
+    if ok then
+        for _, b in ipairs(buttons or {}) do win:add_button(b[1], b[2]) end
+        if folder then win:add_button("Open output folder", function() open_folder(folder) end) end
     end
+end
+
+-- Minimal readers for the backend's JSON output.
+local JSON_ESCAPES = { n = "\n", t = "\t", r = "\r", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
+
+local function json_string(text, key)
+    local raw = text:match('"' .. key .. '"%s*:%s*"(.-[^\\])"') or text:match('"' .. key .. '"%s*:%s*""') and ""
+    if not raw then return nil end
+    return (raw:gsub("\\(.)", JSON_ESCAPES))
+end
+
+local function json_bool(text, key)
+    return text:match('"' .. key .. '"%s*:%s*(%a+)') == "true"
 end
 
 local unpack_ = table.unpack or unpack
@@ -243,36 +258,49 @@ local function parse_unit_names(text)
     for name in string.gmatch(list or "", '"(.-)"') do
         names[#names + 1] = (name:gsub("\\\\", "\\"))
     end
-    return names
+    -- "merged_into": { "shared": [ "fleet" ] } -> merged["shared"] = "fleet"
+    local merged = {}
+    local object = text:match('"merged_into"%s*:%s*(%b{})') or ""
+    for name, users in string.gmatch(object, '"([^"]+)"%s*:%s*%[(.-)%]') do
+        local list_users = {}
+        for user in string.gmatch(users, '"(.-)"') do list_users[#list_users + 1] = user end
+        merged[name] = table.concat(list_users, ", ")
+    end
+    return names, merged
 end
 
 -- Show the units of the input directory as a toggle list. `generate` gets the
--- comma separated selection and returns ok, output text.
+-- comma separated selection and returns ok, output text and optionally extra
+-- result-window buttons and a function to run after the window is shown.
 local function pick_units(title, generate)
     local ok, text = run_backend(add_common({ "units", "--names-only" }))
     if not ok then
         show(title, false, text)
         return
     end
-    local names = parse_unit_names(text)
+    local names, merged = parse_unit_names(text)
     if #names == 0 then
         show(title, false, "No subdirectory of " .. config.protos_root .. " contains .proto files.")
         return
     end
+    -- A unit imported by another is already merged into that one's .c/.h;
+    -- generating both would link the same code twice.
     local selected = {}
-    for _, name in ipairs(names) do selected[name] = true end
+    for _, name in ipairs(names) do selected[name] = merged[name] == nil end
 
     local win = TextWindow.new(title .. ": choose units")
     local function render(note)
         local lines = {
             "Click a unit to select or deselect it, then press Generate.",
+            "Wireshark does not respond for a few seconds while it generates.",
             "",
             "Input:  " .. config.protos_root,
             "Output: " .. output_dir(),
             "",
         }
         for _, name in ipairs(names) do
-            lines[#lines + 1] = (selected[name] and "  [x] " or "  [ ] ") .. name
+            local note = merged[name] and ("   (already merged into " .. merged[name] .. ")") or ""
+            lines[#lines + 1] = (selected[name] and "  [x] " or "  [ ] ") .. name .. note
         end
         if note then
             lines[#lines + 1] = ""
@@ -301,9 +329,10 @@ local function pick_units(title, generate)
             render("Select at least one unit.")
             return
         end
-        local done, out = generate(table.concat(chosen, ","))
+        local done, out, buttons, after = generate(table.concat(chosen, ","))
         render(done and ("Generated: " .. table.concat(chosen, ", ")) or "FAILED, see the result window.")
-        show(title, done, out, output_dir())
+        show(title, done, out, output_dir(), buttons)
+        if done and after then after() end
     end)
     render()
 end
@@ -327,13 +356,57 @@ local function gen_c()
     end)
 end
 
-local function gen_data(invalid)
-    local title = invalid and "Generate invalid raw data" or "Generate raw data"
+local DROPPED_FILTER = 'nanopb.validation == "dropped"'
+
+-- One button: valid and invalid packets of every message in one capture,
+-- dissector refreshed, capture opened.
+local function gen_packets()
+    local title = "Generate test packets"
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
-            local args = add_common({ "gen-data", "--out", output_dir(), "--unit", units })
-            if invalid then args[#args + 1] = "--invalid" end
-            return run_backend(args)
+            local args = add_common({ "gen-packets", "--out", output_dir(), "--unit", units,
+                "--plugins-dir", PLUGINS_DIR })
+            if config.port_map ~= "" then
+                args[#args + 1] = "--port-map"
+                args[#args + 1] = config.port_map
+            end
+            local ok, text = run_backend(args)
+            if not ok then return false, text end
+            local pcap = json_string(text, "pcap") or ""
+            local summary = json_string(text, "summary") or text
+            if config.port_map == "" then
+                -- Keep the ports gen-packets picked, so the dissector and Generate C agree.
+                config.port_map = json_string(text, "port_map") or ""
+                save_config()
+            end
+            local reload = json_bool(text, "schema_changed") and reload_lua_plugins
+            local notes = { summary, "" }
+            if open_capture_file then
+                notes[#notes + 1] = "Opening the capture. Each packet shows Validation: PASSED or DROPPED."
+            else
+                notes[#notes + 1] = "Open the capture with File > Open: " .. pcap
+            end
+            if json_bool(text, "schema_changed") then
+                notes[#notes + 1] = reload_lua_plugins and "The dissector schema changed; reloading Lua plugins."
+                    or "The dissector schema changed; reload Lua plugins (Ctrl+Shift+L)."
+            end
+            local buttons = {}
+            if set_filter and apply_filter then
+                buttons[#buttons + 1] = { "Show dropped only", function()
+                    set_filter(DROPPED_FILTER)
+                    apply_filter()
+                end }
+                buttons[#buttons + 1] = { "Show all", function()
+                    set_filter("")
+                    apply_filter()
+                end }
+            end
+            local function after()
+                if open_capture_file and pcap ~= "" then open_capture_file(pcap, "") end
+                -- Last: reloading re-runs the plugins and re-dissects the open capture.
+                if reload then reload_lua_plugins() end
+            end
+            return true, table.concat(notes, "\n"), buttons, after
         end)
     end)
 end
@@ -360,13 +433,6 @@ local function install_dissector()
     end)
 end
 
-local function list_units()
-    ask_dirs("List proto units", false, nil, function()
-        local ok, text = run_backend(add_common({ "units" }))
-        show("nanopb units", ok, text)
-    end)
-end
-
 local function about()
     show("nanopb studio", true, table.concat({
         "Plugins folder: " .. PLUGINS_DIR,
@@ -374,15 +440,14 @@ local function about()
         "nanopb project: " .. project_root() .. (config.nanopb_root ~= "" and " (dev checkout)" or ""),
         "Last input directory: " .. (config.protos_root ~= "" and config.protos_root or "(none)"),
         "Last output directory: " .. (output_dir() ~= "" and output_dir() or "(none)"),
+        "Port map: " .. (config.port_map ~= "" and config.port_map or "(none yet)"),
         "Python: " .. config.python,
         "",
         "See tools/wireshark/README.md in the nanopb repository.",
-    }, "\n"))
+    }, "\n"), nil, { { "Open plugins folder", function() open_folder(PLUGINS_DIR) end } })
 end
 
 register_menu("nanopb/Generate C (merged + validation)...", gen_c, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/Generate raw data...", function() gen_data(false) end, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/Generate invalid raw data...", function() gen_data(true) end, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/Generate test packets (passed + dropped)...", gen_packets, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Install or update dissector...", install_dissector, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/List proto units...", list_units, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/About", about, MENU_TOOLS_UNSORTED)

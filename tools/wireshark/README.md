@@ -4,8 +4,8 @@ Two Lua plugins for Wireshark, for Windows and Linux:
 
 | File | What it does |
 |------|--------------|
-| `nanopb_studio.lua` | Adds a **Tools > nanopb** menu. From a directory of `.proto` files it generates merged nanopb C code with validation, and encoded sample data. It also installs the dissector below. |
-| `nanopb_any_dissector.lua` | A protobuf dissector that decodes nested messages recursively and resolves `google.protobuf.Any` by its `type_url`, so one packet can carry many message types. |
+| `nanopb_studio.lua` | Adds a **Tools > nanopb** menu. From a directory of `.proto` files it generates merged nanopb C code with validation and packet filters, and one capture of test packets that pass or are dropped by validation. |
+| `nanopb_any_dissector.lua` | A protobuf dissector that decodes nested messages recursively, resolves `google.protobuf.Any` by its `type_url`, and checks every packet against your `validate.proto` rules: **Validation: PASSED** or **DROPPED**, exactly as the generated nanopb filter would decide. |
 
 The Lua side only collects input and shows results. The work happens in
 `backend/nanopb_wireshark.py`, which uses this repository's generator,
@@ -20,7 +20,6 @@ from a terminal (see [Command line](#command-line)).
       python -m pip install protobuf grpcio-tools
 
   On Windows, `python3` is often only the Microsoft Store stub; use `python` or the full path to `python.exe`.
-- A checkout of this repository (the "nanopb project path").
 
 ## Protos directory layout
 
@@ -45,84 +44,123 @@ my_protos/
 - Imported files from outside the unit, such as `google/protobuf/any.proto`, are generated and merged into the unit too. Each unit is self-contained.
 - If no `google/protobuf/any.options` is found on the include path, `Any` gets static storage of `type_url` 128 / `value` 256 bytes (`backend/include/google/protobuf/any.options`). Your own file takes precedence.
 
-`tests/fixtures/protos` is a working example.
+`tests/fixtures/protos` is a working example; `tests/fixtures/rules` uses every validation rule.
 
 ## Installing
 
-1. Find your personal Lua plugins folder: **Help > About Wireshark > Folders > Personal Lua Plugins**. It is usually:
+One command, run with the Python that has the requirements:
 
-   | OS | Folder |
-   |----|--------|
-   | Windows | `%APPDATA%\Wireshark\plugins` |
-   | Linux | `~/.local/lib/wireshark/plugins` |
+    python tools/wireshark/backend/nanopb_wireshark.py install-studio
 
-2. Install the studio plugin with the Python that has the generator dependencies. This records that Python and this checkout in `<plugins>/nanopb/studio_config.luadata`:
+It installs into your personal Lua plugins folder (**Help > About Wireshark >
+Folders > Personal Lua Plugins**; `%APPDATA%\Wireshark\plugins` on Windows,
+`~/.local/lib/wireshark/plugins` on Linux, or `--plugins-dir <folder>`):
 
-       python tools/wireshark/backend/nanopb_wireshark.py install-studio
+- `nanopb_studio.lua` and `nanopb_any_dissector.lua`;
+- `nanopb/project/`: a copy of the generator, the nanopb runtime (`pb*.c/.h`, `pb_validate.*`) and the backend. The plugin uses this copy, so it never needs to know where this repository is. The Lua sources inside it are named `.lua.src`, because Wireshark loads every `.lua` file below the plugins folder;
+- `nanopb/studio_config.luadata`: the Python to use and your last directories and port map.
 
-   (add `--plugins-dir <folder>` if your folder differs).
+Then restart Wireshark or press Ctrl+Shift+L (**Analyze > Reload Lua Plugins**).
+Run `install-studio` again after updating this repository. With `--dev` the
+plugin runs this checkout directly instead of a copy.
 
-3. Restart Wireshark, or use **Analyze > Reload Lua Plugins** (Ctrl+Shift+L).
+## Using it
 
-There is no settings dialog. Each **Tools > nanopb** action asks for:
+**Tools > nanopb** has four items. Each asks only for
 
-- **Input**: the protos directory with your unit subdirectories
-- **Output directory**: where generated files go (empty = `<input>/../nanopb_out`)
+- **Input**: the protos directory with your unit subdirectories, and
+- **Output directory** (empty = `<input>/../nanopb_out`),
 
-Both fields start with the last values you used. The generate actions then
-open a list of the units found in the input. Click a unit to select or
-deselect it (all units start selected), or use **Select all** / **Select none**.
-Then press **Generate**.
+both prefilled with what you used last. The generate actions then show the
+units found in the input: click a unit to select or deselect it (all start
+selected), or use **Select all** / **Select none**, then press **Generate**.
 
-## Generating C code
+| Menu | Result |
+|------|--------|
+| Generate C (merged + validation) | `<output>/<unit>/<unit>.c/.h` plus the nanopb runtime |
+| Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark |
+| Install or update dissector | the dissector and schema, for real traffic |
+| About | paths, Python, port map |
 
-**Tools > nanopb > Generate C (merged + validation)...**: input, output, then pick the units.
+### Generating C code
 
-Each unit gets its own `<output>/<unit>/` folder:
+Each unit gets `<output>/<unit>/<unit>.c` and `<unit>.h`, and nothing else:
+**all protos of the unit merged into one file, with validation**. They contain
+every `.pb.c/.pb.h` and `_validate.c/.h` (from the validate plugin, see
+`docs/validation.md`) of the unit and of everything it imports, in dependency
+order, with the includes between them removed.
 
-- `<unit>.c` / `<unit>.h`: **all protos of the unit merged into one file, with
-  validation**. They contain every `.pb.c/.pb.h` and `_validate.c/.h` (from the
-  validate plugin, see `docs/validation.md`) of the unit and its dependencies,
-  in dependency order, with the includes between them removed.
-- The nanopb runtime as separate, unmodified files: `pb.h`, `pb_common.*`,
-  `pb_encode.*`, `pb_decode.*`, `pb_validate.*` and `pb_filter_macros.h`.
+A unit that another unit imports (e.g. `shared`, imported by `fleet` as
+`shared/units.proto`) is already inside the importer's files, so the unit list
+starts with it deselected and marked "already merged into fleet". Generating
+both and linking them together would define the same symbols twice.
 
-The folder builds on its own. Drag it into
-your firmware project, compile `<unit>.c` (plus the runtime `.c` files), and
-add the folder to the include path, because the generated code uses
-`#include <pb.h>`:
+Generating takes a few seconds per unit; Wireshark does not respond meanwhile.
 
-    gcc -I out/envelope -c out/envelope/*.c
+The merged header exports, for every message,
 
-## Generating raw data
+```c
+bool pb_validate_<msg>(const <msg> *msg, pb_violations_t *violations);
+```
 
-**Tools > nanopb > Generate raw data...** (input, output, then pick the units) writes one encoded sample of every top-level message, from
-`generator/nanopb_data_generator.py` (see `docs/DATA_GENERATOR.md`). The values
-are random, but they respect your validation rules and nanopb limits
-(`max_size`, `max_count`, ...).
+and, for each **protocol entrypoint**, a packet filter that decodes,
+validates and returns `0` (accept) or `-1` (drop):
 
-**Tools > nanopb > Generate invalid raw data...** does the same with messages
-that break a validation rule (`*_invalid.*`).
+```c
+int <Msg>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
+int <Msg>_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+```
 
-To choose messages, formats, counts, seeds or which field/rule to violate, use
-`gen-data` on the [command line](#command-line).
+The entrypoints are the messages of the port map (the one the dissector uses);
+without one, the unit's root messages (those no other message of the unit uses
+as a field or Any payload). An entrypoint whose dispatch would be ambiguous
+(e.g. two `Any` fields) gets a `single`-mode filter: decode and validate the
+entrypoint itself. The result window lists the exported filters.
 
-Output goes to `<output>/<unit>/data/`, named after the C type (`demo_envelope_Envelope.*`):
+Drag `<unit>.c` and `<unit>.h` into a firmware project that already has the
+nanopb runtime (`pb.h`, `pb_common.*`, `pb_encode.*`, `pb_decode.*`,
+`pb_validate.*`, `pb_filter_macros.h` from this repository) on its include
+path; the generated code uses `#include <pb.h>`:
 
-- `.bin`: raw protobuf bytes
-- `.h`: `static const uint8_t demo_envelope_Envelope_data[]` plus `DEMO_ENVELOPE_ENVELOPE_DATA_SIZE`
-- `.hex`: a hex string. Wrap it into a capture with `text2pcap`; see [Testing the dissector](#testing-the-dissector).
-- `.txt`: the field values that were encoded
+    gcc -I out/envelope -I path/to/nanopb -c out/envelope/envelope.c
 
-## Dissector
+`gen-c --with-runtime` on the command line also copies those runtime files
+next to the generated ones, so the folder builds on its own.
 
-**Tools > nanopb > Install or update dissector...** builds a schema from
-**all** units of the protos directory. It copies `nanopb_any_dissector.lua` and
-`nanopb/schema.luadata` next to `nanopb_studio.lua`, then reloads Lua plugins.
-On versions without `reload_lua_plugins()`, press Ctrl+Shift+L yourself. Run it
-again whenever your `.proto` files change.
+### Generating test packets
 
-The dialog asks for the input directory and a **port map**, for example `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`.
+One button makes a capture with, for every message of the selected units,
+
+- valid samples (expected **PASSED**), and
+- one sample per validation rule, breaking exactly that rule (expected **DROPPED**),
+
+from `generator/nanopb_data_generator.py`. Sample values respect nanopb's
+limits (`max_size`, `max_count`, ...), so a dropped packet is dropped by the
+validator, not by a decode error. Rules that cannot be broken with decodable
+data, or that the C validator does not enforce, are listed as not generated.
+
+Root messages are sent raw on their port (your port map, or one UDP port per
+unit root from 15000, which is then saved as your port map). Every other
+message is wrapped in a `google.protobuf.Any` and sent on `udp/15999`.
+
+The backend refreshes the dissector and schema in your plugins folder, the
+capture opens, and Lua plugins reload when the schema changed. The result
+window has **Show dropped only** (filter `nanopb.validation == "dropped"`),
+**Show all** and **Open output folder**. Next to the capture:
+
+- `nanopb_test_packets.json`: per frame the message, port, expected verdict, violated field and rule, seed and bytes;
+- `nanopb_test_packets.txt`: the same as a table, plus what was not generated.
+
+Each packet also carries its expectation as a packet comment
+(`expect=DROPPED msg=... field=... rule=...`, column `frame.comment`).
+
+### Dissector
+
+**Install or update dissector** builds a schema from **all** units of the
+protos directory, with their validation rules, and asks for a **port map**, for
+example `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`.
+Run it again whenever your `.proto` files change (Generate test packets does
+this for you).
 
 The dissector picks the root message of a packet in this order:
 
@@ -132,26 +170,64 @@ The dissector picks the root message of a packet in this order:
 4. A raw field-number / wire-type tree.
 
 On ports that are **not** in the map, **Detect Any on any port (heuristic)**
-(on by default) claims a UDP/TCP payload only when all of these hold:
-
-- it is a well-formed `google.protobuf.Any`,
-- its `type_url` names a message in the schema,
-- its value is valid protobuf.
-
-Other traffic is left alone.
+(on by default) claims a UDP/TCP payload only when it is a well-formed
+`google.protobuf.Any` whose `type_url` names a message in the schema and whose
+value is valid protobuf. Other traffic is left alone.
 
 Whenever it meets an `Any`, it reads `type_url`, looks up the part after the
 last `/` (e.g. `demo.payloads.Command`) in the schema, and decodes `value` as
-that message, recursively. This also works for an `Any` inside a message
-inside another `Any`. Unknown types are shown as bytes with an expert warning.
+that message, recursively. Unknown types are shown as bytes with an expert warning.
 
-Display filters:
+## Validation in Wireshark
 
-- `nanopb.type_url == "type.googleapis.com/demo.payloads.Ping"`
-- `nanopb.message == "demo.payloads.Command"`
-- Any schema field as `nanopb.<full message name>.<field>`, e.g. `nanopb.demo.payloads.Ping.id > 5`.
+Every packet decoded as a schema message gets a **Validation** subtree:
 
-Limitations:
+```
+Validation: DROPPED (1 problem)
+    numbers.i64: int64.gte - must be >= -5000000000 (got -5000000001)
+        Field: numbers.i64
+        Detail: must be >= -5000000000 (got -5000000001)
+        [Expert Info (Warning/Protocol): ...]
+```
+
+The Info column ends in `[PASSED]` or `[DROPPED <rule> <field>]`.
+
+| Display filter | Meaning |
+|----------------|---------|
+| `nanopb.validation == "dropped"` | packets the nanopb filter would reject |
+| `nanopb.validation == "passed"` | packets it would accept |
+| `nanopb.validation.rule == "string.min_len"` | a specific rule failed |
+| `nanopb.validation.field contains "readings"` | a problem in that field |
+| `nanopb.validation.violation` | expert info: a rule was violated |
+| `nanopb.validation.decode` | expert info: `pb_decode` would fail |
+| `nanopb.validation.unchecked` | a rule that is listed but not checked |
+
+The verdict follows `pb_validate.c` and the code nanopb-validate generates:
+
+- proto3 fields without presence are checked at their default value when absent (as in the C struct); `optional` fields and sub-messages only when present; a `oneof` arm only when selected;
+- `required` is checked on fields with presence (the C struct has a `has_` flag);
+- strings are compared up to the first NUL, lengths in bytes; bytes compare all bytes;
+- `float` rule constants are compared as `float`, 64-bit values exactly;
+- email, hostname, IPv4 and IPv6 use the same checks as `pb_validate.c`;
+- sub-messages and `repeated` items are checked recursively, with paths such as `lists.inners[1].code`;
+- a packet is also DROPPED when `pb_decode` would fail: malformed data, a string or array larger than its `max_size` / `max_count`, a wrong wire type, an out-of-range `int32`, a missing proto2 `required` field.
+
+Differences from C, on purpose:
+
+- all problems are listed (C stops at the first one);
+- `Timestamp` rules (`gt_now`, `lt_now`, `within`) use the packet's capture time instead of the clock;
+- with **Validate Any payloads** (on by default) the message inside an `Any` is validated too, as the filter of an `Any` entrypoint does; plain `pb_validate_<msg>()` does not look into `Any`.
+
+Not checked, and never a reason to drop (nanopb-validate refuses to generate C
+code for them): `string.pattern`, `min_bytes` / `max_bytes`,
+`oneof_required`, `map.no_sparse`, and the message rules `requires`, `mutex`,
+`at_least`. Rules of callback fields (no `max_size` / `max_count`) are listed
+as not checked, since `pb_validate` skips them.
+
+Preferences (**Edit > Preferences > Protocols > NANOPB**): **Check validation
+rules** (on) and **Validate Any payloads** (on).
+
+Limitations of the dissector:
 
 - Each UDP datagram or TCP segment payload is decoded as one whole message. There is no TCP reassembly or length-prefix framing.
 - Groups (proto2) are reported as unsupported.
@@ -159,14 +235,14 @@ Limitations:
 ## Live test in Wireshark
 
 `tests/live/live_test.py` checks both plugins in your real Wireshark. Its test
-packets (`tests/live/cases.py`) have exactly known contents:
+packets (`tests/live/cases.py`) have exactly known contents and verdicts:
 
 - `Any` → `Command`,
-- nested `Any` → `Envelope` → `Any` → `Ping`,
+- nested `Any` → `Envelope` → `Any` → `Ping` (DROPPED: `body` only allows Ping and Command),
 - a TCP Telemetry packet with every scalar kind,
 - a bare `Any` on an unmapped port (heuristic),
-- an unknown `Any` type,
-- a malformed packet,
+- an unknown `Any` type (DROPPED),
+- a malformed packet (DROPPED),
 - a Decode As case,
 - 5 generated Envelopes.
 
@@ -180,7 +256,7 @@ packets (`tests/live/cases.py`) have exactly known contents:
 2. Get the packets into Wireshark, either way:
    - `live_test.py pcap` writes `nanopb_live_test.pcap`; open it. Packet *N* is case *N*.
    - Or capture on loopback, which on Windows is the Npcap *Adapter for loopback traffic capture* and on Linux is `lo`, while running `live_test.py send` (`--repeat N`, `--interval S`).
-3. Go through [`tests/live/CHECKLIST.md`](tests/live/CHECKLIST.md). For every packet it lists the expected tree lines, expert info and a display filter, plus steps for the preferences, Decode As and every Tools > nanopb menu item.
+3. Go through [`tests/live/CHECKLIST.md`](tests/live/CHECKLIST.md). For every packet it lists the expected tree lines, verdict, expert info and a display filter, plus steps for the preferences, Decode As and every Tools > nanopb menu item.
 
 If `tshark` is installed (Windows: `C:\Program Files\Wireshark\tshark.exe` is found automatically), the same checks run by themselves:
 
@@ -191,9 +267,6 @@ Both print PASS/FAIL per packet. Add `--isolated` to load the dissector from
 this repository with a fresh schema instead of the installed copy. This only
 works when no copy is installed, since the two would clash.
 `live_test.py checklist` regenerates `CHECKLIST.md` after you change the cases.
-
-Tested with Wireshark/tshark 3.6.7 (Lua 5.2) on Windows: `verify` and `live`
-pass 12/12.
 
 ## Stress example: many protos, one output
 
@@ -222,8 +295,8 @@ It goes through these steps:
 3. It compiles `fleet.c` and the runtime with `-std=c11 -pedantic -Wall -Wextra -Werror -Wconversion -Wcast-qual`. Then a generated C program decodes, validates and re-encodes every sample. nanopb always encodes repeated scalars packed, so samples with unpacked fields are compared by decoded content, not bytes. The compiler comes from `CC`, `gcc`/`clang`, or `pip install ziglang`.
 4. It writes `nanopb_stress_out/stress.pcap`, and lists each packet with its expected tree in `stress_packets.txt`. The capture has:
    - 10 hand-made packets: a Frame with 3 `Any` readings, a map and a Timestamp; a `oneof` command; a proto2 status; `Any` recursion 4 levels deep; heuristic; Decode As; malformed;
-   - every sample as a packet. Sample types without their own port go on the heuristic port, wrapped in an `Any`.
-5. It dissects the capture with `tshark` and checks every packet.
+   - every sample as a packet. Sample types without their own port go on the heuristic port, wrapped in an `Any` (samples larger than the project's 512-byte `Any.value` are expected to be DROPPED).
+5. It dissects the capture with `tshark` and checks every packet, including its verdict.
 
 With `--install`, the stress schema and port map go into your plugins folder,
 and the studio's last input directory points at the stress protos. The ports are
@@ -236,29 +309,35 @@ small test schema.
 ## Command line
 
 Every menu action maps to a backend subcommand. All of them accept
-`--protos-root`, `-I <extra include>`, and `--nanopb-root` (default: this
-checkout).
+`--protos-root`, `-I <extra include>`, and `--nanopb-root` (default: the
+checkout or installed copy containing the script).
 
-    python tools/wireshark/backend/nanopb_wireshark.py units             --protos-root P [--names-only]
-    python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--no-runtime] [--no-validate]
-    python tools/wireshark/backend/nanopb_wireshark.py gen-data          --protos-root P --out O [--unit U] [--messages A,B] [--formats bin,c,hex] [--count N] [--seed S] [--invalid [--field F] [--rule R]]
-    python tools/wireshark/backend/nanopb_wireshark.py schema            --protos-root P --out schema.luadata
+    python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--port-map MAP] [--no-filter] [--with-runtime] [--no-validate]
+    python tools/wireshark/backend/nanopb_wireshark.py gen-packets       --protos-root P --out O [--unit U] [--port-map MAP] [--any-port 15999] [--valid 2] [--max-invalid 40] [--seed 1] [--format pcapng|pcap] [--plugins-dir D | --no-install]
     python tools/wireshark/backend/nanopb_wireshark.py install-dissector --protos-root P [--plugins-dir D] [--port-map MAP]
-    python tools/wireshark/backend/nanopb_wireshark.py install-studio    [--plugins-dir D]
+    python tools/wireshark/backend/nanopb_wireshark.py install-studio    [--plugins-dir D] [--dev]
+    python tools/wireshark/backend/nanopb_wireshark.py gen-data          --protos-root P --out O [--unit U] [--messages A,B] [--formats bin,c,hex] [--count N] [--seed S] [--invalid [--field F] [--rule R]]
+    python tools/wireshark/backend/nanopb_wireshark.py units             --protos-root P [--names-only]
+    python tools/wireshark/backend/nanopb_wireshark.py schema            --protos-root P --out schema.luadata
+
+`gen-data` writes single encoded samples (`.bin`, a C array `.h`, `.hex`,
+and the values as `.txt`) to `<out>/<unit>/data/`; see `docs/DATA_GENERATOR.md`.
 
 Output is JSON followed by a final `__EXIT__=<status>` line, which the Lua side uses to detect errors.
 
 ## Troubleshooting
 
 - **"Backend did not run"**: the `python` path in `<plugins>/nanopb/studio_config.luadata` is wrong, or points to the Windows Store stub. Run `install-studio` again with the right Python.
+- **"nanopb backend not found"**: run `install-studio`.
 - **`protoc failed`**: run the same subcommand in a terminal to see the full protoc error. Also check that `grpcio-tools` and `protobuf` are installed for *that* Python.
 - **Menu or dissector missing**: check **Help > About Wireshark > Plugins** for load errors, and make sure the files are in the *Personal Lua Plugins* folder.
+- **A packet shows no Validation subtree**: it was not decoded as a schema message (raw tree, or claimed by another protocol). Add its port to the port map.
 - **`pb_callback_t` in the generated header**: a string, bytes or repeated field has no `max_size` / `max_count` in its `.options` file.
 
 ## Tests
 
     python -m unittest discover -s tools/wireshark/tests -v
 
-- `test_backend.py` needs only the generator dependencies.
-- `test_dissector.py` runs both Lua plugins and the live test cases against a mock Wireshark API (`tests/wireshark_mock.lua`). It needs `pip install lupa` and is skipped without it.
-- `test_tshark.py` dissects the live test capture with a real `tshark`. It is skipped when `tshark` isn't found, or when a copy of the dissector is installed in the personal plugins folder.
+- `test_backend.py` needs only the generator dependencies. With a C compiler (`CC`, `gcc`/`clang`, or `pip install ziglang`) it also checks that every `gen-packets` verdict is what `pb_decode` + `pb_validate` decide in C.
+- `test_dissector.py` runs both Lua plugins, the live test cases, the validation rules and generated captures against a mock Wireshark API (`tests/wireshark_mock.lua`). It needs `pip install lupa` and is skipped without it.
+- `test_tshark.py` dissects the live test capture and generated captures with a real `tshark` (Lua 5.2), including the `nanopb.validation == "dropped"` filter. It is skipped when `tshark` isn't found, or when a copy of the dissector is installed in the personal plugins folder.
