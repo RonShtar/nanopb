@@ -276,7 +276,16 @@ if (!pb_validate_decode(&stream, MyMessage, &msg)) {
 // Maximum simultaneous field/index nesting depth ("a.b[2].c" is depth 3)
 // tracked while validating (default: 16)
 #define PB_VALIDATE_MAX_PATH_DEPTH 32
+
+// Packet filters decode into static structs instead of the stack
+// (less stack; the filter is then not reentrant). Default: off.
+#define PB_VALIDATE_FILTER_STATIC_BUFFERS
 ```
+
+A validator can be called with `NULL` instead of a `pb_violations_t`: it then
+only answers pass/fail, skips all path bookkeeping and is noticeably faster.
+The generated packet filters do this unless `PB_VALIDATE_DEBUG` is defined.
+See [Validation performance](validation_performance.md) for measurements.
 
 ### Debug Mode
 
@@ -494,6 +503,11 @@ declared `_validate.h`/`_validate.c` outputs.
   value-interpolated messages -- see [Debug Mode](#debug-mode). This is a
   compile-time tradeoff (more RAM per violation, no early exit), meant for
   development/debugging builds rather than production
+- Pass `NULL` as the violations buffer where only pass/fail matters; the
+  generated packet filters do. [Validation performance](validation_performance.md)
+  walks through the hot path, the measured cost of each part and the
+  compile-time switches that matter (`PB_BUFFER_ONLY`, `PB_NO_ERRMSG`,
+  `PB_VALIDATE_FILTER_STATIC_BUFFERS`, ...)
 
 ## Error Messages
 
