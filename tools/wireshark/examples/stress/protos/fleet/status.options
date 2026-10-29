@@ -1,0 +1,2 @@
+fleet.status.Status.text max_size:32
+fleet.status.Status.history max_count:6

@@ -1,0 +1,4 @@
+# Default storage for google.protobuf.Any, used only when the project does
+# not provide its own google/protobuf/any.options earlier on the include path.
+google.protobuf.Any.type_url max_size:128
+google.protobuf.Any.value max_size:256

@@ -1,0 +1,19 @@
+// Shared definitions imported by other units as "shared/units.proto".
+syntax = "proto3";
+
+package shared;
+
+import "validate.proto";
+
+enum Unit {
+    UNIT_NONE = 0;
+    UNIT_MILLIVOLT = 1;
+    UNIT_MILLIAMP = 2;
+    UNIT_CELSIUS = 3;
+    UNIT_METER = 4;
+}
+
+message Quantity {
+    double value = 1 [(validate.rules).double = {gte: -1000000, lte: 1000000}];
+    Unit unit = 2 [(validate.rules).enum.defined_only = true];
+}

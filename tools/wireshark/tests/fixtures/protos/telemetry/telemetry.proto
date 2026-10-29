@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package demo.telemetry;
+
+import "validate.proto";
+import "common.proto";
+
+message Reading {
+    demo.common.Unit unit = 1;
+    float value = 2 [(validate.rules).float = {gte: -100, lte: 100}];
+    sint32 offset = 3;
+}
+
+message Telemetry {
+    demo.common.Header header = 1;
+    string device_name = 2 [(validate.rules).string = {min_len: 1, max_len: 31}];
+    repeated Reading readings = 3;
+    repeated int32 raw = 4;
+    bytes blob = 5;
+    double ratio = 6;
+    bool healthy = 7;
+}

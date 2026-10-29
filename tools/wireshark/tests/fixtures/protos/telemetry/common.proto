@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package demo.common;
+
+enum Unit {
+    UNIT_UNKNOWN = 0;
+    UNIT_CELSIUS = 1;
+    UNIT_VOLT = 2;
+}
+
+message Header {
+    uint32 seq = 1;
+    fixed64 timestamp_us = 2;
+    string source = 3;
+}

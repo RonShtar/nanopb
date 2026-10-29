@@ -1,0 +1,17 @@
+// proto2 on purpose: required fields, explicit defaults, unpacked repeated.
+syntax = "proto2";
+
+package fleet.status;
+
+message Status {
+    enum Code {
+        CODE_OK = 0;
+        CODE_BUSY = 1;
+        CODE_FAULT = 2;
+    }
+    required Code code = 1;
+    optional string text = 2 [default = "ok"];
+    repeated int32 history = 3;
+    optional int64 uptime_s = 4 [default = -1];
+    optional sfixed64 offset_ns = 5;
+}

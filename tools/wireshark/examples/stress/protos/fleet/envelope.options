@@ -1,0 +1,2 @@
+fleet.envelope.Batch.items max_count:3
+fleet.envelope.Envelope.signature max_size:16

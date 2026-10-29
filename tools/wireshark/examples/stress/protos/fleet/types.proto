@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package fleet.types;
+
+import "validate.proto";
+
+enum Severity {
+    SEV_INFO = 0;
+    SEV_WARN = 1;
+    SEV_ERROR = 2;
+    SEV_FATAL = 3;
+}
+
+message Vec3 {
+    float x = 1;
+    float y = 2;
+    float z = 3;
+}
+
+message GeoPoint {
+    double lat = 1 [(validate.rules).double = {gte: -90, lte: 90}];
+    double lon = 2 [(validate.rules).double = {gte: -180, lte: 180}];
+    sfixed32 alt_cm = 3;
+}
+
+message DeviceId {
+    fixed64 hi = 1;
+    fixed64 lo = 2;
+    string name = 3 [(validate.rules).string = {min_len: 5, max_len: 15, prefix: "dev-", ascii: true}];
+}
+
+message Version {
+    uint32 major = 1 [(validate.rules).uint32.lte = 99];
+    uint32 minor = 2;
+    uint32 patch = 3;
+}

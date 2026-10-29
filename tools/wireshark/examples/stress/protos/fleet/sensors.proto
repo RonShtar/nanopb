@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+package fleet.sensors;
+
+import "validate.proto";
+import "types.proto";
+import "shared/units.proto";
+
+message Imu {
+    fleet.types.Vec3 accel = 1;
+    fleet.types.Vec3 gyro = 2;
+    sint32 temp_c = 3 [(validate.rules).sint32 = {gte: -40, lte: 125}];
+    repeated sint64 samples = 4 [(validate.rules).repeated = {max_items: 8}];
+}
+
+message Battery {
+    enum State {
+        STATE_UNKNOWN = 0;
+        STATE_CHARGING = 1;
+        STATE_DISCHARGING = 2;
+        STATE_FULL = 3;
+    }
+    uint32 millivolts = 1 [(validate.rules).uint32 = {gte: 2500, lte: 4500}];
+    int32 current_ma = 2;
+    float soc = 3 [(validate.rules).float = {gte: 0, lte: 100}];
+    bool charging = 4;
+    State state = 5 [(validate.rules).enum.defined_only = true];
+    repeated shared.Quantity cells = 6;
+}
+
+message Gps {
+    fleet.types.GeoPoint pos = 1;
+    uint64 fix_time_us = 2;
+    uint32 satellites = 3 [(validate.rules).uint32.lte = 64];
+    repeated fixed32 snr = 4 [packed = false];
+}

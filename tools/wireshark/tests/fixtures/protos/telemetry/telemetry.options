@@ -1,0 +1,4 @@
+demo.telemetry.Telemetry.device_name max_size:32
+demo.telemetry.Telemetry.readings max_count:4
+demo.telemetry.Telemetry.raw max_count:8
+demo.telemetry.Telemetry.blob max_size:16

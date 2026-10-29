@@ -1,0 +1,3 @@
+fleet.sensors.Imu.samples max_count:8
+fleet.sensors.Battery.cells max_count:4
+fleet.sensors.Gps.snr max_count:12
