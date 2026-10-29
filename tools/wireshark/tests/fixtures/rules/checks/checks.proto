@@ -1,0 +1,74 @@
+// Every validation rule kind the C validator enforces, used to check that
+// the dissector's PASSED / DROPPED verdict matches pb_validate.
+syntax = "proto3";
+
+package rules;
+
+import "validate.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+enum Level {
+    LEVEL_UNKNOWN = 0;
+    LEVEL_LOW = 1;
+    LEVEL_HIGH = 2;
+}
+
+message Inner {
+    uint32 code = 1 [(validate.rules).uint32 = {gte: 1, lte: 99}];
+    string tag = 2 [(validate.rules).string = {prefix: "t-", max_len: 8}];
+}
+
+message Numbers {
+    int32 i32 = 1 [(validate.rules).int32 = {gt: -10, lt: 10}];
+    sint32 s32 = 2 [(validate.rules).sint32 = {not_in: [13]}];
+    uint32 u32 = 3 [(validate.rules).uint32 = {in: [0, 1, 2, 4, 8]}];
+    int64 i64 = 4 [(validate.rules).int64 = {gte: -5000000000, lte: 5000000000}];
+    uint64 u64 = 5 [(validate.rules).uint64 = {lte: 9000000000000000000}];
+    sint64 s64 = 6 [(validate.rules).sint64 = {not_in: [-1]}];
+    fixed64 x64 = 7 [(validate.rules).fixed64 = {gte: 10}];
+    sfixed32 sf32 = 8 [(validate.rules).sfixed32 = {lte: 0}];
+    // 0.1 is not exact in float32: C compares with (float)0.1, so 0.1f passes.
+    float ratio = 9 [(validate.rules).float = {gte: 0, lte: 0.1}];
+    double dbl = 10 [(validate.rules).double = {gt: -1.5}];
+    bool flag = 11 [(validate.rules).bool.const_value = false];
+    Level level = 12 [(validate.rules).enum = {defined_only: true, not_in: [2]}];
+}
+
+message Strings {
+    string name = 1 [(validate.rules).string = {min_len: 2, max_len: 10}];
+    string email = 2 [(validate.rules).string.email = true];
+    optional string host = 3 [(validate.rules).string.hostname = true];
+    optional string ip4 = 4 [(validate.rules).string.ipv4 = true];
+    optional string ip6 = 5 [(validate.rules).string.ipv6 = true];
+    optional string addr = 6 [(validate.rules).string.ip = true];
+    string code = 7 [(validate.rules).string = {in: ["a", "b", "c"]}];
+    string note = 8 [(validate.rules).string = {contains: "ok", suffix: "!", ascii: true}];
+    string version = 9 [(validate.rules).string.const_value = "v1"];
+    bytes blob = 10 [(validate.rules).bytes = {min_len: 1, max_len: 4, prefix: "\001"}];
+    bytes magic = 11 [(validate.rules).bytes.const_value = "\312\376"];
+    bytes kind = 12 [(validate.rules).bytes = {in: ["\001", "\002"]}];
+}
+
+message Lists {
+    repeated int32 nums = 1 [(validate.rules).repeated = {min_items: 1, max_items: 4, unique: true,
+                                                          items: {int32: {gte: 0}}}];
+    repeated string words = 2 [(validate.rules).repeated = {max_items: 3, items: {string: {min_len: 1}}}];
+    repeated Level levels = 3 [(validate.rules).repeated.items.enum.defined_only = true];
+    map<string, int32> counts = 4 [(validate.rules).map.max_pairs = 2];
+    repeated Inner inners = 5;
+    repeated float temps = 6 [(validate.rules).repeated.items.float = {lte: 0.1}];
+}
+
+message Envelope {
+    Inner inner = 1 [(validate.rules).required = true];
+    optional uint32 opt = 2 [(validate.rules).uint32.gte = 5];
+    oneof body {
+        Numbers numbers = 3;
+        Strings strings = 4;
+        Lists lists = 5;
+        uint32 small = 6 [(validate.rules).uint32.lte = 3];
+    }
+    google.protobuf.Any extra = 7 [(validate.rules).any = {in: ["type.googleapis.com/rules.Inner"]}];
+    google.protobuf.Timestamp at = 8 [(validate.rules).timestamp.lt_now = true];
+}
