@@ -1,0 +1,5 @@
+Reading.unit max_size:9
+Telemetry.device max_size:32
+Telemetry.readings max_count:8
+Telemetry.contact max_size:48
+Command.name max_size:8

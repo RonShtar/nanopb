@@ -120,7 +120,11 @@ static void pb_validate_context_format_path(const pb_validate_context_t *ctx, ch
 /* Push a field name segment onto the path stack (O(1), no string work). */
 bool pb_validate_context_push_field(pb_validate_context_t *ctx, const char *field_name)
 {
-    if (!ctx || ctx->path_depth >= PB_VALIDATE_MAX_PATH_DEPTH)
+    if (!ctx)
+        return false;
+    if (!ctx->violations)
+        return true; /* no paths to report: nothing to track */
+    if (ctx->path_depth >= PB_VALIDATE_MAX_PATH_DEPTH)
         return false;
 
     ctx->path_stack[ctx->path_depth].field_name = field_name;
@@ -133,14 +137,18 @@ bool pb_validate_context_push_field(pb_validate_context_t *ctx, const char *fiel
 /* Pop the most recently pushed path segment. */
 void pb_validate_context_pop_field(pb_validate_context_t *ctx)
 {
-    if (ctx && ctx->path_depth > 0)
+    if (ctx && ctx->violations && ctx->path_depth > 0)
         ctx->path_depth--;
 }
 
 /* Push an array index segment onto the path stack (O(1), no string work). */
 bool pb_validate_context_push_index(pb_validate_context_t *ctx, pb_size_t index)
 {
-    if (!ctx || ctx->path_depth >= PB_VALIDATE_MAX_PATH_DEPTH)
+    if (!ctx)
+        return false;
+    if (!ctx->violations)
+        return true;
+    if (ctx->path_depth >= PB_VALIDATE_MAX_PATH_DEPTH)
         return false;
 
     ctx->path_stack[ctx->path_depth].field_name = NULL;
@@ -153,7 +161,7 @@ bool pb_validate_context_push_index(pb_validate_context_t *ctx, pb_size_t index)
 /* Pop the most recently pushed path segment. */
 void pb_validate_context_pop_index(pb_validate_context_t *ctx)
 {
-    if (ctx && ctx->path_depth > 0)
+    if (ctx && ctx->violations && ctx->path_depth > 0)
         ctx->path_depth--;
 }
 
@@ -164,7 +172,10 @@ void pb_violations_record(pb_validate_context_t *ctx, const char *constraint_id,
 {
     char path[PB_VALIDATE_MAX_PATH_LENGTH];
 
-    if (!ctx || !ctx->violations)
+    if (!ctx)
+        return;
+    ctx->failed = true;
+    if (!ctx->violations)
         return;
 
     if (ctx->violations->count >= PB_VALIDATE_MAX_VIOLATIONS)
@@ -187,6 +198,11 @@ void pb_violations_record_numeric(pb_validate_context_t *ctx, const char *constr
                                    const char *base_message, double actual, double expected)
 {
     char buf[PB_VALIDATE_MAX_MESSAGE_LENGTH];
+    if (ctx && !ctx->violations)
+    {
+        ctx->failed = true; /* nothing to format the message for */
+        return;
+    }
     snprintf(buf, sizeof(buf), "%s (got %g, expected %g)", base_message, actual, expected);
     pb_violations_record(ctx, constraint_id, buf);
 }
