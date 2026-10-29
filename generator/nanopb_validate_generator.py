@@ -1208,7 +1208,11 @@ def build_validator_generator(f, force_names=()):
 
     for fqn in force_names:
         msg = ir_message_for_fqn(f, fqn)
-        if msg is not None and str(msg.name) not in validator_gen.validators:
+        # Only messages of this file: another file's message gets its
+        # validator from that file, and a second copy here would be a
+        # duplicate definition.
+        if msg is not None and getattr(msg, 'protofile', f) is f and \
+                str(msg.name) not in validator_gen.validators:
             validator_gen.force_add_message_validator(msg, _message_validate_rules(msg))
 
     # Messages of other files: their file emits a validator only under the
