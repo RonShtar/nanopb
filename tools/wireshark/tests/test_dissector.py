@@ -39,6 +39,13 @@ class LuaTestCase(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix='nanopb_ws_lua_')
         self.lua = lupa.LuaRuntime(unpack_returned_tuples=True)
         self.mock = self.lua.eval('dofile("%s")' % lua_path(os.path.join(TESTS_DIR, 'wireshark_mock.lua')))
+        # Wireshark's Dir API, backed by the real file system.
+        listdir = lambda path, ext: self.lua.table_from(sorted(
+            f for f in os.listdir(path) if f.endswith(ext or '')))
+        self.lua.eval('function(isdir, listdir) Dir = {'
+                      ' exists = function(p) return isdir(p) end,'
+                      ' open = function(p, ext) local t, i = listdir(p, ext), 0'
+                      '   return function() i = i + 1 return t[i] end end } end')(os.path.isdir, listdir)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -438,6 +445,15 @@ class StudioTests(LuaTestCase):
         picker.buttons['Generate']()
         self.assertTrue(self.last_window().text.startswith('OK'), self.last_window().text)
         self.assertEqual(os.listdir(self.out), ['fleet'])
+
+    def test_unit_list_needs_no_python(self):
+        # The picker reads the protos directory itself; only Generate runs the backend.
+        self.lua.execute('io.popen = function() error("no process may be started for the unit list") end')
+        stress = os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
+                             input_dir=stress)
+        self.assertIn('[x] fleet', picker.text)
+        self.assertIn('[ ] shared   (already merged into fleet)', picker.text)
 
     def test_generate_with_nothing_selected(self):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')

@@ -272,13 +272,61 @@ end
 -- Show the units of the input directory as a toggle list. `generate` gets the
 -- comma separated selection and returns ok, output text and optionally extra
 -- result-window buttons and a function to run after the window is shown.
+-- Units of the protos directory and which ones other units import, read
+-- directly with Wireshark's Dir API: listing them needs no Python process.
+-- Returns nil where Dir is not available (very old Wireshark).
+local function scan_units(root)
+    if not (Dir and Dir.open and Dir.exists) then return nil end
+    if not Dir.exists(root) then return nil, root .. " is not a directory" end
+    local names = {}
+    for entry in Dir.open(root) do
+        local path = join(root, entry)
+        if entry ~= "." and entry ~= ".." and Dir.exists(path) then
+            local has_proto = false
+            for _ in Dir.open(path, ".proto") do has_proto = true break end
+            if has_proto then names[#names + 1] = entry end
+        end
+    end
+    table.sort(names)
+    local is_unit, merged = {}, {}
+    for _, name in ipairs(names) do is_unit[name] = true end
+    for _, name in ipairs(names) do
+        for file in Dir.open(join(root, name), ".proto") do
+            local f = io.open(join(root, name, file), "r")
+            if f then
+                local text = f:read("*a") or ""
+                f:close()
+                for path in text:gmatch('import%s+[%a]*%s*"([^"]+)"') do
+                    local other = path:match("^([^/]+)/")
+                    if other and other ~= name and is_unit[other] then
+                        local users = merged[other] or {}
+                        local known = false
+                        for _, u in ipairs(users) do known = known or u == name end
+                        if not known then users[#users + 1] = name end
+                        merged[other] = users
+                    end
+                end
+            end
+        end
+    end
+    for other, users in pairs(merged) do merged[other] = table.concat(users, ", ") end
+    return names, merged
+end
+
 local function pick_units(title, generate)
-    local ok, text = run_backend(add_common({ "units", "--names-only" }))
-    if not ok then
-        show(title, false, text)
+    local names, merged = scan_units(config.protos_root)
+    if names == nil and merged then
+        show(title, false, merged)
         return
     end
-    local names, merged = parse_unit_names(text)
+    if names == nil then
+        local ok, text = run_backend(add_common({ "units", "--names-only" }))
+        if not ok then
+            show(title, false, text)
+            return
+        end
+        names, merged = parse_unit_names(text)
+    end
     if #names == 0 then
         show(title, false, "No subdirectory of " .. config.protos_root .. " contains .proto files.")
         return
