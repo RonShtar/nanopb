@@ -30,7 +30,7 @@ CONFIGS = [
     ('PB_VALIDATE_FILTER_STATIC_BUFFERS', ['-DPB_VALIDATE_FILTER_STATIC_BUFFERS']),
 ]
 
-OPERATIONS = ('decode', 'decode+validate', 'filter_udp')
+OPERATIONS = ('decode', 'decode+validate', 'decode+validate(NULL)', 'filter_udp')
 PACKETS = ('valid', 'bad_first', 'bad_last')
 
 TIME_RE = re.compile(r'^(\S+)\s+(\S+)\s+([\d.]+) ns$')

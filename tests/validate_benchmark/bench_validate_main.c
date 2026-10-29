@@ -94,6 +94,16 @@ static int decode_validate(const packet_t *p)
     return pb_validate_Envelope(&env, &violations);
 }
 
+/* Pass/fail only: no violations buffer, no path bookkeeping. */
+static int decode_validate_nobuf(const packet_t *p)
+{
+    Envelope env;
+    pb_istream_t stream = pb_istream_from_buffer(p->data, p->size);
+    if (!pb_decode(&stream, Envelope_fields, &env))
+        return 0;
+    return pb_validate_Envelope(&env, NULL);
+}
+
 static int filter(const packet_t *p)
 {
     return Envelope_filter_udp(NULL, p->data, p->size) == 0;
@@ -170,6 +180,8 @@ int main(int argc, char **argv)
 
     /* Correctness first: the numbers are meaningless if the verdicts are wrong. */
     if (!decode_validate(&packets[0]) || decode_validate(&packets[1]) || decode_validate(&packets[2]) ||
+        !decode_validate_nobuf(&packets[0]) || decode_validate_nobuf(&packets[1]) ||
+        decode_validate_nobuf(&packets[2]) ||
         !filter(&packets[0]) || filter(&packets[1]) || filter(&packets[2]))
     {
         printf("FAIL: unexpected validation verdict\n");
@@ -183,6 +195,7 @@ int main(int argc, char **argv)
 
     run("decode", decode_only, iterations);
     run("decode+validate", decode_validate, iterations);
+    run("decode+validate(NULL)", decode_validate_nobuf, iterations);
     run("filter_udp", filter, iterations);
     return 0;
 }

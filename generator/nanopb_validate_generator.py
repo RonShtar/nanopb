@@ -958,11 +958,11 @@ class FilterEmitter(object):
         if with_violations:
             yield '%s{\n' % indent
             yield '%s    pb_size_t __pb_vi;\n' % indent
-            yield '%s    for (__pb_vi = 0; __pb_vi < violations.count; __pb_vi++) {\n' % indent
+            yield '%s    for (__pb_vi = 0; __pb_vi < violations->count; __pb_vi++) {\n' % indent
             yield ('%s        PB_VALIDATE_FILTER_LOG("%s: %%s %%s: %%s", '
-                   'violations.violations[__pb_vi].field_path, '
-                   'violations.violations[__pb_vi].constraint_id, '
-                   'violations.violations[__pb_vi].message);\n') % (indent, reason)
+                   'violations->violations[__pb_vi].field_path, '
+                   'violations->violations[__pb_vi].constraint_id, '
+                   'violations->violations[__pb_vi].message);\n') % (indent, reason)
             yield '%s    }\n' % indent
             yield '%s}\n' % indent
         else:
@@ -983,10 +983,20 @@ class FilterEmitter(object):
 
         yield '%s\n' % spec.core_signature
         yield '{\n'
-        yield '    pb_violations_t violations = {0};\n'
+        yield '#ifdef PB_VALIDATE_DEBUG\n'
+        yield '    pb_violations_t violations_buffer;\n'
+        yield '    pb_violations_t *violations = &violations_buffer;\n'
+        yield '#else\n'
+        yield '    /* Release builds only need pass/fail: no violations buffer to fill. */\n'
+        yield '    pb_violations_t *violations = NULL;\n'
+        yield '#endif\n'
         yield '    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);\n'
-        yield '    %s envelope = %s;\n' % (spec.entry.ctype, spec.entry.init_zero)
+        for line in self._decode_buffer('    ', spec.entry.ctype, 'envelope'):
+            yield line
         yield '\n'
+        yield '#ifdef PB_VALIDATE_DEBUG\n'
+        yield '    pb_violations_init(violations);\n'
+        yield '#endif\n'
         yield '    if (!pb_decode(&stream, &%s, &envelope)) {\n' % spec.entry.msgdesc
         for line in self._reject_lines('        ', 'failed to decode %s' % spec.entry.fqn):
             yield line
@@ -995,7 +1005,7 @@ class FilterEmitter(object):
 
         if spec.entry.validator_func:
             yield '    /* Validate the entrypoint before looking at its payload. */\n'
-            yield '    if (!%s(&envelope, &violations)) {\n' % spec.entry.validator_func
+            yield '    if (!%s(&envelope, violations)) {\n' % spec.entry.validator_func
             for line in self._reject_lines('        ', 'entrypoint validation failed', with_violations=True):
                 yield line
             yield '    }\n'
@@ -1030,6 +1040,20 @@ class FilterEmitter(object):
         return ('dispatch on google.protobuf.Any type_url across %d allowed type(s)'
                 % len(spec.routes))
 
+    @staticmethod
+    def _decode_buffer(indent, ctype, name):
+        """Declare the struct a packet is decoded into.
+
+        pb_decode() initializes every field itself, so no _init_zero copy is
+        needed. PB_VALIDATE_FILTER_STATIC_BUFFERS moves the struct out of the
+        stack (smaller stack, but the filter is then not reentrant).
+        """
+        yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
+        yield '%sstatic %s %s;\n' % (indent, ctype, name)
+        yield '#else\n'
+        yield '%s%s %s;\n' % (indent, ctype, name)
+        yield '#endif\n'
+
     def _single_dispatch(self):
         if not self.spec.entry.validator_func:
             yield '    (void)violations;\n'
@@ -1040,8 +1064,9 @@ class FilterEmitter(object):
         yield '    switch (%s) {\n' % spec.dispatch_expr
         for route in spec.routes:
             yield '        case %s: /* %s */\n' % (route.case_label, route.comment)
-            if route.kind == Route.ONEOF_MESSAGE and route.target.validator_func:
-                yield '            if (!%s(&%s, &violations)) {\n' % (
+            if route.kind == Route.ONEOF_MESSAGE and route.target.validator_func and \
+                    not spec.entry.validator_func:
+                yield '            if (!%s(&%s, violations)) {\n' % (
                     route.target.validator_func, route.access)
                 for line in self._reject_lines('                ', '%s validation failed' % route.comment,
                                                 with_violations=True):
@@ -1088,7 +1113,8 @@ class FilterEmitter(object):
             target = route.target
             yield '            case %s: /* %s */\n' % (route.case_label, route.type_url)
             yield '                if (strcmp(type_url, "%s") == 0) {\n' % route.type_url
-            yield '                    %s payload = %s;\n' % (target.ctype, target.init_zero)
+            for line in self._decode_buffer('                    ', target.ctype, 'payload'):
+                yield line
             yield '                    pb_istream_t payload_stream = pb_istream_from_buffer(\n'
             yield '                        %s.value.bytes, %s.value.size);\n' % (access, access)
             yield '\n'
@@ -1097,7 +1123,7 @@ class FilterEmitter(object):
                 yield line
             yield '                    }\n'
             if target.validator_func:
-                yield '                    if (!%s(&payload, &violations)) {\n' % target.validator_func
+                yield '                    if (!%s(&payload, violations)) {\n' % target.validator_func
                 for line in self._reject_lines('                        ', '%s payload validation failed' % route.type_url,
                                                 with_violations=True):
                     yield line
