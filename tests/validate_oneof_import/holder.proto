@@ -1,0 +1,14 @@
+/*
+ * Holder.choice.part is of a type from part.proto: its validator lives in
+ * part_validate.c, so holder_validate.h must include part_validate.h.
+ */
+syntax = "proto3";
+
+import "part.proto";
+
+message Holder {
+    oneof choice {
+        Part part = 1;
+        uint32 code = 2;
+    }
+}

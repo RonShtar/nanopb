@@ -1,0 +1,8 @@
+/* A message with rules, used as a oneof arm from another file. */
+syntax = "proto3";
+
+import "validate.proto";
+
+message Part {
+    int32 n = 1 [(validate.rules).int32 = {gte: 0, lte: 9}];
+}

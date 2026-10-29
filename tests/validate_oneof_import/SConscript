@@ -1,0 +1,32 @@
+# Build and run validate_oneof_import test suite
+# A oneof arm of a type from another .proto is validated through its header.
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+part_files = test_env.NanopbProto("part")
+test_env.SideEffect("part_validate.c", part_files)
+test_env.SideEffect("part_validate.h", part_files)
+holder_files = test_env.NanopbProto("holder")
+test_env.SideEffect("holder_validate.c", holder_files)
+test_env.SideEffect("holder_validate.h", holder_files)
+test_env.Depends(holder_files, part_files)
+
+test_prog = test_env.Program(
+    ["test_validate_oneof_import.c", "part.pb.c", "part_validate.c", "holder.pb.c", "holder_validate.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)
