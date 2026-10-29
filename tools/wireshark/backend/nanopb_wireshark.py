@@ -67,6 +67,13 @@ def setup_nanopb(nanopb_root):
                            % nanopb_root)
     if generator_dir not in sys.path:
         sys.path.insert(0, generator_dir)
+    # A fresh checkout has no generator/proto/*_pb2.py yet. Build them the way
+    # nanopb_generator does before anything imports them: otherwise the first
+    # `import generator.proto.validate_pb2` (data generator, rule export) falls
+    # through to grpc_tools' .proto importer, which fails on a duplicate
+    # google/protobuf/descriptor.proto.
+    import proto
+    proto.load_nanopb_pb2()
     return generator_dir
 
 
