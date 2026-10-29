@@ -78,6 +78,7 @@ Validation (`pb_validate.h`):
 | `PB_VALIDATE_MAX_PATH_DEPTH` | 16 | Path segments tracked while validating with a buffer. Set it to your deepest nesting (fields + array indexes). |
 | `PB_VALIDATE_FILTER_STATIC_BUFFERS` | off | Filters decode into `static` structs instead of the stack. Saves the size of the entrypoint (and `Any` payload) struct per call, but the filter is then not reentrant: do not call the same filter from two threads or from an interrupt. |
 | `PB_VALIDATE_FILTER_LOG(fmt, ...)` | no-op | Rejection logging hook, only called with `PB_VALIDATE_DEBUG`. |
+| `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` | 4 | Protocol filters (`--protocol-filter`): levels of `Any` resolved inside each other. Each level keeps one decoded payload struct on the stack; `PB_VALIDATE_FILTER_STATIC_BUFFERS` only moves the outermost `Any` to static storage. |
 
 nanopb (`pb.h`, see [reference](reference.md#compilation-options)):
 

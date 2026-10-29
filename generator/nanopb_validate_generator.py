@@ -120,6 +120,7 @@ decode-callback plumbing is generated for them.
 from __future__ import unicode_literals
 
 import os
+import re
 import shlex
 import sys
 
@@ -1281,10 +1282,11 @@ class FilterOptions(object):
     happens to use internally.
     """
 
-    __slots__ = ('filter_messages', 'filter_mode', 'filter_payloads', 'entry_modes')
+    __slots__ = ('filter_messages', 'filter_mode', 'filter_payloads', 'entry_modes',
+                 'protocol_filter', 'protocol_messages')
 
     def __init__(self, filter_message=None, filter_mode='auto', filter_payloads=(),
-                 filter_messages=None, entry_modes=None):
+                 filter_messages=None, entry_modes=None, protocol_filter=None):
         if filter_messages is None:
             filter_messages = (filter_message,) if filter_message else ()
         self.filter_messages = tuple(filter_messages)
@@ -1292,6 +1294,9 @@ class FilterOptions(object):
         self.filter_payloads = tuple(filter_payloads)
         # Per-entrypoint modes from "--filter=pkg.Msg:single;...".
         self.entry_modes = dict(entry_modes or {})
+        # --protocol-filter=NAME: one Any-dispatched filter for every message.
+        self.protocol_filter = protocol_filter
+        self.protocol_messages = ()
 
     @property
     def filter_message(self):
@@ -1315,6 +1320,7 @@ OWN_OPTIONS = {
     '--filter': 'filter_message',
     '--filter-mode': 'filter_mode',
     '--filter-payloads': 'filter_payloads',
+    '--protocol-filter': 'protocol_filter',
 }
 
 #: Options that used to exist and described the generator's internals rather
@@ -1422,8 +1428,14 @@ def build_filter_options(raw):
                 "--filter-payloads was given without --filter. Name the protocol "
                 "entrypoint with --filter=<fully.qualified.Message>.")
 
+    protocol_filter = (raw.get('protocol_filter') or '').strip() or None
+    if protocol_filter is not None and not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', protocol_filter):
+        raise GeneratorError("--protocol-filter=%s: the name must be a C identifier "
+                             "(it prefixes <name>_filter_udp/_tcp)." % protocol_filter)
+
     return FilterOptions(filter_mode=filter_mode, filter_payloads=payload_list,
-                         filter_messages=messages, entry_modes=entry_modes)
+                         filter_messages=messages, entry_modes=entry_modes,
+                         protocol_filter=protocol_filter)
 
 
 def parse_plugin_parameter(parameter):
@@ -1455,6 +1467,300 @@ def parse_plugin_parameter(parameter):
 # ---------------------------------------------------------------------------
 #                              Plugin entry point
 # ---------------------------------------------------------------------------
+
+
+
+# ---------------------------------------------------------------------------
+#                    Protocol filter (--protocol-filter=NAME)
+# ---------------------------------------------------------------------------
+#
+# One NAME_filter_udp/_tcp for a whole protocol: the packet is a
+# google.protobuf.Any and its type_url is the opcode. A switch on the type_url
+# selects the message, which is decoded and validated; every Any inside it is
+# resolved the same way, up to PB_VALIDATE_FILTER_MAX_ANY_DEPTH levels.
+
+ANY_FQN = 'google.protobuf.Any'
+
+
+class ProtocolFilterEmitter(object):
+    """Emit NAME_filter.h / NAME_filter.c for every message of a protocol."""
+
+    def __init__(self, name, hub, index, messages, pb_headers, validate_headers):
+        self.name = name
+        self.hub = hub                  # ProtoFile that knows every message of the request
+        self.index = index              # DescriptorIndex
+        self.messages = messages        # protocol message FQNs, in declaration order
+        self.pb_headers = pb_headers
+        self.validate_headers = validate_headers
+        self.any_ir = ir_message_for_fqn(hub, ANY_FQN)
+        if self.any_ir is None:
+            raise GeneratorError(
+                "--protocol-filter=%s: the packet is a google.protobuf.Any, so "
+                "google/protobuf/any.proto must be generated in the same invocation."
+                % name)
+        self._check_any_storage()
+        self._holds_any = {}
+
+    # -- model ----------------------------------------------------------------
+
+    def _check_any_storage(self):
+        fields = dict((f.name, f) for f in self.any_ir.fields)
+        for name in ('type_url', 'value'):
+            if fields[name].allocation != 'STATIC':
+                raise GeneratorError(
+                    "--protocol-filter needs static storage for google.protobuf.Any.%s; "
+                    "give it a max_size in google/protobuf/any.options." % name)
+
+    def ir(self, ctype):
+        return self.hub.dependencies.get(str(ctype))
+
+    def is_any(self, field):
+        return self.ir(field.ctype) is self.any_ir
+
+    @staticmethod
+    def plain_fields(msg):
+        for field in msg.fields:
+            if field.pbtype == 'oneof':
+                for member in field.fields:
+                    yield field, member
+            else:
+                yield None, field
+
+    def holds_any(self, msg, active=()):
+        """Does `msg` contain an Any anywhere (sub-messages included)?"""
+        key = str(msg.name)
+        if key in self._holds_any:
+            return self._holds_any[key]
+        if key in active:
+            return False  # recursion: the other path through it decides
+        found = False
+        for _, field in self.plain_fields(msg):
+            if field.pbtype not in ('MESSAGE', 'MSG_W_CB'):
+                continue
+            sub = self.ir(field.ctype)
+            if sub is self.any_ir or (sub is not None and self.holds_any(sub, active + (key,))):
+                found = True
+                break
+        self._holds_any[key] = found
+        return found
+
+    def ctype(self, msg):
+        return Globals.naming_style.type_name(msg.name)
+
+    def check_func(self, msg):
+        return '%s_check_%s' % (self.name, self.ctype(msg))
+
+    # -- emission -------------------------------------------------------------
+
+    def header(self):
+        guard = 'PB_PROTOCOL_FILTER_%s_H_INCLUDED' % self.name.upper()
+        yield '/* Packet filter for protocol %s, generated by nanopb-validate --protocol-filter. */\n' % self.name
+        yield '#ifndef %s\n#define %s\n\n' % (guard, guard)
+        yield '#include <pb.h>\n\n'
+        yield '#ifdef __cplusplus\nextern "C" {\n#endif\n\n'
+        yield '/**\n'
+        yield ' * @brief Decode and validate one %s packet.\n' % self.name
+        yield ' *\n'
+        yield ' * The packet is a google.protobuf.Any; its type_url selects one of the\n'
+        yield ' * %d messages of the protocol, which is decoded and validated. Every Any\n' % len(self.messages)
+        yield ' * inside it is resolved the same way, up to PB_VALIDATE_FILTER_MAX_ANY_DEPTH\n'
+        yield ' * levels. Unknown type_urls are rejected.\n'
+        yield ' *\n'
+        yield ' * @return 0 to allow the packet, -1 to reject it.\n'
+        yield ' */\n'
+        yield 'int %s_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);\n' % self.name
+        yield 'int %s_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n\n' % self.name
+        yield '#ifdef __cplusplus\n} /* extern "C" */\n#endif\n\n'
+        yield '#endif /* %s */\n' % guard
+
+    def _reject(self, indent, reason):
+        yield '%s#ifdef PB_VALIDATE_DEBUG\n' % indent
+        yield '%sPB_VALIDATE_FILTER_LOG("%s: %s");\n' % (indent, self.name, reason)
+        yield '%s#endif\n' % indent
+        yield '%sreturn %s;\n' % (indent, RET_REJECT)
+
+    def _visit(self, indent, field, access):
+        """Statements that check one Any field or one sub-message holding Any."""
+        if field.allocation != 'STATIC':
+            raise GeneratorError(
+                "--protocol-filter: field '%s' of %s holds a google.protobuf.Any but has %s "
+                "storage, which the filter cannot inspect. Give it max_size/max_count."
+                % (field.name, field.struct_name, field.allocation.lower()))
+        sub = self.ir(field.ctype)
+        func = '%s_check_any' % self.name if sub is self.any_ir else self.check_func(sub)
+        if field.rules == 'REPEATED':
+            count = '%s_count' % access
+        elif field.rules == 'FIXARRAY':
+            count = '(pb_size_t)(sizeof(%s) / sizeof(%s[0]))' % (access, access)
+        else:
+            count = None
+        if count is None:
+            return ['%sif (%s(&%s, depth) != 0) return %s;\n' % (indent, func, access, RET_REJECT)]
+        return ['%s{\n' % indent,
+                '%s    pb_size_t i;\n' % indent,
+                '%s    for (i = 0; i < %s; i++)\n' % (indent, count),
+                '%s        if (%s(&%s[i], depth) != 0) return %s;\n' % (indent, func, access, RET_REJECT),
+                '%s}\n' % indent]
+
+    def _check_body(self, msg):
+        lines = []
+        for field in msg.fields:
+            if field.pbtype == 'oneof':
+                arms = []
+                for member in field.fields:
+                    sub = self.ir(member.ctype) if member.pbtype in ('MESSAGE', 'MSG_W_CB') else None
+                    if sub is None or not (sub is self.any_ir or self.holds_any(sub)):
+                        continue
+                    access = ('msg->%s' % member.name) if field.anonymous else ('msg->%s.%s' % (field.name, member.name))
+                    arms.append(['        case %s_%s_tag:\n' % (msg.name, member.name)] +
+                                self._visit('            ', member, access) + ['            break;\n'])
+                if arms:
+                    lines.append('    switch (msg->which_%s) {\n' % field.name)
+                    for arm in arms:
+                        lines += arm
+                    lines.append('        default:\n            break;\n    }\n')
+                continue
+            if field.pbtype not in ('MESSAGE', 'MSG_W_CB'):
+                continue
+            sub = self.ir(field.ctype)
+            if sub is None or not (sub is self.any_ir or self.holds_any(sub)):
+                continue
+            access = 'msg->%s' % field.name
+            if field.rules == 'OPTIONAL':
+                lines.append('    if (msg->has_%s) {\n' % field.name)
+                lines += self._visit('        ', field, access)
+                lines.append('    }\n')
+            else:
+                lines += self._visit('    ', field, access)
+        return lines
+
+    def _protocol_irs(self):
+        result = []
+        for fqn in self.messages:
+            msg = ir_message_for_fqn(self.hub, fqn)
+            if msg is not None:
+                result.append((fqn, msg))
+        return result
+
+    def source(self):
+        name = self.name
+        yield '/* Packet filter for protocol %s, generated by nanopb-validate --protocol-filter. */\n' % name
+        yield '#include "%s_filter.h"\n' % name
+        yield '#include <string.h>\n'
+        yield '#include <pb_decode.h>\n'
+        for header in self.pb_headers:
+            yield '#include "%s"\n' % header
+        for header in self.validate_headers:
+            yield '#include "%s"\n' % header
+        yield '\n'
+        yield '/* Levels of google.protobuf.Any resolved inside each other (stack use grows\n'
+        yield ' * with it: one decoded payload struct per level). */\n'
+        yield '#ifndef PB_VALIDATE_FILTER_MAX_ANY_DEPTH\n#define PB_VALIDATE_FILTER_MAX_ANY_DEPTH 4\n#endif\n\n'
+
+        any_ctype = self.ctype(self.any_ir)
+        yield 'static int %s_check_any(const %s *any, int depth);\n' % (name, any_ctype)
+
+        # Every message that holds an Any gets a walker (protocol messages and
+        # anything they reach, e.g. map entries), declared up front for recursion.
+        walkers = []
+        seen = set()
+        pending = [msg for _, msg in self._protocol_irs()]
+        while pending:
+            msg = pending.pop(0)
+            if str(msg.name) in seen or msg is self.any_ir or not self.holds_any(msg):
+                continue
+            seen.add(str(msg.name))
+            walkers.append(msg)
+            for _, field in self.plain_fields(msg):
+                if field.pbtype in ('MESSAGE', 'MSG_W_CB'):
+                    sub = self.ir(field.ctype)
+                    if sub is not None:
+                        pending.append(sub)
+        for msg in walkers:
+            yield 'static int %s(const %s *msg, int depth);\n' % (self.check_func(msg), self.ctype(msg))
+        yield '\n'
+        for msg in walkers:
+            yield '/* Resolve the google.protobuf.Any fields of %s. */\n' % msg.name
+            yield 'static int %s(const %s *msg, int depth)\n{\n' % (self.check_func(msg), self.ctype(msg))
+            for line in self._check_body(msg):
+                yield line
+            yield '    (void)depth;\n'
+            yield '    return %s;\n}\n\n' % RET_ALLOW
+
+        cases = OrderedDict()
+        for fqn, msg in self._protocol_irs():
+            cases.setdefault(type_url_hash(fqn), []).append((fqn, msg))
+
+        yield '/* The type_url is the opcode: it selects the message to decode and validate. */\n'
+        yield 'static int %s_check_any(const %s *any, int depth)\n{\n' % (name, any_ctype)
+        yield '    const char *type_name = strrchr(any->type_url, \'/\');\n'
+        yield '    const char *cursor;\n'
+        yield '    uint32_t hash = 0;\n\n'
+        yield '    if (depth >= PB_VALIDATE_FILTER_MAX_ANY_DEPTH) {\n'
+        for line in self._reject('        ', 'google.protobuf.Any nested too deep'):
+            yield line
+        yield '    }\n'
+        yield '    /* "type.googleapis.com/pkg.Msg" -> "pkg.Msg"; any host prefix is accepted. */\n'
+        yield '    type_name = type_name ? type_name + 1 : any->type_url;\n'
+        yield '    for (cursor = type_name; *cursor != \'\\0\'; cursor++)\n'
+        yield '        hash = hash * 31u + (uint32_t)(uint8_t)*cursor;\n\n'
+        yield '    switch (hash) {\n'
+        for value, entries in cases.items():
+            yield '        case 0x%08xu:\n' % value
+            for fqn, msg in entries:
+                ctype = self.ctype(msg)
+                yield '            if (strcmp(type_name, "%s") == 0) {\n' % fqn
+                yield '                %s payload;\n' % ctype
+                yield '                pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);\n'
+                yield '                if (!pb_decode(&stream, &%s_msg, &payload)) {\n' % ctype
+                for line in self._reject('                    ', 'cannot decode %s' % fqn):
+                    yield line
+                yield '                }\n'
+                yield '                if (!%s(&payload, NULL)) {\n' % validator_func_name(msg)
+                for line in self._reject('                    ', '%s validation failed' % fqn):
+                    yield line
+                yield '                }\n'
+                if str(msg.name) in seen:
+                    yield '                return %s(&payload, depth + 1);\n' % self.check_func(msg)
+                else:
+                    yield '                return %s;\n' % RET_ALLOW
+                yield '            }\n'
+            yield '            break;\n'
+        yield '        default:\n            break;\n    }\n'
+        for line in self._reject('    ', 'type_url is not a message of this protocol'):
+            yield line
+        yield '}\n\n'
+
+        yield 'static int %s_filter_core(const uint8_t *packet, size_t packet_size)\n{\n' % name
+        yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
+        yield '    static %s any;\n' % any_ctype
+        yield '#else\n'
+        yield '    %s any;\n' % any_ctype
+        yield '#endif\n'
+        yield '    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);\n\n'
+        yield '    if (!pb_decode(&stream, &%s_msg, &any)) {\n' % any_ctype
+        for line in self._reject('        ', 'packet is not a google.protobuf.Any'):
+            yield line
+        yield '    }\n'
+        yield '    return %s_check_any(&any, 0);\n}\n\n' % name
+
+        yield 'int %s_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % name
+        yield '    (void)ctx;\n    return %s_filter_core(packet, packet_size);\n}\n\n' % name
+        yield 'int %s_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % name
+        yield '    (void)ctx;\n    (void)is_to_server;\n    return %s_filter_core(packet, packet_size);\n}\n' % name
+
+
+def protocol_messages(index, files):
+    """FQNs of the messages a protocol filter accepts: every message of `files`
+    except map entries and google.protobuf well-known types."""
+    result = []
+    for entry in index.by_fqn.values():
+        if entry.filename not in files or entry.fqn.startswith('google.protobuf.'):
+            continue
+        if entry.desc.options.map_entry:
+            continue
+        result.append(entry.fqn)
+    return result
 
 
 def process_file(filename, fdesc, options, filter_options, index,
@@ -1503,7 +1809,11 @@ def process_file(filename, fdesc, options, filter_options, index,
     # 1. The standalone validator files.  Messages on the filter path get a
     #    validator even if they declare no rules, so the filter's direct calls
     #    always resolve.
-    force = _dedupe(name for spec in specs for name in spec.required_validators())
+    # Filters call the validators of the messages they decode directly, so
+    # those must exist even when a message declares no rules.
+    local = set(entry.fqn for entry in index.by_fqn.values() if entry.filename == filename)
+    force = _dedupe([name for spec in specs for name in spec.required_validators()] +
+                    [fqn for fqn in filter_options.protocol_messages if fqn in local])
     validator_gen = build_validator_generator(f, force)
     validate_headerdata = ''.join(validator_gen.generate_header())
     validate_sourcedata = ''.join(validator_gen.generate_source())
@@ -1569,6 +1879,9 @@ def main_plugin():
 
         validator_index = ValidatorIndex()
         generated_entries = set()
+        if filter_options.protocol_filter:
+            filter_options.protocol_messages = protocol_messages(index, set(request.file_to_generate))
+        validate_headers = []
 
         for filename in request.file_to_generate:
             for fdesc in request.proto_file:
@@ -1581,6 +1894,24 @@ def main_plugin():
                         if insertion_point:
                             entry.insertion_point = insertion_point
                         entry.content = content
+                        if not insertion_point and name.endswith('_validate' + options.header_extension):
+                            validate_headers.append(name)
+
+        if filter_options.protocol_filter:
+            # One file that resolves every message of the request by name.
+            hub = other_files[request.file_to_generate[0]]
+            for other in other_files.values():
+                if other is not hub:
+                    hub.add_dependency(other)
+            pb_headers = [strip_proto_ext(n) + options.extension + options.header_extension
+                          for n in request.file_to_generate]
+            emitter = ProtocolFilterEmitter(filter_options.protocol_filter, hub, index,
+                                            filter_options.protocol_messages, pb_headers, validate_headers)
+            for suffix, content in ((options.header_extension, emitter.header()),
+                                    (options.source_extension, emitter.source())):
+                entry = response.file.add()
+                entry.name = filter_options.protocol_filter + '_filter' + suffix
+                entry.content = ''.join(content)
 
         missing = [m for m in filter_options.filter_messages if m not in generated_entries]
         if missing:

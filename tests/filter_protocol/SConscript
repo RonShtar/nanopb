@@ -1,0 +1,35 @@
+# Build and run filter_protocol test suite
+# --protocol-filter=demo: one demo_filter_udp/_tcp for every message, selected
+# by the type_url of the google.protobuf.Any packet, nested Any resolved too.
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "--protocol-filter=demo")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+pb_files = test_env.NanopbProto(["protocol", "protocol.options"])
+for name in ("protocol_validate.c", "protocol_validate.h", "demo_filter.c", "demo_filter.h"):
+    test_env.SideEffect(name, pb_files)
+
+# google.protobuf.Any is generated on its own, without the protocol filter.
+any_env = test_env.Clone()
+any_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+any_env.NanopbProto(["google/protobuf/any", "google/protobuf/any.options"])
+
+test_prog = test_env.Program(
+    ["test_filter_protocol.c", "protocol.pb.c", "protocol_validate.c", "demo_filter.c",
+     "google/protobuf/any.pb.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)
