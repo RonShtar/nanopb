@@ -1,0 +1,31 @@
+# Build and run validate_without_buffer test suite
+# pb_validate_<msg>(msg, NULL) must fail on violations in every build mode.
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+pb_files = test_env.NanopbProto(["without_buffer", "without_buffer.options"])
+test_env.SideEffect("without_buffer_validate.c", pb_files)
+test_env.SideEffect("without_buffer_validate.h", pb_files)
+
+for suffix, defines in (("", []), ("_debug", ["PB_VALIDATE_DEBUG"]), ("_no_early_exit", ["PB_VALIDATE_EARLY_EXIT=0"])):
+    mode_env = test_env.Clone()
+    mode_env.Append(CPPDEFINES = defines)
+    objects = [mode_env.Object(name + suffix + ".o", src) for name, src in (
+        ("test_without_buffer", "test_without_buffer.c"),
+        ("without_buffer.pb", "without_buffer.pb.c"),
+        ("without_buffer_validate", "without_buffer_validate.c"),
+        ("pb_validate", "$NANOPB/pb_validate.c"))]
+    prog = mode_env.Program("test_without_buffer" + suffix,
+                            objects + ["$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o"])
+    mode_env.RunTest("test_without_buffer" + suffix + ".output", prog)

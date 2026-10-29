@@ -1,0 +1,19 @@
+/* Validators called without a violations buffer (NULL) must still answer
+ * pass/fail correctly, in every build mode. */
+syntax = "proto3";
+
+import "validate.proto";
+
+message Leaf {
+    int32 n = 1 [(validate.rules).int32 = {gte: 0, lte: 9}];
+}
+
+message Tree {
+    string name = 1 [(validate.rules).string.min_len = 1];
+    Leaf leaf = 2;
+    repeated Leaf leaves = 3;
+    oneof pick {
+        Leaf chosen = 4;
+        uint32 code = 5 [(validate.rules).uint32.lte = 3];
+    }
+}

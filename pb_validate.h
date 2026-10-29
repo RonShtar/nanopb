@@ -105,6 +105,7 @@ extern "C"
         pb_violations_t *violations;
         pb_validate_path_seg_t path_stack[PB_VALIDATE_MAX_PATH_DEPTH];
         pb_size_t path_depth;
+        bool failed; /* a rule failed in this call (set even without a violations buffer) */
     } pb_validate_context_t;
 
         /* Convenience macros for generated validators
@@ -124,24 +125,34 @@ extern "C"
      *       PB_VALIDATE_END(ctx, violations);
      *   }
      */
+    /* violations_ptr may be NULL: the validator then only answers pass/fail
+     * and skips all path bookkeeping (what the packet filters use). The
+     * path stack is not cleared: path_depth says how much of it is valid. */
     #define PB_VALIDATE_BEGIN(ctx_var, MsgType, msg_ptr, violations_ptr) \
-        pb_validate_context_t ctx_var = {0};                             \
+        pb_validate_context_t ctx_var;                                   \
         ctx_var.violations = (violations_ptr);                           \
+        ctx_var.path_depth = 0;                                          \
+        ctx_var.failed = false;                                          \
         if (!(msg_ptr)) return false
 
     #define PB_VALIDATE_END(ctx_var, violations_ptr) \
-        (void)(ctx_var);                                \
-        return !pb_violations_has_any(violations_ptr)
+        (void)(violations_ptr);                         \
+        return !(ctx_var).failed
 
     /* Per-field context helpers. These wrap push/pop of the field name
-     * into the validation context's path stack.
+     * into the validation context's path stack (only kept when there is a
+     * violations buffer to report paths to).
      */
-    #define PB_VALIDATE_FIELD_BEGIN(ctx_var, field_name_str)                 \
-        if (!pb_validate_context_push_field(&(ctx_var), (field_name_str)))   \
-            return false
+    #define PB_VALIDATE_FIELD_BEGIN(ctx_var, field_name_str)                                           \
+        do {                                                                                           \
+            if ((ctx_var).violations && !pb_validate_context_push_field(&(ctx_var), (field_name_str))) \
+                return false;                                                                          \
+        } while (0)
 
-    #define PB_VALIDATE_FIELD_END(ctx_var) \
-        pb_validate_context_pop_field(&(ctx_var))
+    #define PB_VALIDATE_FIELD_END(ctx_var)                                \
+        do {                                                              \
+            if ((ctx_var).violations) pb_validate_context_pop_field(&(ctx_var)); \
+        } while (0)
 
     /* Helper for guarding checks behind has_XXX flag for OPTIONAL fields.
      * The generator expands FIELD_RULES_ENUM to the field.rules symbol when
@@ -170,7 +181,8 @@ extern "C"
      * static (string-literal) message. This is the single point every
      * check macro below funnels through; behavior (whether the message is
      * copied or stored by pointer) is decided once, in pb_violations_add's
-     * implementation, based on PB_VALIDATE_DEBUG. */
+     * implementation, based on PB_VALIDATE_DEBUG. It always marks the
+     * call as failed, with or without a violations buffer. */
     #define PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, MESSAGE) \
         pb_violations_record(&(ctx_var), (CONSTRAINT_ID), (MESSAGE))
 
@@ -564,6 +576,7 @@ extern "C"
     #define PB_VALIDATE_NESTED_MSG(ctx_var, validate_func, msg_ptr, field_name, violations_ptr)                 \
         do {                                                                                                   \
             bool __pb_ok_nested = validate_func(&(msg_ptr)->field_name, (violations_ptr));                     \
+            if (!__pb_ok_nested) (ctx_var).failed = true;                                                    \
             if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                          \
                 pb_validate_context_pop_field(&(ctx_var));                                                     \
                 return false;                                                                                  \
@@ -574,7 +587,8 @@ extern "C"
         do {                                                                                                   \
             if ((msg_ptr)->has_##field_name) {                                                                 \
                 bool __pb_ok_nested = validate_func(&(msg_ptr)->field_name, (violations_ptr));                 \
-                if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
+                if (!__pb_ok_nested) (ctx_var).failed = true;                                                    \
+            if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
                     pb_validate_context_pop_field(&(ctx_var));                                                 \
                     return false;                                                                              \
                 }                                                                                              \
@@ -592,7 +606,8 @@ extern "C"
                 pb_validate_context_push_index(&(ctx_var), __pb_i);                                            \
                 bool __pb_ok_nested = validate_func(&(msg_ptr)->field_name[__pb_i] MEMBER, (violations_ptr));  \
                 pb_validate_context_pop_index(&(ctx_var));                                                     \
-                if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
+                if (!__pb_ok_nested) (ctx_var).failed = true;                                                    \
+            if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
                     pb_validate_context_pop_field(&(ctx_var));                                                 \
                     return false;                                                                              \
                 }                                                                                              \
@@ -614,6 +629,7 @@ extern "C"
     #define PB_VALIDATE_NESTED_MSG_ONEOF(ctx_var, validate_func, msg_ptr, oneof_name, field_name, violations_ptr) \
         do {                                                                                                   \
             bool __pb_ok_nested = validate_func(&(msg_ptr)->oneof_name.field_name, (violations_ptr));          \
+            if (!__pb_ok_nested) (ctx_var).failed = true;                                                    \
             if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                          \
                 pb_validate_context_pop_field(&(ctx_var));                                                     \
                 return false;                                                                                  \
@@ -624,7 +640,8 @@ extern "C"
         do {                                                                                                   \
             if ((msg_ptr)->field_name) {                                                                       \
                 bool __pb_ok_nested = validate_func((msg_ptr)->field_name, (violations_ptr));                  \
-                if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
+                if (!__pb_ok_nested) (ctx_var).failed = true;                                                    \
+            if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
                     pb_validate_context_pop_field(&(ctx_var));                                                 \
                     return false;                                                                              \
                 }                                                                                              \
