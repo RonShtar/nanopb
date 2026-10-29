@@ -30,6 +30,7 @@ failures.
 from __future__ import print_function
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
@@ -469,16 +470,24 @@ def gen_c_summary(results):
 
 def cmd_gen_c(args):
     validate = not args.no_validate
-    results = []
+
+    # Descriptors and filter entrypoints first, one unit after the other: they
+    # use protoc and protobuf in this process.
+    jobs = []
     for name in select_units(args):
         unit = Unit(args.protos_root, name, args.include)
-        outdir = os.path.join(args.out, name)
-        if not os.path.isdir(outdir):
-            os.makedirs(outdir)
         entries, source_of_entries = [], None
         if validate and not args.no_filter:
             entries, source_of_entries = unit_entrypoints(unit, args.port_map)
         specs = [e + (':single' if predicted_mode(unit, e) == 'single' else '') for e in entries]
+        jobs.append((name, unit, entries, source_of_entries, specs))
+
+    def generate(job):
+        # Only subprocesses and file I/O: safe to run for several units at once.
+        name, unit, entries, source_of_entries, specs = job
+        outdir = os.path.join(args.out, name)
+        if not os.path.isdir(outdir):
+            os.makedirs(outdir)
         gendir = tempfile.mkdtemp(prefix='nanopb_ws_gen_')
         try:
             log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
@@ -497,13 +506,18 @@ def cmd_gen_c(args):
                     files.append(fname)
         result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
                   'filters': filters, 'generator_log': log.strip()}
-        if validate:
-            result['recommended_defines'] = validation_defines(unit)
         if entries:
             result['filter_entrypoints'] = {'from': source_of_entries, 'modes': modes}
         if filter_errors:
             result['filter_errors'] = filter_errors
-        results.append(result)
+        return result
+
+    # The generator run (protoc + two plugin processes) is most of the time.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(len(jobs), os.cpu_count() or 1))) as pool:
+        results = list(pool.map(generate, jobs))
+    if validate:
+        for result, job in zip(results, jobs):
+            result['recommended_defines'] = validation_defines(job[1])
     return {'units': results, 'summary': gen_c_summary(results)}
 
 
