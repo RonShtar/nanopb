@@ -2038,7 +2038,11 @@ class ValidatorGenerator:
         """
         self.proto_file = proto_file
         self.validators = OrderedDict()
-        
+        # Optional callable(ctype) -> bool answering whether a message from
+        # another file gets a validator; set by the plugin.  Without it,
+        # messages of other files are assumed to have one.
+        self.external_has_validator = None
+
         # Pipeline components
         self.ir_builder = IRBuilder(proto_file)
         self.emitter_registry = _emitter_registry
@@ -2263,6 +2267,8 @@ class ValidatorGenerator:
             return ['    PB_VALIDATE_NESTED_MSG_ARRAY(ctx, %s, msg, %s, %s, %s, violations);\n'
                     % (sub_func, field_name, count, member)]
 
+        if not self._has_validator(ctype):
+            return []
         if allocation == 'POINTER':
             return ['    PB_VALIDATE_NESTED_MSG_POINTER(ctx, %s, msg, %s, violations);\n' % (sub_func, field_name)]
         if rules == 'OPTIONAL':
@@ -2276,10 +2282,18 @@ class ValidatorGenerator:
         return None
 
     def _has_validator(self, ctype: Any) -> bool:
-        """Will a pb_validate_<ctype>() exist?  Messages of other files are assumed to."""
+        """Will a pb_validate_<ctype>() exist?
+
+        Messages of this file have one if they are in self.validators; for
+        messages of other files ask external_has_validator, or assume so.
+        """
         if str(ctype) in self.validators:
             return True
-        return self._message_by_name(ctype) is None
+        if self._message_by_name(ctype) is not None:
+            return False
+        if self.external_has_validator is not None:
+            return self.external_has_validator(ctype)
+        return True
 
     def generate_header(self):
         """Generate validation header file content."""

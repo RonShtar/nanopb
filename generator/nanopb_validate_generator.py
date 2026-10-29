@@ -1184,6 +1184,40 @@ def build_validator_generator(f, force_names=()):
         if msg is not None and str(msg.name) not in validator_gen.validators:
             validator_gen.force_add_message_validator(msg, _message_validate_rules(msg))
 
+    # Messages of other files: their file emits a validator only under the
+    # same rules, so ask (and cache) instead of assuming one exists.
+    def external_has_validator(ctype):
+        dep = getattr(f, 'dependencies', {}).get(str(ctype))
+        if dep is None or not hasattr(dep, 'protofile') or dep.protofile is f:
+            return True
+        return _validator_index(dep.protofile, dep)
+
+    validator_gen.external_has_validator = external_has_validator
+
+    # A message without rules of its own still needs a validator when one of
+    # its sub-messages has one; otherwise those rules are never reached (and
+    # parents would call a function that does not exist).
+    changed = True
+    while changed:
+        changed = False
+        for msg in f.messages:
+            if not hasattr(msg, 'fields') or str(msg.name) in validator_gen.validators:
+                continue
+            desc = getattr(msg, 'desc', None)
+            if desc is not None and desc.options.map_entry:
+                continue  # map values are validated in place by the parent
+            for field in msg.fields:
+                ctype = getattr(field, 'ctype', None)
+                if getattr(field, 'pbtype', None) not in ('MESSAGE', 'MSG_W_CB') or not ctype:
+                    continue
+                lowered = str(ctype).lower()
+                if 'google' in lowered and 'protobuf' in lowered:
+                    continue
+                if validator_gen._has_validator(ctype):
+                    validator_gen.force_add_message_validator(msg, _message_validate_rules(msg))
+                    changed = True
+                    break
+
     return validator_gen
 
 
@@ -1203,6 +1237,9 @@ class ValidatorIndex(object):
         if key not in self._cache:
             self._cache[key] = set(build_validator_generator(protofile).validators.keys())
         return str(ir_msg.name) in self._cache[key]
+
+
+_validator_index = ValidatorIndex()
 
 
 # ---------------------------------------------------------------------------
