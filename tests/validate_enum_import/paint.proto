@@ -1,0 +1,21 @@
+/*
+ * enum.defined_only on enums from another .proto (color, many) and from the
+ * same file (local). The imported ones used to generate no check at all.
+ */
+syntax = "proto3";
+
+package x;
+
+import "validate.proto";
+import "colors.proto";
+
+enum Local {
+    A = 0;
+    B = 1;
+}
+
+message Paint {
+    Color color = 1 [(validate.rules).enum.defined_only = true];
+    Local local = 2 [(validate.rules).enum.defined_only = true];
+    repeated Color many = 3 [(validate.rules).repeated.items.enum.defined_only = true];
+}
