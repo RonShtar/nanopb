@@ -1,0 +1,30 @@
+# Build and run the validation benchmark with a small iteration count, as a
+# correctness check (valid packets pass, broken ones are rejected). For the
+# real numbers run: python tests/validate_benchmark/bench.py
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "--filter=Envelope")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline);
+# the benchmark uses C11 timespec_get.
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c11 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+pb_files = test_env.NanopbProto(["bench", "bench.options"])
+test_env.SideEffect("bench_validate.c", pb_files)
+test_env.SideEffect("bench_validate.h", pb_files)
+
+test_prog = test_env.Program(
+    ["bench_validate_main.c", "bench.pb.c", "bench_validate.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)
