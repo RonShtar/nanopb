@@ -298,7 +298,7 @@ class BackendTests(unittest.TestCase):
         status, result, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir',
                                           os.path.join(self.tmp, 'plugins'), '--port-map', '')
         self.assertEqual(status, 0, err)
-        self.assertEqual(result['decode_as'], ['nanopb_envelope'])
+        self.assertEqual(result['decode_as'], ['ENVELOPE'])
         self.assertIn('udp:16000=<protocol envelope>', result['ports'])
 
     @unittest.skipIf(find_cc() is None, 'no C compiler (gcc/clang/cc, CC, or pip install ziglang)')

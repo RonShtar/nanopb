@@ -428,7 +428,7 @@ local DROPPED_FILTER = 'nanopb.validation == "dropped"'
 -- One button: valid and invalid packets of every message in one capture,
 -- dissector refreshed, capture opened. Every packet is a google.protobuf.Any
 -- (type_url = message) on its protocol's port, mapped like a Decode As to
--- nanopb_<protocol>; each one is also written as a C array (.h) and .hex.
+-- the <protocol> dissector; each one is also written as a C array (.h) and .hex.
 local function gen_packets()
     local title = "Generate test packets"
     ask_dirs(title, true, nil, function()
@@ -453,7 +453,8 @@ local function gen_packets()
             local notes = { summary, "" }
             if open_capture_file then
                 notes[#notes + 1] = "Opening the capture. Each packet shows Validation: PASSED or DROPPED."
-                notes[#notes + 1] = "Other ports: Analyze > Decode As > UDP/TCP port > NANOPB_<PROTOCOL>."
+                notes[#notes + 1] = "Other ports: Analyze > Decode As > UDP/TCP port > FLEET (your folder name), or set it for all NANOPB"
+                    .. "\ntraffic: Edit > Preferences > Protocols > NANOPB > Protocol."
             else
                 notes[#notes + 1] = "Open the capture with File > Open: " .. pcap
             end
@@ -494,7 +495,8 @@ local function install_dissector()
         if ok then
             text = text .. "\n\nDecode a port as one protocol (a folder of the protos directory; every packet a"
                 .. "\ngoogle.protobuf.Any whose type_url selects the message): Analyze > Decode As >"
-                .. "\nUDP/TCP port > NANOPB_<PROTOCOL> (names listed under decode_as above)."
+                .. "\nUDP/TCP port > <FOLDER> (listed under decode_as above), or for all NANOPB traffic:"
+                .. "\nEdit > Preferences > Protocols > NANOPB > Protocol."
             if reload_lua_plugins then
                 text = text .. "\n\nReloading Lua plugins..."
                 show("nanopb: install dissector", ok, text)

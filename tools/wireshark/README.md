@@ -226,17 +226,28 @@ that message, recursively. Unknown types are shown as bytes with an expert warni
 ### Protocols and Decode As
 
 Every folder of the protos directory that uses `google.protobuf.Any` is also a
-protocol of its own, and all of them are loaded. Choose which one decodes a port
-with **Analyze > Decode As... > UDP/TCP port > NANOPB_FLEET** (one entry
-`NANOPB_<FOLDER>` per protocol; the filter name is `nanopb_<folder>`, e.g.
-`tshark -d udp.port==16000,nanopb_fleet`). Install or update dissector lists them
-under `decode_as`.
+protocol of its own, named after the folder (`fleet` -> **FLEET**), and all of
+them are loaded. Install or update dissector lists them under `decode_as`.
+There are two ways to choose one:
+
+- **The primary protocol, for all NANOPB traffic:** **Edit > Preferences >
+  Protocols > NANOPB > Protocol: fleet**. You can also right-click a NANOPB
+  packet and choose **Protocol Preferences > Protocol**. Every NANOPB packet
+  without a port map message is then decoded as a fleet packet. This covers
+  Decode As NANOPB, detected Anys and the default message. On the command line,
+  use `tshark -o nanopb.protocol:fleet`.
+- **Per port:** **Analyze > Decode As... > UDP port (or TCP port) > FLEET**, or
+  `tshark -d udp.port==16000,fleet` on the command line. Generate test packets
+  already maps its port (16000) this way.
+
+If Wireshark already has a protocol with the folder's name, it is called
+`NANOPB_<FOLDER>` instead.
 
 A port decoded as a protocol works like `<protocol>_filter_udp`. The packet is
 a `google.protobuf.Any`, and its `type_url` must name a message of that
 protocol: otherwise it gets `filter.unknown_type`. Nested `Any` fields are
 always validated, and more than 4 levels give `filter.depth`. The Protocol column shows
-`NANOPB_<FOLDER>` and the Info column shows the selected message, e.g.
+`FLEET` and the Info column shows the selected message, e.g.
 `nanopb fleet fleet.envelope.Envelope (120 bytes) [PASSED]`. The fields are the
 same as in the NANOPB tree (`nanopb.validation`, `nanopb.fleet.envelope.Envelope.version`, ...).
 

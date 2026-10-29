@@ -1202,7 +1202,7 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None
     files.insert(0, target)
     result = {'plugins_dir': plugins, 'files': files, 'messages': len(messages),
               'ports': ['%s:%d=%s' % p for p in ports] + ['%s:%d=<protocol %s>' % p for p in protocol_ports],
-              'decode_as': ['nanopb_' + c_identifier(name).lower() for name in sorted(protocols_of(text))]}
+              'decode_as': [c_identifier(name).upper() for name in sorted(protocols_of(text))]}
     return result, changed, messages
 
 
@@ -1434,8 +1434,8 @@ def cmd_gen_packets(args):
     passed = sum(1 for e in entries if e['expect'] == 'passed')
     dropped = len(entries) - passed
     if protocol_mode:
-        ports = ['udp:%d=protocol %s (Decode As nanopb_%s; every message wrapped in an Any)'
-                 % (port, name, c_identifier(name).lower()) for _, port, name in protocol_ports]
+        ports = ['udp:%d=protocol %s (Decode As %s; every message wrapped in an Any)'
+                 % (port, name, c_identifier(name).upper()) for _, port, name in protocol_ports]
     else:
         ports = ['%s:%d=%s' % (proto, port, msg) for msg, (proto, port) in sorted(roots.items(), key=lambda x: x[1])]
         ports.append('udp:%d=%s (every other message, wrapped in it)' % (args.any_port, ANY_MESSAGE))

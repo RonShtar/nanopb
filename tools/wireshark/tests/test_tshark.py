@@ -66,7 +66,7 @@ class TsharkTests(unittest.TestCase):
         for entry in manifest['protocol_ports']:
             transport, rest = entry.split(':')
             port, name = rest.split('=')
-            base += ['-d', '%s.port==%s,nanopb_%s' % (transport, port, name.lower())]
+            base += ['-d', '%s.port==%s,%s' % (transport, port, name.lower())]
         status, out = live_test.run(base + ['-T', 'fields', '-e', 'frame.number', '-e', 'nanopb.validation',
                                             '-e', 'nanopb.validation.field', '-E', 'occurrence=a',
                                             '-E', 'aggregator=|'], env)
@@ -84,7 +84,7 @@ class TsharkTests(unittest.TestCase):
         if mode == 'protocol':
             status, out = live_test.run(base + ['-T', 'fields', '-e', '_ws.col.Protocol'], env)
             self.assertEqual(status, 0, out)
-            names = set('NANOPB_' + e.split('=')[1].upper() for e in manifest['protocol_ports'])
+            names = set(e.split('=')[1].upper() for e in manifest['protocol_ports'])
             self.assertEqual(set(out.split()), names, out)
         # The display filter selects exactly the dropped packets.
         status, out = live_test.run(base + ['-Y', 'nanopb.validation == "dropped"', '-T', 'fields',

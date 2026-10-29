@@ -121,7 +121,12 @@ function M.render(item, indent, out)
 end
 
 -- Proto, fields, prefs ---------------------------------------------------
+-- Reload Lua plugins: Wireshark drops the Lua protocols first.
+function M.reload() M.protos = {} end
+
 function Proto(name, description)
+    -- Like Wireshark: a protocol name can be registered once.
+    if M.protos and M.protos[name] then error("Protocol exists: " .. name) end
     local values = {}
     local prefs = setmetatable({}, {
         __newindex = function(_, k, pref) values[k] = pref.default end,
@@ -140,6 +145,9 @@ end
 Pref = {}
 for _, kind in ipairs({ "string", "bool", "uint" }) do
     Pref[kind] = function(label, default) return { label = label, default = default } end
+end
+function Pref.enum(label, default, _, choices)
+    return { label = label, default = default, choices = choices }
 end
 
 ProtoField = setmetatable({}, { __index = function(_, kind)

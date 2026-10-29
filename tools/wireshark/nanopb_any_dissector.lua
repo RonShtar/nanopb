@@ -184,6 +184,24 @@ nanopb.prefs.validate = Pref.bool("Check validation rules", true,
 nanopb.prefs.validate_any = Pref.bool("Validate Any payloads", true,
     "Also decode and validate the message inside google.protobuf.Any fields")
 
+-- Protocols: one per folder of the protos root that uses google.protobuf.Any
+-- (schema.protocols). Filled in below, once dissect() exists.
+local protocols = {}
+local protocol_names = {}
+for name in pairs(schema.protocols or {}) do protocol_names[#protocol_names + 1] = name end
+table.sort(protocol_names)
+local protocol_choices = { { "none", "(none: decode by port map / Any)", 0 } }
+for i, name in ipairs(protocol_names) do protocol_choices[#protocol_choices + 1] = { name, name, i } end
+nanopb.prefs.protocol = Pref.enum("Protocol", 0,
+    "Primary protocol: every NANOPB packet without a port map message is a google.protobuf.Any "
+        .. "whose type_url selects a message of this protocol, validated like <protocol>_filter_udp",
+    protocol_choices, false)
+
+local function primary_protocol()
+    local name = protocol_names[nanopb.prefs.protocol or 0]
+    return name and protocols[name]
+end
+
 local port_map = { udp = {}, tcp = {} }
 local registered = { udp = {}, tcp = {} }
 
@@ -1286,6 +1304,7 @@ local function root_message(pinfo, tvb)
         if msg then return msg end
     end
     if nanopb.prefs.default_message ~= "" then return nanopb.prefs.default_message end
+    if primary_protocol() then return ANY end
     if nanopb.prefs.any_fallback and looks_like_any(tvb, 0, tvb:len()) then return ANY end
     return nil
 end
@@ -1293,9 +1312,9 @@ end
 local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local length = tvb:len()
     if length == 0 then return 0 end
-    pinfo.cols.protocol = protocol and protocol.column or "NANOPB"
-
     local msg_name = forced_root or root_message(pinfo, tvb)
+    if not protocol and msg_name == ANY then protocol = primary_protocol() end
+    pinfo.cols.protocol = protocol and protocol.column or "NANOPB"
     local root = tree:add(protocol and protocol.proto or nanopb, tvb(),
         protocol and ("nanopb " .. protocol.name) or "nanopb Protobuf")
     if not schema_ok then root:add_proto_expert_info(e_no_schema) end
@@ -1338,21 +1357,23 @@ end
 DissectorTable.get("udp.port"):add_for_decode_as(nanopb)
 DissectorTable.get("tcp.port"):add_for_decode_as(nanopb)
 
--- One protocol per directory of the protos root (schema.protocols): choose it
--- with Analyze > Decode As > UDP/TCP port > NANOPB_<NAME>. Every packet is a
--- google.protobuf.Any whose type_url selects a message of that protocol, and
--- it is validated like the generated <name>_filter_udp.
-local protocols = {}
-local protocol_names = {}
-for name in pairs(schema.protocols or {}) do protocol_names[#protocol_names + 1] = name end
-table.sort(protocol_names)
+-- Each protocol is also a Wireshark protocol named after its folder: choose
+-- it with Analyze > Decode As > UDP/TCP port > FLEET (or set it as the NANOPB
+-- Protocol preference). Every packet is a google.protobuf.Any whose type_url
+-- selects a message of that protocol, validated like <name>_filter_udp.
 for _, name in ipairs(protocol_names) do
     -- Wireshark wants a lowercase filter name; Decode As shows it uppercased.
+    -- A name Wireshark already uses (e.g. a folder called "ip") gets a prefix.
     local ident = name:gsub("[^%w_]", "_"):lower()
+    local desc = name .. " (nanopb protocol, Any type_url = message)"
+    local ok, proto = pcall(Proto, ident, desc)
+    if not ok then
+        ident = "nanopb_" .. ident
+        proto = Proto(ident, desc)
+    end
     local set = {}
     for _, msg in ipairs(schema.protocols[name]) do set[msg] = true end
-    local proto = Proto("nanopb_" .. ident, "nanopb " .. name .. " (Any type_url = message)")
-    local protocol = { name = name, messages = set, proto = proto, column = "NANOPB_" .. ident:upper() }
+    local protocol = { name = name, messages = set, proto = proto, column = ident:upper() }
     function proto.dissector(tvb, pinfo, tree)
         return dissect(tvb, pinfo, tree, ANY, protocol)
     end
