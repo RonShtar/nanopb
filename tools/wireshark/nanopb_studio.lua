@@ -483,29 +483,27 @@ local function gen_packets()
     end)
 end
 
-local function install_dissector()
-    ask_dirs("Install / update dissector", false, {
-        { "Port map (e.g. udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd)", config.port_map },
-    }, function(port_map)
-        config.port_map = trim(port_map)
-        save_config()
-        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR,
-            "--port-map", config.port_map })
+-- Only the protos directory: every subdirectory with .proto files becomes a
+-- protocol (FLEET, SHARED, ...) of the dissector; the port map is kept.
+local function load_protos()
+    local title = "Load protos directory into Wireshark"
+    ask_dirs(title, false, nil, function()
+        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR })
+        if config.port_map ~= "" then
+            args[#args + 1] = "--port-map"
+            args[#args + 1] = config.port_map
+        end
         local ok, text = run_backend(args)
         if ok then
-            text = text .. "\n\nDecode a port as one protocol (a folder of the protos directory; every packet a"
-                .. "\ngoogle.protobuf.Any whose type_url selects the message): Analyze > Decode As >"
-                .. "\nUDP/TCP port > <FOLDER> (listed under decode_as above), or for all NANOPB traffic:"
-                .. "\nEdit > Preferences > Protocols > NANOPB > Protocol."
+            text = json_string(text, "summary") or text
             if reload_lua_plugins then
-                text = text .. "\n\nReloading Lua plugins..."
-                show("nanopb: install dissector", ok, text)
+                show(title, ok, text .. "\n\nReloading Lua plugins...")
                 reload_lua_plugins()
                 return
             end
             text = text .. "\n\nReload Lua plugins (Analyze > Reload Lua Plugins, Ctrl+Shift+L) to activate."
         end
-        show("nanopb: install dissector", ok, text)
+        show(title, ok, text)
     end)
 end
 
@@ -525,5 +523,5 @@ end
 
 register_menu("nanopb/Generate C (merged + validation)...", gen_c, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate test packets (passed + dropped)...", gen_packets, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/Install or update dissector...", install_dissector, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/Load protos directory into Wireshark...", load_protos, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/About", about, MENU_TOOLS_UNSORTED)

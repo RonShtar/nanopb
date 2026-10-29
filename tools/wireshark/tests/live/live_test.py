@@ -297,7 +297,7 @@ def checklist_markdown(cases):
             '',
             '## 4. Tools > nanopb menu', '',
             '- [ ] The menu has exactly **Generate C (merged + validation)**, **Generate test packets (passed + '
-            'dropped)**, **Install or update dissector** and **About**. **About** shows the plugins folder, the '
+            'dropped)**, **Load protos directory into Wireshark** and **About**. **About** shows the plugins folder, the '
             'installed project copy and the last input directory = the test fixtures.',
             '- [ ] **Generate C (merged + validation)**: the dialog only asks for input and output. The unit list '
             'shows `[x] envelope` and `[x] telemetry`; click `telemetry` (now `[ ]`), press **Generate**: OK, and '
@@ -313,8 +313,10 @@ def checklist_markdown(cases):
             '- [ ] Run **Generate test packets** again: the capture reopens without reloading Lua plugins (the schema '
             'did not change).',
             '- [ ] **Generate C** with input `nope`: shows FAILED with "is not a directory".',
-            '- [ ] **Install or update dissector**, input prefilled, port map `%s`: OK, then plugins reload and '
-            'packets still decode.' % PORT_MAP,
+            '- [ ] **Load protos directory into Wireshark**, input prefilled (the only field): OK, it lists '
+            '`ENVELOPE` and `TELEMETRY`, then plugins reload and packets still decode (port map `%s` kept).' % PORT_MAP,
+            '- [ ] **Analyze > Decode As... > UDP port** lists **ENVELOPE** and **TELEMETRY**; **Edit > Preferences > '
+            'Protocols > NANOPB > Protocol** offers `envelope` and `telemetry`.',
             '']
     return '\n'.join(out)
 

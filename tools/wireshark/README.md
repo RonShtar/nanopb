@@ -79,7 +79,7 @@ selected), or use **Select all** / **Select none**, then press **Generate**.
 |------|--------|
 | Generate C (merged + validation) | `<output>/<unit>/<unit>.pb.c/.h` and `<unit>_validate.c/.h` |
 | Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark, plus every packet as a C array and hex in `<output>/<unit>/packets/` |
-| Install or update dissector | the dissector and schema, for real traffic |
+| Load protos directory into Wireshark | the dissector, with every folder of the protos directory as a protocol you can choose (Decode As or the NANOPB **Protocol** preference), for real traffic |
 | About | paths, Python, port map |
 
 ### Generating C code
@@ -201,9 +201,13 @@ Each packet also carries its expectation as a packet comment
 
 ### Dissector
 
-**Install or update dissector** builds a schema from **all** units of the
-protos directory, with their validation rules, and asks for a **port map**, for
-example `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`.
+**Load protos directory into Wireshark** asks only for the protos directory.
+Every subdirectory with `.proto` files is loaded as a protocol (see [Protocols
+and Decode As](#protocols-and-decode-as)), and the result window lists them.
+It builds a schema from **all** units of the
+protos directory, with their validation rules, and keeps your **port map**
+(edit it under Edit > Preferences > Protocols > NANOPB > Port map, for example
+`udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`).
 Run it again whenever your `.proto` files change (Generate test packets does
 this for you).
 
@@ -225,9 +229,11 @@ that message, recursively. Unknown types are shown as bytes with an expert warni
 
 ### Protocols and Decode As
 
-Every folder of the protos directory that uses `google.protobuf.Any` is also a
-protocol of its own, named after the folder (`fleet` -> **FLEET**), and all of
-them are loaded. Install or update dissector lists them under `decode_as`.
+Every folder of the protos directory with messages of its own is also a
+protocol, named after the folder (`fleet` -> **FLEET**, `shared` -> **SHARED**),
+and all of them are loaded. Load protos directory into Wireshark lists them. A
+folder does not have to import `google/protobuf/any.proto` for this. Only the C
+`<unit>_filter_udp` needs that, so Generate C makes it only for such folders.
 There are two ways to choose one:
 
 - **The primary protocol, for all NANOPB traffic:** **Edit > Preferences >

@@ -1104,7 +1104,9 @@ def schema_text(protos_root, extra_includes):
     # Always know google.protobuf.Any, even if no unit imports it.
     any_fds = compile_descriptor_set(['google/protobuf/any.proto'], [DEFAULT_INCLUDE])
     messages, enums = build_schema([u.fds for u in units] + [any_fds], nanopb_field_info(units))
-    protocols = dict((u.name, protocol_messages(u)) for u in units if protocol_name(u))
+    # Every folder with messages of its own is a protocol in Wireshark (its
+    # packets are an Any; the C protocol filter needs the unit to use Any).
+    protocols = dict((u.name, m) for u, m in ((u, protocol_messages(u)) for u in units) if m)
     return render_schema_lua(messages, enums, protocols), messages
 
 
@@ -1168,6 +1170,18 @@ def installed_protocol_ports(ports_path):
             re.findall(r'\{ transport = "(udp|tcp)", port = (\d+), protocol = "([^"]+)" \}', text)]
 
 
+def installed_port_map(ports_path):
+    """The message entries of an installed ports.luadata as a port map string."""
+
+    try:
+        with open(ports_path, encoding='utf-8') as handle:
+            text = handle.read()
+    except OSError:
+        return ''
+    return ','.join('%s:%s=%s' % m for m in
+                    re.findall(r'\{ transport = "(udp|tcp)", port = (\d+), message = "([^"]+)" \}', text))
+
+
 def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None):
     """Install the dissector, its schema and port map into ``plugins``.
 
@@ -1208,8 +1222,19 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None
 
 def cmd_install_dissector(args):
     plugins = args.plugins_dir or default_plugins_dir()
-    result, changed, _ = install_schema(args.protos_root, args.include, plugins, args.port_map)
+    port_map = args.port_map
+    if port_map is None:
+        port_map = installed_port_map(os.path.join(plugins, 'nanopb', 'ports.luadata'))
+    result, changed, _ = install_schema(args.protos_root, args.include, plugins, port_map)
     result['changed'] = changed
+    names = result['decode_as']
+    lines = ['Loaded %d protocol(s) from %s:' % (len(names), args.protos_root)]
+    lines += ['  %s' % n for n in names]
+    lines += ['', 'Choose one:',
+              '  for all NANOPB traffic: Edit > Preferences > Protocols > NANOPB > Protocol',
+              '  per port: Analyze > Decode As > UDP port (or TCP port) > ' + (names[0] if names else '<FOLDER>'),
+              '', '%d messages; ports: %s' % (result['messages'], ', '.join(result['ports']) or '(none)')]
+    result['summary'] = '\n'.join(lines)
     return result
 
 
@@ -1324,10 +1349,11 @@ def cmd_gen_packets(args):
     # protocol's own port (decoded like Decode As -> nanopb_<unit>).
     protocol_ports, protocol_of = [], {}
     if protocol_mode:
-        for i, unit in enumerate(units):
-            if protocol_name(unit):
-                protocol_ports.append(('udp', args.protocol_port + i, unit.name))
-                protocol_of[unit.name] = args.protocol_port + i
+        for unit in units:
+            if protocol_messages(unit):
+                port = args.protocol_port + len(protocol_ports)
+                protocol_ports.append(('udp', port, unit.name))
+                protocol_of[unit.name] = port
     port_map = args.port_map or ('' if protocol_mode else auto_port_map(units))
     # Map the Any port explicitly; left to the heuristic, other protocols'
     # heuristic dissectors can claim some of the packets first.
@@ -1378,7 +1404,7 @@ def cmd_gen_packets(args):
 
     for unit in units:
         if protocol_mode and unit.name not in protocol_of:
-            skipped.append('%s: the protocol does not use google.protobuf.Any' % unit.name)
+            skipped.append('%s: no messages of its own' % unit.name)
             continue
         try:
             gen = unit_data_generator(unit, DataGenerator)
@@ -1688,7 +1714,8 @@ def build_parser():
     p = sub.add_parser('install-dissector', help='install dissector + schema into a plugins dir')
     protos_args(p)
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')
-    p.add_argument('--port-map', default=None, help='e.g. "udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd"')
+    p.add_argument('--port-map', default=None,
+                   help='e.g. "udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd" (default: keep the installed one)')
     p.set_defaults(func=cmd_install_dissector)
 
     p = sub.add_parser('gen-packets', help='one capture with valid (PASSED) and invalid (DROPPED) packets')

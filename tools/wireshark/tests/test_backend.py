@@ -278,12 +278,12 @@ class BackendTests(unittest.TestCase):
 
     def test_protocol_packets_files_and_schema(self):
         result, manifest = self.gen_packets(FIXTURES, '--mode', 'protocol')
-        self.assertEqual(manifest['protocol_ports'], ['udp:16000=envelope'])
-        self.assertIn('telemetry: the protocol does not use google.protobuf.Any', result['skipped'])
+        self.assertEqual(manifest['protocol_ports'], ['udp:16000=envelope', 'udp:16001=telemetry'])
         for entry in manifest['packets']:
-            self.assertEqual((entry['unit'], entry['port'], entry['any_wrapped']), ('envelope', 16000, True))
+            port = {'envelope': 16000, 'telemetry': 16001}[entry['unit']]
+            self.assertEqual((entry['port'], entry['any_wrapped']), (port, True))
             header, hexfile = entry['files']
-            self.assertEqual(os.path.dirname(header), os.path.join(self.tmp, 'packets', 'envelope', 'packets'))
+            self.assertEqual(os.path.dirname(header), os.path.join(self.tmp, 'packets', entry['unit'], 'packets'))
             self.assertTrue(os.path.basename(header).endswith('_%s.h' % entry['expect']), header)
             with open(hexfile) as handle:
                 self.assertEqual(handle.read().strip(), entry['hex'])
@@ -298,7 +298,16 @@ class BackendTests(unittest.TestCase):
         status, result, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir',
                                           os.path.join(self.tmp, 'plugins'), '--port-map', '')
         self.assertEqual(status, 0, err)
-        self.assertEqual(result['decode_as'], ['ENVELOPE'])
+        self.assertEqual(result['decode_as'], ['ENVELOPE', 'TELEMETRY'])
+        self.assertIn('Loaded 2 protocol(s)', result['summary'])
+        # Without --port-map the installed one is kept.
+        status, result, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir',
+                                          os.path.join(self.tmp, 'plugins'), '--port-map', 'udp:5000=demo.envelope.Envelope')
+        self.assertEqual(status, 0, err)
+        status, result, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir',
+                                          os.path.join(self.tmp, 'plugins'))
+        self.assertEqual(status, 0, err)
+        self.assertIn('udp:5000=demo.envelope.Envelope', result['ports'])
         self.assertIn('udp:16000=<protocol envelope>', result['ports'])
 
     @unittest.skipIf(find_cc() is None, 'no C compiler (gcc/clang/cc, CC, or pip install ziglang)')
@@ -321,6 +330,10 @@ class BackendTests(unittest.TestCase):
             status, result, err = run_backend('gen-c', '--protos-root', root, '--unit', unit, '--out', out,
                                               '--with-runtime')
             self.assertEqual(status, 0, err)
+            if not result['units'][0]['protocol_filter']:
+                # The C protocol filter needs the unit to use google.protobuf.Any.
+                self.assertIn('google.protobuf.Any', result['units'][0]['protocol_filter_error'])
+                continue
             self.assertEqual(result['units'][0]['protocol_filter'], unit + '_filter_udp')
             unit_dir = os.path.join(out, unit)
             lines = ['#include <stdio.h>', '#include "%s.pb.h"' % unit]

@@ -3,7 +3,7 @@
 -- Recursive protobuf dissector for Wireshark that follows google.protobuf.Any
 -- by its type_url. Message definitions come from nanopb/schema.luadata next to
 -- this file, written by tools/wireshark/backend/nanopb_wireshark.py
--- (install-dissector, or Tools > nanopb > Install / update dissector).
+-- (install-dissector, or Tools > nanopb > Load protos directory into Wireshark).
 --
 -- Root message selection, in order:
 --   1. the port map  (Preferences > Protocols > NANOPB > Port map, or
@@ -99,7 +99,7 @@ local e_malformed = ProtoExpert.new("nanopb.malformed", "Malformed protobuf data
 local e_unknown_type = ProtoExpert.new("nanopb.any.unknown_type", "Any type not in schema",
     expert.group.UNDECODED, expert.severity.WARN)
 local e_no_schema = ProtoExpert.new("nanopb.no_schema",
-    "nanopb schema not found; run Tools > nanopb > Install / update dissector",
+    "nanopb schema not found; run Tools > nanopb > Load protos directory into Wireshark",
     expert.group.UNDECODED, expert.severity.NOTE)
 local e_depth = ProtoExpert.new("nanopb.depth", "Maximum nesting depth reached",
     expert.group.UNDECODED, expert.severity.WARN)

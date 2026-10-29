@@ -369,9 +369,9 @@ class ProtocolDecodeTests(LuaTestCase):
         self.assertTrue(self.mock.tables['udp.port'].decode_as_names[name], name)
         self.assertTrue(self.mock.tables['tcp.port'].decode_as_names[name], name)
         self.assertIn('Decode As ENVELOPE', result['summary'])
-        # telemetry does not use google.protobuf.Any, so it is no Any protocol.
-        self.assertIsNone(self.mock.protos['telemetry'])
-        self.assertIn('telemetry: the protocol does not use google.protobuf.Any', result['skipped'])
+        # telemetry does not import google.protobuf.Any, and is a protocol all the same.
+        self.assertIsNotNone(self.mock.protos['telemetry'])
+        self.assertTrue(self.mock.tables['udp.port'].decode_as_names['telemetry'])
         # Generate test packets maps each protocol's port, as a Decode As would.
         same = self.lua.eval('rawequal')
         self.assertTrue(same(self.mock.tables['udp.port'].entries[PROTOCOL_PORT], self.mock.protos[name]))
@@ -514,7 +514,7 @@ class StudioTests(LuaTestCase):
         names = set(self.mock.menus.keys())
         self.assertEqual(names, {'nanopb/Generate C (merged + validation)...',
                                  'nanopb/Generate test packets (passed + dropped)...',
-                                 'nanopb/Install or update dissector...', 'nanopb/About'})
+                                 'nanopb/Load protos directory into Wireshark...', 'nanopb/About'})
 
     def test_generate_c_through_backend(self):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
@@ -608,15 +608,22 @@ class StudioTests(LuaTestCase):
         self.assertEqual([calls[i] for i in range(before + 1, len(calls) + 1)], ['open|%s|' % pcap])
 
     def test_install_dissector_next_to_studio(self):
-        self.answer('Install / update dissector', FIXTURES, 'udp:5000=demo.envelope.Envelope')
-        self.mock.menus['nanopb/Install or update dissector...']()
+        # Only the protos directory is asked; every folder is loaded as a protocol.
+        self.answer('Load protos directory into Wireshark', FIXTURES)
+        self.mock.menus['nanopb/Load protos directory into Wireshark...']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
         self.assertIn('Ctrl+Shift+L', window.text)
+        self.assertIn('Loaded 2 protocol(s)', window.text)
+        self.assertIn('  ENVELOPE\n  TELEMETRY', window.text)
+        self.assertIn('Edit > Preferences > Protocols > NANOPB > Protocol', window.text)
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb', 'schema.luadata')))
-        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
-            self.assertIn('udp:5000=demo.envelope.Envelope', handle.read())
+        # The dissector loads both protocols.
+        self.mock.reload()
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        for name in ('envelope', 'telemetry'):
+            self.assertTrue(self.mock.tables['udp.port'].decode_as_names[name], name)
 
     def test_backend_failure_is_reported(self):
         missing = os.path.join(self.tmp, 'nope')
