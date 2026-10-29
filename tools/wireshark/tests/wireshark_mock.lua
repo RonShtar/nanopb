@@ -121,7 +121,12 @@ function M.render(item, indent, out)
 end
 
 -- Proto, fields, prefs ---------------------------------------------------
+-- Reload Lua plugins: Wireshark drops the Lua protocols first.
+function M.reload() M.protos = {} end
+
 function Proto(name, description)
+    -- Like Wireshark: a protocol name can be registered once.
+    if M.protos and M.protos[name] then error("Protocol exists: " .. name) end
     local values = {}
     local prefs = setmetatable({}, {
         __newindex = function(_, k, pref) values[k] = pref.default end,
@@ -141,6 +146,9 @@ Pref = {}
 for _, kind in ipairs({ "string", "bool", "uint" }) do
     Pref[kind] = function(label, default) return { label = label, default = default } end
 end
+function Pref.enum(label, default, _, choices)
+    return { label = label, default = default, choices = choices }
+end
 
 ProtoField = setmetatable({}, { __index = function(_, kind)
     return function(abbr, name, _, valstring)
@@ -158,10 +166,15 @@ ENC_UTF_8 = 0
 DissectorTable = { get = function(name)
     local t = M.tables[name]
     if not t then
-        t = { name = name, entries = {}, decode_as = false }
+        t = { name = name, entries = {}, decode_as = false, decode_as_names = {} }
         function t:add(port, proto) self.entries[port] = proto end
-        function t:remove(port) self.entries[port] = nil end
-        function t:add_for_decode_as() self.decode_as = true end
+        function t:remove(port, proto)
+            if proto == nil or rawequal(self.entries[port], proto) then self.entries[port] = nil end
+        end
+        function t:add_for_decode_as(proto)
+            self.decode_as = true
+            self.decode_as_names[proto.name] = true
+        end
         M.tables[name] = t
     end
     return t

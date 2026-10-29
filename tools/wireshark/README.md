@@ -78,8 +78,8 @@ selected), or use **Select all** / **Select none**, then press **Generate**.
 | Menu | Result |
 |------|--------|
 | Generate C (merged + validation) | `<output>/<unit>/<unit>.pb.c/.h` and `<unit>_validate.c/.h` |
-| Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark |
-| Install or update dissector | the dissector and schema, for real traffic |
+| Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark, plus every packet as a C array and hex in `<output>/<unit>/packets/` |
+| Load protos directory into Wireshark | the dissector, with every folder of the protos directory as a protocol you can choose (Decode As or the NANOPB **Protocol** preference), for real traffic |
 | About | paths, Python, port map |
 
 ### Generating C code
@@ -90,7 +90,7 @@ the includes between them removed:
 
 | file | contents |
 |------|----------|
-| `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the packet filters `<Msg>_filter_udp` / `_tcp` and their core |
+| `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the protocol filter `<unit>_filter_udp` / `_tcp`, the per-message packet filters `<Msg>_filter_udp` / `_tcp`, and their core |
 | `<unit>_validate.h` / `<unit>_validate.c` | every validator `pb_validate_<msg>()` (all `_validate.h`/`_validate.c` from the validate plugin, see `docs/validation.md`) |
 
 `<unit>_validate.h` includes `<unit>.pb.h`; `<unit>.pb.c` includes
@@ -110,8 +110,28 @@ Generating takes a few seconds per unit; Wireshark does not respond meanwhile.
 bool pb_validate_<msg>(const <msg> *msg, pb_violations_t *violations);  /* violations may be NULL */
 ```
 
-and `<unit>.pb.h`, for each **protocol entrypoint**, a packet filter that
-decodes, validates and returns `0` (accept) or `-1` (drop):
+and `<unit>.pb.h` exports packet filters that decode, validate and return `0`
+(accept) or `-1` (drop).
+
+**One filter for the whole protocol.** A unit (protocol) that uses
+`google.protobuf.Any` gets
+
+```c
+int <unit>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
+int <unit>_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+```
+
+Every packet is a `google.protobuf.Any`, and its `type_url` is the opcode: a
+`switch` on it picks any message of the unit (e.g.
+`type.googleapis.com/fleet.envelope.Envelope`), which is decoded and validated.
+`Any` fields inside it are resolved by their URL the same way, recursively. An
+unknown `type_url`, or `Any` nested deeper than `PB_VALIDATE_FILTER_MAX_ANY_DEPTH`
+(4), is dropped. Oneofs are ordinary fields here, and are not used as opcodes. See
+`--protocol-filter` in `docs/validation.md`. A unit without `Any` gets no
+protocol filter, and the result window says so.
+
+**Per-message filters.** In addition, for each **protocol entrypoint** there is
+a filter whose packet is that message itself:
 
 ```c
 int <Msg>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
@@ -156,9 +176,15 @@ limits (`max_size`, `max_count`, ...), so a dropped packet is dropped by the
 validator, not by a decode error. Rules that cannot be broken with decodable
 data, or that the C validator does not enforce, are listed as not generated.
 
-Root messages are sent raw on their port (your port map, or one UDP port per
-unit root from 15000, which is then saved as your port map). Every other
-message is wrapped in a `google.protobuf.Any` and sent on `udp/15999`.
+Every message is wrapped in a `google.protobuf.Any` (its `type_url` is the
+opcode, as for `<unit>_filter_udp`), and sent on its protocol's own UDP port:
+the first selected protocol on `udp/16000`, the next on 16001, and so on. That port
+is mapped to the protocol, as a **Decode As** would (see [Protocols and Decode
+As](#protocols-and-decode-as)). The verdicts are what `<unit>_filter_udp`
+decides. Protocols without `Any` are skipped. On the command line,
+`gen-packets --mode ports` gives the older layout instead. In that layout,
+root messages are sent raw on their own port (from 15000), and the others are
+sent as `Any` on `udp/15999`.
 
 The backend refreshes the dissector and schema in your plugins folder, the
 capture opens, and Lua plugins reload when the schema changed. The result
@@ -166,16 +192,22 @@ window has **Show dropped only** (filter `nanopb.validation == "dropped"`),
 **Show all** and **Open output folder**. Next to the capture:
 
 - `nanopb_test_packets.json`: per frame the message, port, expected verdict, violated field and rule, seed and bytes;
-- `nanopb_test_packets.txt`: the same as a table, plus what was not generated.
+- `nanopb_test_packets.txt`: the same as a table, plus what was not generated;
+- `<unit>/packets/packet_<frame>_<Message>_<passed|dropped>.h`: each packet as a C array (`static const uint8_t packet_..._data[]` and `PACKET_..._DATA_SIZE`), ready to feed to `<unit>_filter_udp` in a unit test;
+- `<unit>/packets/packet_<frame>_<Message>_<passed|dropped>.hex`: the same bytes as a hex stream.
 
 Each packet also carries its expectation as a packet comment
 (`expect=DROPPED msg=... field=... rule=...`, column `frame.comment`).
 
 ### Dissector
 
-**Install or update dissector** builds a schema from **all** units of the
-protos directory, with their validation rules, and asks for a **port map**, for
-example `udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`.
+**Load protos directory into Wireshark** asks only for the protos directory.
+Every subdirectory with `.proto` files is loaded as a protocol (see [Protocols
+and Decode As](#protocols-and-decode-as)), and the result window lists them.
+It builds a schema from **all** units of the
+protos directory, with their validation rules, and keeps your **port map**
+(edit it under Edit > Preferences > Protocols > NANOPB > Port map, for example
+`udp:5000=demo.envelope.Envelope,tcp:7000=demo.telemetry.Telemetry`).
 Run it again whenever your `.proto` files change (Generate test packets does
 this for you).
 
@@ -194,6 +226,36 @@ value is valid protobuf. Other traffic is left alone.
 Whenever it meets an `Any`, it reads `type_url`, looks up the part after the
 last `/` (e.g. `demo.payloads.Command`) in the schema, and decodes `value` as
 that message, recursively. Unknown types are shown as bytes with an expert warning.
+
+### Protocols and Decode As
+
+Every folder of the protos directory with messages of its own is also a
+protocol, named after the folder (`fleet` -> **FLEET**, `shared` -> **SHARED**),
+and all of them are loaded. Load protos directory into Wireshark lists them. A
+folder does not have to import `google/protobuf/any.proto` for this. Only the C
+`<unit>_filter_udp` needs that, so Generate C makes it only for such folders.
+There are two ways to choose one:
+
+- **The primary protocol, for all NANOPB traffic:** **Edit > Preferences >
+  Protocols > NANOPB > Protocol: fleet**. You can also right-click a NANOPB
+  packet and choose **Protocol Preferences > Protocol**. Every NANOPB packet
+  without a port map message is then decoded as a fleet packet. This covers
+  Decode As NANOPB, detected Anys and the default message. On the command line,
+  use `tshark -o nanopb.protocol:fleet`.
+- **Per port:** **Analyze > Decode As... > UDP port (or TCP port) > FLEET**, or
+  `tshark -d udp.port==16000,fleet` on the command line. Generate test packets
+  already maps its port (16000) this way.
+
+If Wireshark already has a protocol with the folder's name, it is called
+`NANOPB_<FOLDER>` instead.
+
+A port decoded as a protocol works like `<protocol>_filter_udp`. The packet is
+a `google.protobuf.Any`, and its `type_url` must name a message of that
+protocol: otherwise it gets `filter.unknown_type`. Nested `Any` fields are
+always validated, and more than 4 levels give `filter.depth`. The Protocol column shows
+`FLEET` and the Info column shows the selected message, e.g.
+`nanopb fleet fleet.envelope.Envelope (120 bytes) [PASSED]`. The fields are the
+same as in the NANOPB tree (`nanopb.validation`, `nanopb.fleet.envelope.Envelope.version`, ...).
 
 ## Validation in Wireshark
 

@@ -198,9 +198,21 @@ end
 local JSON_ESCAPES = { n = "\n", t = "\t", r = "\r", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
 
 local function json_string(text, key)
-    local raw = text:match('"' .. key .. '"%s*:%s*"(.-[^\\])"') or text:match('"' .. key .. '"%s*:%s*""') and ""
-    if not raw then return nil end
-    return (raw:gsub("\\(.)", JSON_ESCAPES))
+    local _, start = text:find('"' .. key .. '"%s*:%s*"')
+    if not start then return nil end
+    -- Up to the first quote that is not escaped (the value may be empty).
+    local pos = start + 1
+    while pos <= #text do
+        local c = text:sub(pos, pos)
+        if c == "\\" then
+            pos = pos + 2
+        elseif c == '"' then
+            return (text:sub(start + 1, pos - 1):gsub("\\(.)", JSON_ESCAPES))
+        else
+            pos = pos + 1
+        end
+    end
+    return nil
 end
 
 local function json_bool(text, key)
@@ -414,13 +426,15 @@ end
 local DROPPED_FILTER = 'nanopb.validation == "dropped"'
 
 -- One button: valid and invalid packets of every message in one capture,
--- dissector refreshed, capture opened.
+-- dissector refreshed, capture opened. Every packet is a google.protobuf.Any
+-- (type_url = message) on its protocol's port, mapped like a Decode As to
+-- the <protocol> dissector; each one is also written as a C array (.h) and .hex.
 local function gen_packets()
     local title = "Generate test packets"
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
-            local args = add_common({ "gen-packets", "--out", output_dir(), "--unit", units,
-                "--plugins-dir", PLUGINS_DIR })
+            local args = add_common({ "gen-packets", "--mode", "protocol", "--out", output_dir(),
+                "--unit", units, "--plugins-dir", PLUGINS_DIR })
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -429,15 +443,18 @@ local function gen_packets()
             if not ok then return false, text end
             local pcap = json_string(text, "pcap") or ""
             local summary = json_string(text, "summary") or text
-            if config.port_map == "" then
+            local picked = json_string(text, "port_map") or ""
+            if config.port_map == "" and picked ~= "" then
                 -- Keep the ports gen-packets picked, so the dissector and Generate C agree.
-                config.port_map = json_string(text, "port_map") or ""
+                config.port_map = picked
                 save_config()
             end
             local reload = json_bool(text, "schema_changed") and reload_lua_plugins
             local notes = { summary, "" }
             if open_capture_file then
                 notes[#notes + 1] = "Opening the capture. Each packet shows Validation: PASSED or DROPPED."
+                notes[#notes + 1] = "Other ports: Analyze > Decode As > UDP/TCP port > FLEET (your folder name), or set it for all NANOPB"
+                    .. "\ntraffic: Edit > Preferences > Protocols > NANOPB > Protocol."
             else
                 notes[#notes + 1] = "Open the capture with File > Open: " .. pcap
             end
@@ -466,25 +483,27 @@ local function gen_packets()
     end)
 end
 
-local function install_dissector()
-    ask_dirs("Install / update dissector", false, {
-        { "Port map (e.g. udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd)", config.port_map },
-    }, function(port_map)
-        config.port_map = trim(port_map)
-        save_config()
-        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR,
-            "--port-map", config.port_map })
+-- Only the protos directory: every subdirectory with .proto files becomes a
+-- protocol (FLEET, SHARED, ...) of the dissector; the port map is kept.
+local function load_protos()
+    local title = "Load protos directory into Wireshark"
+    ask_dirs(title, false, nil, function()
+        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR })
+        if config.port_map ~= "" then
+            args[#args + 1] = "--port-map"
+            args[#args + 1] = config.port_map
+        end
         local ok, text = run_backend(args)
         if ok then
+            text = json_string(text, "summary") or text
             if reload_lua_plugins then
-                text = text .. "\n\nReloading Lua plugins..."
-                show("nanopb: install dissector", ok, text)
+                show(title, ok, text .. "\n\nReloading Lua plugins...")
                 reload_lua_plugins()
                 return
             end
             text = text .. "\n\nReload Lua plugins (Analyze > Reload Lua Plugins, Ctrl+Shift+L) to activate."
         end
-        show("nanopb: install dissector", ok, text)
+        show(title, ok, text)
     end)
 end
 
@@ -504,5 +523,5 @@ end
 
 register_menu("nanopb/Generate C (merged + validation)...", gen_c, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate test packets (passed + dropped)...", gen_packets, MENU_TOOLS_UNSORTED)
-register_menu("nanopb/Install or update dissector...", install_dissector, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/Load protos directory into Wireshark...", load_protos, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/About", about, MENU_TOOLS_UNSORTED)
