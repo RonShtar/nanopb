@@ -46,10 +46,11 @@ end
 -- Stored state
 -- ---------------------------------------------------------------------------
 
-local KEYS = { "python", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map" }
+local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
+    project = "",
     nanopb_root = "",
     protos_root = "",
     output_dir = "",
@@ -114,8 +115,15 @@ local function quote(arg)
     return "'" .. arg:gsub("'", "'\\''") .. "'"
 end
 
+-- The copy made by install-studio, or a checkout when installed with --dev.
+local function project_root()
+    if config.nanopb_root ~= "" then return config.nanopb_root end
+    if config.project ~= "" then return config.project end
+    return join(DATA_DIR, "project")
+end
+
 local function backend_path()
-    return join(config.nanopb_root, "tools", "wireshark", "backend", "nanopb_wireshark.py")
+    return join(project_root(), "tools", "wireshark", "backend", "nanopb_wireshark.py")
 end
 
 local function file_exists(path)
@@ -126,13 +134,13 @@ end
 
 -- Run the backend with a list of arguments. Returns ok, output text.
 local function run_backend(args)
-    if config.nanopb_root == "" or not file_exists(backend_path()) then
-        return false, "nanopb project path is not set or has no tools/wireshark/backend.\n" ..
+    if not file_exists(backend_path()) then
+        return false, "nanopb backend not found at " .. backend_path() .. ".\n" ..
             "From the nanopb checkout run\n\n" ..
             "    python tools/wireshark/backend/nanopb_wireshark.py install-studio\n\n" ..
             "and reload Lua plugins (Ctrl+Shift+L)."
     end
-    local parts = { quote(config.python), quote(backend_path()), "--nanopb-root", quote(config.nanopb_root) }
+    local parts = { quote(config.python), quote(backend_path()), "--nanopb-root", quote(project_root()) }
     for _, a in ipairs(args) do parts[#parts + 1] = quote(a) end
     local cmd = table.concat(parts, " ") .. " 2>&1"
     -- cmd.exe strips the first and last quote of the whole line.
@@ -363,7 +371,7 @@ local function about()
     show("nanopb studio", true, table.concat({
         "Plugins folder: " .. PLUGINS_DIR,
         "State file: " .. CONFIG_PATH,
-        "nanopb project: " .. (config.nanopb_root ~= "" and config.nanopb_root or "(not set, run install-studio)"),
+        "nanopb project: " .. project_root() .. (config.nanopb_root ~= "" and " (dev checkout)" or ""),
         "Last input directory: " .. (config.protos_root ~= "" and config.protos_root or "(none)"),
         "Last output directory: " .. (output_dir() ~= "" and output_dir() or "(none)"),
         "Python: " .. config.python,
