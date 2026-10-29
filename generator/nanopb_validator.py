@@ -143,6 +143,26 @@ RULE_TIMESTAMP_WITHIN = 'TIMESTAMP_WITHIN'
 # HELPER FUNCTIONS
 # =============================================================================
 
+def _c_numeric_literal(value: Any, type_name: str) -> str:
+    """C spelling of a rule constant for a field of protobuf type ``type_name``.
+
+    64-bit constants need INT64_C/UINT64_C: a bare literal above INT64_MAX has
+    no signed type (a warning, an error with -Werror), and -9223372036854775808
+    is the negation of an unsigned literal.
+    """
+    if isinstance(value, bool):
+        # str(True) would put the Python spelling "True" into the C source.
+        return 'true' if value else 'false'
+    if isinstance(value, int):
+        if type_name in ('uint64', 'fixed64'):
+            return 'UINT64_C(%d)' % value
+        if type_name in ('int64', 'sint64', 'sfixed64'):
+            if value == -(1 << 63):
+                return '(-INT64_C(9223372036854775807) - 1)'
+            return 'INT64_C(%d)' % value
+    return str(value)
+
+
 def _get_numeric_validator_info(type_name: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Map a protobuf numeric type name to its C type and validator function.
@@ -1170,10 +1190,8 @@ class NumericRuleEmitter(RuleEmitter):
         if not rule_enum:
             return ''
         
-        value = rule_ir.rule.params.get('value', 0)
-        if isinstance(value, bool):
-            # str(True) would put the Python spelling "True" into the C source.
-            value = 'true' if value else 'false'
+        value = _c_numeric_literal(rule_ir.rule.params.get('value', 0),
+                                   rule_ir.constraint_id.split('.', 1)[0])
         ctype = rule_ir.c_type_info.c_type
         validator_func = rule_ir.c_type_info.validator_func
         
@@ -1424,9 +1442,9 @@ class ItemsRuleEmitter(RuleEmitter):
                     field_name, value, constraint_id)
             
             elif rule_type in (RULE_GT, RULE_GTE, RULE_LT, RULE_LTE, RULE_EQ):
-                value = item_rule.get('value', 0)
                 # Extract just the type name from the constraint_id (e.g., 'int32' from 'int32.gt')
                 type_name = constraint_id.split('.', 1)[0]
+                value = _c_numeric_literal(item_rule.get('value', 0), type_name)
                 ctype, func = _get_numeric_validator_info(type_name)
                 if ctype and func:
                     rule_enum = self.NUMERIC_RULE_TO_C_ENUM.get(rule_type)
@@ -1535,7 +1553,9 @@ class ItemsRuleEmitter(RuleEmitter):
                     code += '            pb_validate_context_pop_index(&ctx);\n'
                     code += '        }\n'
                 else:
-                    conditions = ['msg->%s[__pb_i] == %s' % (field_name, v) for v in values]
+                    type_name = constraint_id.split('.', 1)[0]
+                    conditions = ['msg->%s[__pb_i] == %s' % (field_name, _c_numeric_literal(v, type_name))
+                                  for v in values]
                     condition_str = ' || '.join(conditions) if conditions else 'false'
                     code += '        /* repeated.items %s.in validation */\n' % constraint_id.split('.')[0]
                     code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
@@ -1566,7 +1586,9 @@ class ItemsRuleEmitter(RuleEmitter):
                     code += '            pb_validate_context_pop_index(&ctx);\n'
                     code += '        }\n'
                 else:
-                    conditions = ['msg->%s[__pb_i] != %s' % (field_name, v) for v in values]
+                    type_name = constraint_id.split('.', 1)[0]
+                    conditions = ['msg->%s[__pb_i] != %s' % (field_name, _c_numeric_literal(v, type_name))
+                                  for v in values]
                     condition_str = ' && '.join(conditions) if conditions else 'true'
                     code += '        /* repeated.items %s.not_in validation */\n' % constraint_id.split('.')[0]
                     code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
@@ -1782,7 +1804,9 @@ class InNotInRuleEmitter(RuleEmitter):
             field_access = field_name if not (ctx.is_oneof and not ctx.is_anonymous) else '%s.%s' % (ctx.oneof_name, field_name)
             
             if is_in:
-                conditions = ['msg->%s == %s' % (field_access, v) for v in values]
+                type_name = rule_ir.constraint_id.split('.', 1)[0]
+                conditions = ['msg->%s == %s' % (field_access, _c_numeric_literal(v, type_name))
+                              for v in values]
                 condition_str = ' || '.join(conditions)
                 values_str = ', '.join(str(v) for v in values)
                 return ('        if (!(%s)) {\n'
@@ -1790,7 +1814,9 @@ class InNotInRuleEmitter(RuleEmitter):
                         '            if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
                         '        }\n') % (condition_str, rule_ir.constraint_id, values_str)
             else:
-                conditions = ['msg->%s != %s' % (field_access, v) for v in values]
+                type_name = rule_ir.constraint_id.split('.', 1)[0]
+                conditions = ['msg->%s != %s' % (field_access, _c_numeric_literal(v, type_name))
+                              for v in values]
                 condition_str = ' && '.join(conditions)
                 values_str = ', '.join(str(v) for v in values)
                 return ('        if (!(%s)) {\n'
