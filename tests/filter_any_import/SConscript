@@ -1,0 +1,39 @@
+# Build and run filter_any_import test suite
+# An Any payload type from another .proto: its validator is defined once, in
+# that file's _validate.c, and the filter calls it from there.
+
+Import("env")
+
+test_env = env.Clone()
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
+
+payload_files = test_env.NanopbProto("payload")
+test_env.SideEffect("payload_validate.c", payload_files)
+test_env.SideEffect("payload_validate.h", payload_files)
+
+gateway_env = test_env.Clone()
+gateway_env.Replace(NANOPB_VALIDATE_FLAGS = "--filter=Gateway")
+gateway_files = gateway_env.NanopbProto("gateway")
+gateway_env.SideEffect("gateway_validate.c", gateway_files)
+gateway_env.SideEffect("gateway_validate.h", gateway_files)
+gateway_env.Depends(gateway_files, payload_files)
+
+test_env.NanopbProto(["google/protobuf/any", "google/protobuf/any.options"])
+
+test_prog = test_env.Program(
+    ["test_filter_any_import.c", "payload.pb.c", "payload_validate.c", "gateway.pb.c", "gateway_validate.c",
+     "google/protobuf/any.pb.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)

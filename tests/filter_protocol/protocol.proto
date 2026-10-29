@@ -1,0 +1,31 @@
+/*
+ * One protocol for --protocol-filter=demo: every packet is a
+ * google.protobuf.Any whose type_url names one of these messages.
+ */
+syntax = "proto3";
+
+import "validate.proto";
+import "google/protobuf/any.proto";
+
+message Ping {
+    uint32 seq = 1 [(validate.rules).uint32.gte = 1];
+}
+
+message Login {
+    string user = 1 [(validate.rules).string.min_len = 3];
+}
+
+/* Repeated Any: every item is resolved by its type_url. */
+message Batch {
+    repeated google.protobuf.Any items = 1;
+}
+
+/* Any inside a oneof arm, and a sub-message that holds Any. */
+message Envelope {
+    uint32 version = 1 [(validate.rules).uint32.const_value = 1];
+    oneof body {
+        Ping ping = 2;
+        google.protobuf.Any wrapped = 3;
+        Batch batch = 4;
+    }
+}

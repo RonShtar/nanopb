@@ -333,6 +333,36 @@ Passed via `--nanopb-validate_opt=` (or before the `:` in
   `google.protobuf.Any` entrypoint, separated by `;`. Overrides the
   `(validate.rules).any.in` allow-list. (`,` cannot be used as a separator
   because protoc already uses it to separate plugin options.)
+- `--protocol-filter=NAME`: one filter for a whole protocol, see
+  [Protocol filter](#protocol-filter). Independent of `--filter`.
+
+#### Protocol filter
+
+With `--protocol-filter=NAME` the plugin also writes `NAME_filter.h` /
+`NAME_filter.c` for all files of the invocation:
+
+```c
+int NAME_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
+int NAME_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+```
+
+Every packet is a `google.protobuf.Any`. Its `type_url` is the opcode: a
+`switch` on it selects one of the protocol's messages (every message of the
+generated files except map entries and `google.protobuf.*`), which is decoded
+and validated (`pb_validate_<msg>(&msg, NULL)`). Every `Any` inside that
+message, whether a singular field, a repeated field, a oneof arm or one inside
+a sub-message, is resolved the same way, recursively. A packet is rejected
+(`-1`) when it is not an `Any`, when a `type_url` names no message of the
+protocol (any host prefix is accepted: `example.com/pkg.Msg` selects
+`pkg.Msg`), when a message does not decode or validate, or when `Any`s are
+nested deeper than `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` (default 4). Oneofs are
+ordinary fields here: an unset oneof is fine.
+
+Run the plugin on all `.proto` files of the protocol in one invocation, so the
+filter knows all of them; `google/protobuf/any.proto` needs static storage
+(`max_size` for `type_url` and `value` in `any.options`). Each level of `Any`
+nesting decodes its payload into a struct on the stack, so the stack grows
+with the depth limit times the largest message struct.
 
 #### What you must declare, and what is derived
 

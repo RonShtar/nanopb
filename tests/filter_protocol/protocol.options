@@ -1,0 +1,2 @@
+Login.user max_size:16
+Batch.items max_count:2

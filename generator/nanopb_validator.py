@@ -2225,8 +2225,16 @@ class ValidatorGenerator:
         # Iterate through all validators and their messages
         for validator in self.validators.values():
             message = validator.message
-            # Check all fields in the message
+            # Check all fields in the message, including the members of oneofs:
+            # a oneof arm of a type from another file is validated by calling
+            # that file's validator too.
+            fields = []
             for field in getattr(message, 'fields', []):
+                if getattr(field, 'pbtype', None) == 'oneof':
+                    fields.extend(getattr(field, 'fields', []) or [])
+                else:
+                    fields.append(field)
+            for field in fields:
                 try:
                     # Only consider message-type fields
                     if getattr(field, 'pbtype', None) not in ('MESSAGE', 'MSG_W_CB'):

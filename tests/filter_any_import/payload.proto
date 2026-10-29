@@ -1,0 +1,8 @@
+/* An Any payload type with rules, defined apart from the filter's entrypoint. */
+syntax = "proto3";
+
+import "validate.proto";
+
+message Reading {
+    int32 value = 1 [(validate.rules).int32 = {gte: 0, lte: 100}];
+}
