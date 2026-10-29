@@ -141,10 +141,19 @@ Wireshark integration
 ---------------------
 
 The [tools/wireshark](https://github.com/nanopb/nanopb/tree/master/tools/wireshark)
-directory has Lua plugins for Wireshark. One generates merged nanopb C code
-(with validation) and encoded sample data from a directory of `.proto` files.
-The other is a dissector that decodes nested messages and `google.protobuf.Any`
-payloads recursively. See its README for installation.
+directory has Lua plugins for Wireshark:
+
+- A **Tools > nanopb** menu. It generates merged nanopb C code with validators
+  and packet filters, and a capture of test packets that pass or are dropped by
+  validation. Its input is a directory of `.proto` files with one folder per
+  protocol.
+- A **dissector**. It decodes nested messages and `google.protobuf.Any`
+  payloads recursively, and shows on every packet whether your
+  `validate.proto` rules pass or drop it. Each protocol folder can be chosen
+  with Decode As or as the NANOPB **Protocol** preference.
+
+See the [Wireshark tools user guide](wireshark_tools.md) for installation and
+use, and the tool's README for the full reference.
 
 Running the test cases
 ----------------------

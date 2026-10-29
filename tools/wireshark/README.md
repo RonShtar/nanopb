@@ -1,5 +1,10 @@
 # nanopb tools for Wireshark
 
+New to the tools? Start with the step-by-step user guide,
+[docs/wireshark_tools.md](../../docs/wireshark_tools.md): installation, a first
+run, everyday tasks, using the generated C, and updating nanopb. This README is
+the reference.
+
 Two Lua plugins for Wireshark, for Windows and Linux:
 
 | File | What it does |
@@ -392,12 +397,17 @@ Every menu action maps to a backend subcommand. All of them accept
 checkout or installed copy containing the script).
 
     python tools/wireshark/backend/nanopb_wireshark.py gen-c             --protos-root P --out O [--unit U] [--port-map MAP] [--no-filter] [--with-runtime] [--no-validate]
-    python tools/wireshark/backend/nanopb_wireshark.py gen-packets       --protos-root P --out O [--unit U] [--port-map MAP] [--any-port 15999] [--valid 2] [--max-invalid 40] [--seed 1] [--format pcapng|pcap] [--plugins-dir D | --no-install]
-    python tools/wireshark/backend/nanopb_wireshark.py install-dissector --protos-root P [--plugins-dir D] [--port-map MAP]
+    python tools/wireshark/backend/nanopb_wireshark.py gen-packets       --protos-root P --out O [--unit U] [--mode ports|protocol] [--protocol-port 16000] [--port-map MAP] [--any-port 15999] [--valid 2] [--max-invalid 40] [--seed 1] [--format pcapng|pcap] [--plugins-dir D | --no-install]
+    python tools/wireshark/backend/nanopb_wireshark.py install-dissector --protos-root P [--plugins-dir D] [--port-map MAP]   (menu: Load protos directory into Wireshark)
     python tools/wireshark/backend/nanopb_wireshark.py install-studio    [--plugins-dir D] [--dev]
     python tools/wireshark/backend/nanopb_wireshark.py gen-data          --protos-root P --out O [--unit U] [--messages A,B] [--formats bin,c,hex] [--count N] [--seed S] [--invalid [--field F] [--rule R]]
     python tools/wireshark/backend/nanopb_wireshark.py units             --protos-root P [--names-only]
     python tools/wireshark/backend/nanopb_wireshark.py schema            --protos-root P --out schema.luadata
+
+`gen-packets --mode protocol` is what the menu runs: every message wrapped in
+an `Any` on its protocol's port. The default `--mode ports` sends root messages
+raw on their own port instead. `install-dissector` without `--port-map` keeps
+the installed port map.
 
 `gen-data` writes single encoded samples (`.bin`, a C array `.h`, `.hex`,
 and the values as `.txt`) to `<out>/<unit>/data/`; see `docs/DATA_GENERATOR.md`.
