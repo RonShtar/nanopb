@@ -6,13 +6,14 @@ Windows install folder). Loads the dissector from this repository with
 plugins and user preferences don't interfere.
 """
 
+import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
 
-from helpers import TESTS_DIR
+from helpers import FIXTURES, TESTS_DIR, TOOL_DIR, run_backend
 
 sys.path.insert(0, os.path.join(TESTS_DIR, 'live'))
 import cases as live_cases  # noqa: E402
@@ -34,6 +35,50 @@ class TsharkTests(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
         failures = ['%d %s: %s' % (n, c.name, '; '.join(p)) for n, c, p in results if p]
         self.assertEqual(failures, [])
+
+    def test_generated_packet_verdicts(self):
+        """gen-packets captures: every frame gets the verdict its manifest expects."""
+
+        for root in (os.path.join(os.path.dirname(FIXTURES), 'rules'), FIXTURES,
+                     os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')):
+            with self.subTest(root=root):
+                tmp = tempfile.mkdtemp(prefix='nanopb_ws_tshark_gen_')
+                try:
+                    self.check_generated(root, tmp)
+                finally:
+                    shutil.rmtree(tmp, ignore_errors=True)
+
+    def check_generated(self, root, tmp):
+        plugins = os.path.join(tmp, 'plugins')
+        status, result, err = run_backend('gen-packets', '--protos-root', root, '--out', tmp,
+                                          '--plugins-dir', plugins)
+        self.assertEqual(status, 0, err)
+        with open(result['manifest']) as handle:
+            manifest = json.load(handle)
+        env = dict(os.environ, WIRESHARK_CONFIG_DIR=os.path.join(tmp, 'config'),
+                   NANOPB_WS_SCHEMA=os.path.join(plugins, 'nanopb', 'schema.luadata'))
+        os.makedirs(env['WIRESHARK_CONFIG_DIR'])
+        base = [TSHARK, '-X', 'lua_script:' + os.path.join(TOOL_DIR, 'nanopb_any_dissector.lua'),
+                '-o', 'nanopb.port_map:' + manifest['port_map'], '-r', result['pcap']]
+        status, out = live_test.run(base + ['-T', 'fields', '-e', 'frame.number', '-e', 'nanopb.validation',
+                                            '-e', 'nanopb.validation.field', '-E', 'occurrence=a',
+                                            '-E', 'aggregator=|'], env)
+        self.assertEqual(status, 0, out)
+        got = {}
+        for line in out.splitlines():
+            parts = line.split('\t') + ['', '']
+            if parts[0].isdigit():
+                got[int(parts[0])] = (parts[1], parts[2])
+        for entry in manifest['packets']:
+            verdict, fields = got.get(entry['frame'], ('', ''))
+            self.assertEqual(verdict, entry['expect'], '%s frame %d %s' % (root, entry['frame'], entry))
+            if entry['violate']:
+                self.assertIn(entry['violate']['field'], fields, '%s frame %d %s' % (root, entry['frame'], entry))
+        # The display filter selects exactly the dropped packets.
+        status, out = live_test.run(base + ['-Y', 'nanopb.validation == "dropped"', '-T', 'fields',
+                                            '-e', 'frame.number'], env)
+        dropped = set(int(x) for x in out.split() if x.isdigit())
+        self.assertEqual(dropped, set(e['frame'] for e in manifest['packets'] if e['expect'] == 'dropped'))
 
 
 if __name__ == '__main__':
