@@ -4,6 +4,7 @@ Run: python -m unittest discover -s tools/wireshark/tests -v
 Needs: protobuf, grpcio-tools (same as the nanopb generator).
 """
 
+import json
 import os
 import re
 import shutil
@@ -18,6 +19,27 @@ STRESS_PROTOS = os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')
 RULES_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules')
 UNENFORCED_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules_unenforced')
 STRESS_PORTS = 'udp:5100=fleet.envelope.Envelope,tcp:5101=fleet.telemetry.Frame,udp:5102=fleet.status.Status'
+
+
+def unwrap_any(data):
+    """The value bytes of an encoded google.protobuf.Any."""
+
+    pos, value = 0, b''
+    while pos < len(data):
+        key = data[pos]
+        pos += 1
+        length, shift = 0, 0
+        while True:
+            b = data[pos]
+            pos += 1
+            length |= (b & 0x7f) << shift
+            shift += 7
+            if b < 0x80:
+                break
+        if key == 0x12:
+            value = data[pos:pos + length]
+        pos += length
+    return value
 
 
 def find_cc():
@@ -136,6 +158,111 @@ class BackendTests(unittest.TestCase):
                          [('map.no_sparse', 'UNSUPPORTED')])
         self.assertEqual(form['message_rules'], [{'id': 'message.requires', 'kind': 'UNSUPPORTED',
                                                   'fields': ['name']}])
+
+    def gen_packets(self, root, *extra):
+        out = os.path.join(self.tmp, 'packets')
+        status, result, err = run_backend('gen-packets', '--protos-root', root, '--out', out,
+                                          '--plugins-dir', os.path.join(self.tmp, 'plugins'), *extra)
+        self.assertEqual(status, 0, err)
+        with open(result['manifest']) as handle:
+            return result, json.load(handle)
+
+    def test_gen_packets_capture_and_manifest(self):
+        from nanopb_wireshark import read_capture
+        result, manifest = self.gen_packets(FIXTURES)
+        self.assertTrue(result['pcap'].endswith('.pcapng'))
+        self.assertGreater(result['passed'], 0)
+        self.assertGreater(result['dropped'], 0)
+        self.assertEqual(result['passed'] + result['dropped'], len(manifest['packets']))
+        # roots on their own port, everything else as Any on the (explicitly mapped) Any port
+        self.assertIn('udp:15000=demo.envelope.Envelope', manifest['port_map'])
+        self.assertIn('udp:15999=google.protobuf.Any', manifest['port_map'])
+        packets = read_capture(result['pcap'])
+        self.assertEqual(len(packets), len(manifest['packets']))
+        for pkt, entry in zip(packets, manifest['packets']):
+            self.assertEqual(pkt.payload.hex(), entry['hex'])
+            self.assertEqual(pkt.port, entry['port'])
+            self.assertTrue(pkt.comment.startswith('expect=%s msg=%s' % (entry['expect'].upper(), entry['message'])))
+            if entry['expect'] == 'dropped':
+                self.assertIn('field=%s rule=%s' % (entry['violate']['field'], entry['violate']['rule']), pkt.comment)
+        wrapped = [e for e in manifest['packets'] if e['any_wrapped']]
+        self.assertTrue(wrapped and all(e['port'] == 15999 for e in wrapped))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'plugins', 'nanopb', 'schema.luadata')))
+
+    def test_gen_packets_reports_schema_changes(self):
+        first, _ = self.gen_packets(FIXTURES)
+        second, _ = self.gen_packets(FIXTURES)
+        self.assertTrue(first['schema_changed'])
+        self.assertFalse(second['schema_changed'])
+
+    def test_gen_packets_pcap_format_and_no_install(self):
+        from nanopb_wireshark import read_capture
+        out = os.path.join(self.tmp, 'packets')
+        status, result, err = run_backend('gen-packets', '--protos-root', FIXTURES, '--unit', 'telemetry',
+                                          '--out', out, '--no-install', '--format', 'pcap', '--valid', '1')
+        self.assertEqual(status, 0, err)
+        self.assertTrue(result['pcap'].endswith('.pcap'))
+        self.assertEqual(len(read_capture(result['pcap'])), result['passed'] + result['dropped'])
+        self.assertNotIn('installed', result)
+
+    @unittest.skipIf(find_cc() is None, 'no C compiler (gcc/clang/cc, CC, or pip install ziglang)')
+    def test_gen_packets_verdicts_match_c_validator(self):
+        """Every expected verdict is what pb_decode + pb_validate in C decide."""
+
+        for root in (RULES_PROTOS, FIXTURES, STRESS_PROTOS):
+            with self.subTest(root=os.path.basename(os.path.dirname(root)) + '/' + os.path.basename(root)):
+                shutil.rmtree(os.path.join(self.tmp, 'packets'), ignore_errors=True)
+                _, manifest = self.gen_packets(root)
+                self.check_with_c(root, manifest)
+
+    def check_with_c(self, root, manifest):
+        from nanopb_wireshark import c_identifier
+        by_unit = {}
+        for entry in manifest['packets']:
+            by_unit.setdefault(entry['unit'], []).append(entry)
+        for unit, entries in by_unit.items():
+            out = os.path.join(self.tmp, 'c_' + unit)
+            status, result, err = run_backend('gen-c', '--protos-root', root, '--unit', unit, '--out', out,
+                                              '--no-filter')
+            self.assertEqual(status, 0, err)
+            unit_dir = os.path.join(out, unit)
+            with open(os.path.join(unit_dir, unit + '.h')) as handle:
+                header = handle.read()
+            lines = ['#include <stdio.h>', '#include <string.h>', '#include <pb_decode.h>',
+                     '#include "%s.h"' % unit, '']
+            checks = []
+            for entry in entries:
+                data = bytes.fromhex(entry['hex'])
+                msg = entry['message']
+                if entry['any_wrapped']:
+                    data = unwrap_any(data)
+                ctype = c_identifier(msg.replace('.', '_'))
+                validate = ('pb_validate_%s(&m, &v)' % ctype) if ('bool pb_validate_%s(' % ctype) in header else 'true'
+                name = 'frame_%d' % entry['frame']
+                lines += ['static const pb_byte_t %s_data[] = {%s};' % (name, ', '.join(str(b) for b in data) or '0'),
+                          'static int %s(void) {' % name,
+                          '    static %s m;' % ctype,
+                          '    pb_violations_t v;',
+                          '    pb_istream_t s = pb_istream_from_buffer(%s_data, %d);' % (name, len(data)),
+                          '    memset(&m, 0, sizeof(m));',
+                          '    if (!pb_decode(&s, %s_fields, &m)) return 0;' % ctype,
+                          '    pb_violations_init(&v);',
+                          '    return %s;' % validate, '}']
+                checks.append('    printf("%%d %%d\\n", %d, %s());' % (entry['frame'], name))
+            lines += ['int main(void) {'] + checks + ['    return 0;', '}', '']
+            main = os.path.join(unit_dir, 'main_check.c')
+            with open(main, 'w') as handle:
+                handle.write('\n'.join(lines))
+            exe = os.path.join(unit_dir, 'check.exe')
+            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+            build = subprocess.run(find_cc() + ['-std=c99', '-I', unit_dir, '-o', exe] + sources,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(build.returncode, 0, build.stdout[-3000:])
+            run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
+            verdicts = dict((int(a), b == '1') for a, b in (line.split() for line in run.stdout.splitlines()))
+            for entry in entries:
+                self.assertEqual('passed' if verdicts[entry['frame']] else 'dropped', entry['expect'],
+                                 '%s frame %d %s %s' % (unit, entry['frame'], entry['message'], entry['violate']))
 
     def test_gen_c_exports_packet_filters(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', self.tmp)

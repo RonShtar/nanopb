@@ -15,6 +15,8 @@ Subcommands (all print a JSON summary on success, errors go to stderr):
                     including validation code, next to separate copies of
                     the nanopb runtime (pb_*.c / pb_*.h, pb_validate.*)
   gen-data          generate sample encoded messages (.bin / C array / hex)
+  gen-packets       one capture with valid (PASSED) and invalid (DROPPED)
+                    packets of every message, plus a JSON manifest
   schema            write the Lua schema used by nanopb_any_dissector.lua
   install-dissector copy the dissector and its schema into a plugins dir
   install-studio    install the plugins and a copy of the generator, runtime
@@ -911,18 +913,36 @@ def render_schema_lua(messages, enums):
     return ''.join(out)
 
 
-def write_schema(protos_root, extra_includes, path):
+def schema_text(protos_root, extra_includes):
+    """(Lua schema text, messages) for every unit of the protos root."""
+
     units = [Unit(protos_root, name, extra_includes) for name in find_units(protos_root)]
     if not units:
         raise BackendError('no subdirectory of %s contains .proto files' % protos_root)
     # Always know google.protobuf.Any, even if no unit imports it.
     any_fds = compile_descriptor_set(['google/protobuf/any.proto'], [DEFAULT_INCLUDE])
     messages, enums = build_schema([u.fds for u in units] + [any_fds], nanopb_field_info(units))
+    return render_schema_lua(messages, enums), messages
+
+
+def write_if_changed(path, text):
+    """Write ``text`` unless the file already holds it; True if written."""
+
+    if os.path.isfile(path):
+        with open(path, encoding='utf-8') as handle:
+            if handle.read() == text:
+                return False
     directory = os.path.dirname(os.path.abspath(path))
     if not os.path.isdir(directory):
         os.makedirs(directory)
-    with open(path, 'w', newline='\n') as handle:
-        handle.write(render_schema_lua(messages, enums))
+    with open(path, 'w', encoding='utf-8', newline='\n') as handle:
+        handle.write(text)
+    return True
+
+
+def write_schema(protos_root, extra_includes, path):
+    text, messages = schema_text(protos_root, extra_includes)
+    write_if_changed(path, text)
     return messages
 
 
@@ -946,27 +966,239 @@ def parse_port_map(text, messages):
     return entries
 
 
-def cmd_install_dissector(args):
-    plugins = args.plugins_dir or default_plugins_dir()
+def install_schema(protos_root, includes, plugins, port_map):
+    """Install the dissector, its schema and port map into ``plugins``.
+
+    Only files whose content differs are written. Returns (result, changed, messages).
+    """
+
     data_dir = os.path.join(plugins, 'nanopb')
     schema_path = os.path.join(data_dir, 'schema.luadata')
-    messages = write_schema(args.protos_root, args.include, schema_path)
-    ports = parse_port_map(args.port_map, messages)
+    text, messages = schema_text(protos_root, includes)
+    changed = write_if_changed(schema_path, text)
+    ports = parse_port_map(port_map, messages)
     files = [schema_path]
-    if args.port_map is not None:
+    if port_map is not None:
+        lines = ['-- Default port map written by install-dissector.\nreturn {\n']
+        for proto, port, msg in ports:
+            lines.append('  { transport = %s, port = %d, message = %s },\n' % (lua_str(proto), port, lua_str(msg)))
+        lines.append('}\n')
         ports_path = os.path.join(data_dir, 'ports.luadata')
-        with open(ports_path, 'w', newline='\n') as handle:
-            handle.write('-- Default port map written by install-dissector.\nreturn {\n')
-            for proto, port, msg in ports:
-                handle.write('  { transport = %s, port = %d, message = %s },\n'
-                             % (lua_str(proto), port, lua_str(msg)))
-            handle.write('}\n')
+        changed = write_if_changed(ports_path, ''.join(lines)) or changed
         files.append(ports_path)
     target = os.path.join(plugins, 'nanopb_any_dissector.lua')
-    shutil.copy(tool_file('nanopb_any_dissector.lua'), target)
+    with open(tool_file('nanopb_any_dissector.lua'), encoding='utf-8') as handle:
+        changed = write_if_changed(target, handle.read()) or changed
     files.insert(0, target)
-    return {'plugins_dir': plugins, 'files': files, 'messages': len(messages),
-            'ports': ['%s:%d=%s' % p for p in ports]}
+    result = {'plugins_dir': plugins, 'files': files, 'messages': len(messages),
+              'ports': ['%s:%d=%s' % p for p in ports]}
+    return result, changed, messages
+
+
+def cmd_install_dissector(args):
+    plugins = args.plugins_dir or default_plugins_dir()
+    result, changed, _ = install_schema(args.protos_root, args.include, plugins, args.port_map)
+    result['changed'] = changed
+    return result
+
+
+# ---------------------------------------------------------------------------
+# gen-packets
+# ---------------------------------------------------------------------------
+
+AUTO_PORT_BASE = 15000
+DEFAULT_ANY_PORT = 15999
+ANY_URL_PREFIX = 'type.googleapis.com/'
+ANY_MESSAGE = 'google.protobuf.Any'
+
+
+def field_by_name(messages, msg, name):
+    for fd in messages.get(msg, {}).get('fields', {}).values():
+        if fd['name'] == name:
+            return fd
+    return None
+
+
+def c_enforced(messages, msg, field, rule):
+    """Would the C validator reject a message that breaks ``rule`` on ``field``?
+
+    pb_validate checks `required` only on fields with a has_ flag, skips
+    callback fields, and some rules have no C enforcement at all.
+    """
+
+    fd = field_by_name(messages, msg, field)
+    if fd is None:
+        return False
+    if fd.get('storage') in ('callback', 'ignore'):
+        return False
+    if fd.get('storage') == 'pointer' and fd.get('presence') == 'repeated':
+        return False
+    if rule == 'required':
+        return fd.get('presence') == 'explicit'
+    base = rule.split('.', 1)[-1] if rule.startswith('items.') else rule
+    unsupported = [r['id'].split('.')[-1] for r in fd.get('rules', []) if r['kind'] == 'UNSUPPORTED']
+    return base not in unsupported and base not in ('pattern', 'min_bytes', 'max_bytes', 'no_sparse',
+                                                    'oneof_required')
+
+
+def any_wrap(type_name, payload):
+    url = (ANY_URL_PREFIX + type_name).encode('utf-8')
+    return (b'\x0a' + _varint(len(url)) + url + b'\x12' + _varint(len(payload)) + payload)
+
+
+def _varint(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7f
+        n >>= 7
+        if n:
+            out.append(b | 0x80)
+        else:
+            out.append(b)
+            return bytes(out)
+
+
+def auto_port_map(units, base=AUTO_PORT_BASE):
+    """One UDP port per unit root message (see unit_entrypoints)."""
+
+    entries = []
+    port = base
+    for unit in units:
+        roots, _ = unit_entrypoints(unit, '')
+        for msg in roots:
+            entries.append('udp:%d=%s' % (port, msg))
+            port += 1
+    return ','.join(entries)
+
+
+def cmd_gen_packets(args):
+    from nanopb_data_generator import DataGenerator, ValidationRuleNotViolatableError
+
+    if args.valid < 0 or args.max_invalid < 0:
+        raise BackendError('--valid and --max-invalid must not be negative')
+    names = select_units(args)
+    units = [Unit(args.protos_root, name, args.include) for name in names]
+    port_map = args.port_map or auto_port_map(units)
+    # Map the Any port explicitly; left to the heuristic, other protocols'
+    # heuristic dissectors can claim some of the packets first.
+    if not any(port == args.any_port for _, port, _ in parse_port_map(port_map, None)):
+        port_map = ','.join(p for p in (port_map, 'udp:%d=%s' % (args.any_port, ANY_MESSAGE)) if p)
+
+    if args.no_install:
+        _, messages = schema_text(args.protos_root, args.include)
+        installed, changed = None, False
+    else:
+        plugins = args.plugins_dir or default_plugins_dir()
+        installed, changed, messages = install_schema(args.protos_root, args.include, plugins, port_map)
+    roots = dict((msg, (proto, port)) for proto, port, msg in parse_port_map(port_map, messages)
+                 if msg != ANY_MESSAGE)
+    any_value = field_by_name(messages, ANY_MESSAGE, 'value') or {}
+    any_url = field_by_name(messages, ANY_MESSAGE, 'type_url') or {}
+
+    packets, entries, skipped, errors = [], [], [], []
+
+    def add(unit, msg, data, expect, seed, violate=None):
+        if msg in roots:
+            transport, port = roots[msg]
+            payload, wrapped = data, False
+        else:
+            transport, port = 'udp', args.any_port
+            payload, wrapped = any_wrap(msg, data), True
+            # A receiver with nanopb storage for Any cannot take more than that.
+            too_long = (any_value.get('max_size') and len(data) > any_value['max_size']) or \
+                       (any_url.get('max_size') and len(ANY_URL_PREFIX + msg) > any_url['max_size'])
+            if too_long:
+                return False
+        comment = 'expect=%s msg=%s' % (expect.upper(), msg)
+        if violate:
+            comment += ' field=%s rule=%s' % (violate['field'], violate['rule'])
+        comment += ' seed=%d' % seed
+        packets.append(Packet(transport, port, payload, comment))
+        entries.append({'frame': len(packets), 'unit': unit, 'message': msg, 'transport': transport,
+                        'port': port, 'any_wrapped': wrapped, 'expect': expect, 'violate': violate,
+                        'seed': seed, 'size': len(payload), 'hex': payload.hex()})
+        return True
+
+    for unit in units:
+        try:
+            gen = unit_data_generator(unit, DataGenerator)
+        except Exception as exc:
+            errors.append('%s: %s' % (unit.name, exc))
+            continue
+        for msg in unit.messages():
+            for i in range(args.valid):
+                # Retry a few seeds if a sample does not fit an Any wrapper.
+                for attempt in range(5):
+                    seed = args.seed + i + 1000 * attempt
+                    try:
+                        data = gen.encode_to_binary(msg, gen.generate_valid(msg, seed=seed))
+                    except Exception as exc:
+                        errors.append('%s valid: %s' % (msg, exc))
+                        break
+                    if add(unit.name, msg, data, 'passed', seed):
+                        break
+                else:
+                    skipped.append('%s valid #%d: larger than the Any.value storage' % (msg, i))
+            count = 0
+            for field, rule in gen.violatable_rules(msg):
+                if count >= args.max_invalid:
+                    skipped.append('%s: more rules than --max-invalid %d' % (msg, args.max_invalid))
+                    break
+                if not c_enforced(messages, msg, field, rule):
+                    skipped.append('%s.%s %s: not enforced by the C validator' % (msg, field, rule))
+                    continue
+                seed = args.seed + count
+                try:
+                    data = gen.encode_to_binary(msg, gen.generate_invalid(msg, violate_field=field,
+                                                                          violate_rule=rule, seed=seed))
+                except (ValidationRuleNotViolatableError, ValueError) as exc:
+                    skipped.append('%s.%s %s: %s' % (msg, field, rule, str(exc).splitlines()[0]))
+                    continue
+                if add(unit.name, msg, data, 'dropped', seed, {'field': field, 'rule': rule}):
+                    count += 1
+                else:
+                    skipped.append('%s.%s %s: larger than the Any.value storage' % (msg, field, rule))
+
+    if not packets:
+        raise BackendError('no packets generated:\n  ' + '\n  '.join(errors + skipped))
+    if not os.path.isdir(args.out):
+        os.makedirs(args.out)
+    base = os.path.join(args.out, 'nanopb_test_packets')
+    capture = base + '.' + args.format
+    start = time.time()
+    if args.format == 'pcapng':
+        write_pcapng(capture, packets, start=start)
+    else:
+        write_pcap(capture, packets, start=start, step=0.001)
+    passed = sum(1 for e in entries if e['expect'] == 'passed')
+    dropped = len(entries) - passed
+    ports = ['%s:%d=%s' % (proto, port, msg) for msg, (proto, port) in sorted(roots.items(), key=lambda x: x[1])]
+    ports.append('udp:%d=%s (every other message, wrapped in it)' % (args.any_port, ANY_MESSAGE))
+    manifest = {'generated_at': start, 'capture': capture, 'port_map': port_map, 'any_port': args.any_port,
+                'packets': entries}
+    with open(base + '.json', 'w', newline='\n') as handle:
+        json.dump(manifest, handle, indent=1)
+    lines = ['%d packets: %d expected PASSED, %d expected DROPPED' % (len(entries), passed, dropped),
+             'Capture: ' + capture, 'Ports:'] + ['  ' + p for p in ports]
+    lines += ['', 'frame  expect   message  [violated field / rule]']
+    for e in entries:
+        v = e['violate']
+        lines.append('%5d  %-7s  %s%s' % (e['frame'], e['expect'].upper(), e['message'],
+                                          '  [%s %s]' % (v['field'], v['rule']) if v else ''))
+    if skipped:
+        lines += ['', 'Not generated:'] + ['  ' + s for s in skipped]
+    with open(base + '.txt', 'w', newline='\n') as handle:
+        handle.write('\n'.join(lines) + '\n')
+    summary = '\n'.join(lines[:3 + len(ports)])
+    if skipped:
+        summary += '\n%d rule(s) not generated, see %s.txt' % (len(skipped), base)
+    result = {'pcap': capture, 'manifest': base + '.json', 'summary_file': base + '.txt',
+              'passed': passed, 'dropped': dropped, 'port_map': port_map, 'ports': ports,
+              'skipped': skipped, 'errors': errors, 'schema_changed': changed, 'summary': summary}
+    if installed:
+        result['installed'] = installed
+    return result
+
 
 
 def default_plugins_dir():
@@ -1164,6 +1396,23 @@ def build_parser():
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')
     p.add_argument('--port-map', default=None, help='e.g. "udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd"')
     p.set_defaults(func=cmd_install_dissector)
+
+    p = sub.add_parser('gen-packets', help='one capture with valid (PASSED) and invalid (DROPPED) packets')
+    protos_args(p, unit=True)
+    p.add_argument('--out', required=True, help='output directory for nanopb_test_packets.{pcapng,json,txt}')
+    p.add_argument('--port-map', default='',
+                   help='root messages sent on their own port (default: one UDP port per unit root, from %d)'
+                   % AUTO_PORT_BASE)
+    p.add_argument('--any-port', type=int, default=DEFAULT_ANY_PORT,
+                   help='UDP port for other messages, wrapped in google.protobuf.Any (default %d)' % DEFAULT_ANY_PORT)
+    p.add_argument('--valid', type=int, default=2, help='valid packets per message (default 2)')
+    p.add_argument('--max-invalid', type=int, default=40, help='invalid packets per message at most (default 40)')
+    p.add_argument('--seed', type=int, default=1, help='random seed (default 1)')
+    p.add_argument('--format', choices=('pcapng', 'pcap'), default='pcapng')
+    p.add_argument('--plugins-dir', default=None,
+                   help='also install / refresh the dissector and schema here (default: personal plugins folder)')
+    p.add_argument('--no-install', action='store_true', help='do not touch the Wireshark plugins folder')
+    p.set_defaults(func=cmd_gen_packets)
 
     p = sub.add_parser('install-studio', help='install nanopb_studio.lua into a plugins dir')
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')

@@ -5,6 +5,7 @@ This checks decoding logic and the studio -> backend flow; it does not
 replace a check in a real Wireshark (see tests/live).
 """
 
+import json
 import os
 import re
 import shutil
@@ -298,6 +299,34 @@ class ValidationTests(LuaTestCase):
                          % len(envelope(body=f_varint(6, 4))))
         self.assertIn('!nanopb.validation.violation: small: uint32.lte - must be <= 3 (got 4)', text)
         self.assertIn('Field: small', text)
+
+
+class GeneratedPacketsTests(LuaTestCase):
+    """gen-packets output, routed by port through the mock: verdicts match the manifest."""
+
+    def test_verdicts_match_manifest(self):
+        for root in (RULES_PROTOS, FIXTURES, os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')):
+            with self.subTest(root=root):
+                self.check(root)
+
+    def check(self, root):
+        plugins = tempfile.mkdtemp(prefix='nanopb_ws_gen_', dir=self.tmp)
+        status, result, err = run_backend('gen-packets', '--protos-root', root, '--out', plugins,
+                                          '--plugins-dir', plugins)
+        self.assertEqual(status, 0, err)
+        with open(result['manifest']) as handle:
+            manifest = json.load(handle)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(plugins, 'nanopb_any_dissector.lua')))
+        proto = self.mock.protos['nanopb']
+        for entry in manifest['packets']:
+            tree = self.mock.tree()
+            pinfo = self.mock.pinfo(PORT_TYPE[entry['transport']], entry['port'])
+            proto.dissector(self.mock.tvb(bytes.fromhex(entry['hex'])), pinfo, tree)
+            text = self.mock.render(tree)
+            self.assertIn('Validation: %s' % entry['expect'].upper(), text, '%s\n%s' % (entry, text))
+            if entry['violate']:
+                self.assertRegex(text, r'\n    [^\n]*\b%s\b[^\n]* - ' % re.escape(entry['violate']['field']),
+                                 '%s\n%s' % (entry, text))
 
 
 class UnenforcedRulesTests(LuaTestCase):
