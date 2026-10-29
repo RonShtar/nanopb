@@ -1,0 +1,10 @@
+/* repeated.items const rules: string.const used to generate no check at all. */
+syntax = "proto3";
+
+import "validate.proto";
+
+message Lists {
+    repeated string s = 1 [(validate.rules).repeated.items.string.const_value = "x"];
+    repeated bool b = 2 [(validate.rules).repeated.items.bool.const_value = true];
+    repeated int32 n = 3 [(validate.rules).repeated.items.int32.const_value = 7];
+}
