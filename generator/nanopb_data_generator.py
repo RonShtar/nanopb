@@ -957,6 +957,20 @@ class DataGenerator:
             % (message_name, '; '.join(failures) or 'no matching rule')
         )
 
+    def violatable_rules(self, message_name: str) -> List[Tuple[str, str]]:
+        """(field, rule) pairs that generate_invalid() can be asked to violate.
+
+        Rules of repeated.items come out as ``items.<rule>``.
+        """
+
+        message_info = self.registry.resolve_message(message_name)
+        pairs: List[Tuple[str, str]] = []
+        for name, info in message_info.fields.items():
+            for constraint in self._violatable_constraints(info):
+                if (name, constraint.rule_type) not in pairs:
+                    pairs.append((name, constraint.rule_type))
+        return pairs
+
     @staticmethod
     def _split_names(names: Optional[Union[str, List[str]]]) -> List[str]:
         """Normalize comma separated names / lists of names."""
