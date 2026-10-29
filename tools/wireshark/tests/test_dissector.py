@@ -422,8 +422,9 @@ class StudioTests(LuaTestCase):
         self.assertIsNotNone(window.buttons['Open output folder'])
         self.assertEqual(os.listdir(self.out), ['envelope'])
         # Only the generated files: all protos of the unit merged, with validation.
-        self.assertEqual(sorted(os.listdir(os.path.join(self.out, 'envelope'))), ['envelope.c', 'envelope.h'])
-        with open(os.path.join(self.out, 'envelope', 'envelope.c')) as handle:
+        self.assertEqual(sorted(os.listdir(os.path.join(self.out, 'envelope'))),
+                         ['envelope.pb.c', 'envelope.pb.h', 'envelope_validate.c', 'envelope_validate.h'])
+        with open(os.path.join(self.out, 'envelope', 'envelope_validate.c')) as handle:
             self.assertIn('pb_validate_demo_envelope_Envelope', handle.read())
         with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
             self.assertIn(self.out.replace('\\', '\\\\'), handle.read())

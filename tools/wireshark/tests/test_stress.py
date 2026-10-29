@@ -20,7 +20,8 @@ class StressTests(unittest.TestCase):
         out = tempfile.mkdtemp(prefix='nanopb_ws_stress_')
         try:
             self.assertEqual(stress_test.main(['--out', out, '--count', '2']), 0)
-            self.assertTrue(os.path.isfile(os.path.join(out, 'fleet', 'fleet.c')))
+            for name in ('fleet.pb.c', 'fleet.pb.h', 'fleet_validate.c', 'fleet_validate.h'):
+                self.assertTrue(os.path.isfile(os.path.join(out, 'fleet', name)), name)
             self.assertTrue(os.path.isfile(os.path.join(out, 'stress.pcap')))
         finally:
             shutil.rmtree(out, ignore_errors=True)

@@ -73,36 +73,45 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(units['envelope']['dependencies'], ['google/protobuf/any.proto'])
         self.assertIn('demo.common.Header', units['telemetry']['messages'])
 
-    def test_gen_c_merges_one_file_per_unit(self):
+    def read(self, *path):
+        with open(os.path.join(self.tmp, *path)) as handle:
+            return handle.read()
+
+    def test_gen_c_merges_messages_and_validators_per_unit(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', self.tmp)
         self.assertEqual(status, 0, err)
         for unit in ('envelope', 'telemetry'):
-            unit_dir = os.path.join(self.tmp, unit)
-            generated = [f for f in os.listdir(unit_dir) if not f.startswith('pb')]
-            self.assertEqual(sorted(generated), [unit + '.c', unit + '.h'])
-            with open(os.path.join(unit_dir, unit + '.h')) as handle:
-                header = handle.read()
-            with open(os.path.join(unit_dir, unit + '.c')) as handle:
-                source = handle.read()
-            # Only the unit's own header may be included with quotes.
-            self.assertEqual(re.findall(r'#include\s+"([^"]+)"', header), [])
-            self.assertEqual(re.findall(r'#include\s+"([^"]+)"', source), [unit + '.h'])
-            opens = len(re.findall(r'^\s*#\s*if', header, re.M))
-            closes = len(re.findall(r'^\s*#\s*endif', header, re.M))
-            self.assertEqual(opens, closes)
-            self.assertIn('<pb_validate.h>', header)
+            self.assertEqual(sorted(os.listdir(os.path.join(self.tmp, unit))),
+                             [unit + '.pb.c', unit + '.pb.h', unit + '_validate.c', unit + '_validate.h'])
+            pb_h, pb_c = self.read(unit, unit + '.pb.h'), self.read(unit, unit + '.pb.c')
+            validate_h, validate_c = self.read(unit, unit + '_validate.h'), self.read(unit, unit + '_validate.c')
 
-        with open(os.path.join(self.tmp, 'envelope', 'envelope.h')) as handle:
-            header = handle.read()
+            def quoted(text):
+                return re.findall(r'#include\s+"([^"]+)"', text)
+
+            # Only the merged headers are included with quotes; the filter
+            # core in .pb.c calls the validators.
+            self.assertEqual(quoted(pb_h), [])
+            self.assertEqual(quoted(pb_c), [unit + '.pb.h', unit + '_validate.h'])
+            self.assertEqual(quoted(validate_h), [unit + '.pb.h'])
+            self.assertEqual(quoted(validate_c), [unit + '_validate.h'])
+            for header in (pb_h, validate_h):
+                self.assertEqual(len(re.findall(r'^\s*#\s*if', header, re.M)),
+                                 len(re.findall(r'^\s*#\s*endif', header, re.M)))
+            self.assertIn('<pb_validate.h>', validate_h)
+            self.assertNotIn('pb_validate', pb_h)
+            self.assertNotIn('PB_BIND', validate_c)
+            self.assertIn('_filter_core(', pb_c)
+            self.assertNotIn('_filter_core(', validate_c)
+
+        header = self.read('envelope', 'envelope.pb.h')
         # Dependency (Any) comes before its user, and storage is static.
         self.assertLess(header.index('} google_protobuf_Any;'), header.index('} demo_envelope_Envelope;'))
         self.assertNotIn('pb_callback_t', header)
         self.assertIn('demo_envelope_Envelope_size', header)
-        with open(os.path.join(self.tmp, 'envelope', 'envelope.c')) as handle:
-            source = handle.read()
-        for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(google_protobuf_Any',
-                       'pb_validate_demo_envelope_Envelope'):
-            self.assertIn(symbol, source)
+        for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(google_protobuf_Any'):
+            self.assertIn(symbol, self.read('envelope', 'envelope.pb.c'))
+        self.assertIn('bool pb_validate_demo_envelope_Envelope(', self.read('envelope', 'envelope_validate.c'))
 
     def schema_messages(self, root):
         from nanopb_wireshark import DEFAULT_NANOPB_ROOT, setup_nanopb, write_schema
@@ -226,10 +235,10 @@ class BackendTests(unittest.TestCase):
                                               '--no-filter', '--with-runtime')
             self.assertEqual(status, 0, err)
             unit_dir = os.path.join(out, unit)
-            with open(os.path.join(unit_dir, unit + '.h')) as handle:
+            with open(os.path.join(unit_dir, unit + '_validate.h')) as handle:
                 header = handle.read()
             lines = ['#include <stdio.h>', '#include <string.h>', '#include <pb_decode.h>',
-                     '#include "%s.h"' % unit, '']
+                     '#include "%s_validate.h"' % unit, '']
             checks = []
             for entry in entries:
                 data = bytes.fromhex(entry['hex'])
@@ -273,12 +282,9 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(units['envelope']['filter_entrypoints'],
                          {'from': 'auto', 'modes': {'demo.envelope.Envelope': 'auto'}})
         self.assertEqual(units['telemetry']['filters'], ['demo_telemetry_Telemetry_filter_udp'])
-        with open(os.path.join(self.tmp, 'envelope', 'envelope.h')) as handle:
-            header = handle.read()
         self.assertIn('int demo_envelope_Envelope_filter_tcp(void *ctx, const uint8_t *packet, '
-                      'size_t packet_size, bool is_to_server);', header)
-        with open(os.path.join(self.tmp, 'envelope', 'envelope.c')) as handle:
-            self.assertIn('static int demo_envelope_Envelope_filter_core(', handle.read())
+                      'size_t packet_size, bool is_to_server);', self.read('envelope', 'envelope.pb.h'))
+        self.assertIn('static int demo_envelope_Envelope_filter_core(', self.read('envelope', 'envelope.pb.c'))
 
     def test_gen_c_filters_from_port_map(self):
         status, result, err = run_backend('gen-c', '--protos-root', STRESS_PROTOS, '--unit', 'fleet',
@@ -315,7 +321,7 @@ class BackendTests(unittest.TestCase):
         with open(main, 'w') as handle:
             handle.write('\n'.join([
                 '#include <stdio.h>',
-                '#include "telemetry.h"',
+                '#include "telemetry.pb.h"',
                 'static const uint8_t good[] = {%s};' % ', '.join(str(b) for b in good),
                 'static const uint8_t bad[] = {%s};' % ', '.join(str(b) for b in bad),
                 'int main(void) {',
@@ -336,7 +342,8 @@ class BackendTests(unittest.TestCase):
                                           '--out', self.tmp, '--with-runtime')
         self.assertEqual(status, 0, err)
         files = set(os.listdir(os.path.join(self.tmp, 'telemetry')))
-        self.assertEqual(files, {'telemetry.c', 'telemetry.h', 'pb.h', 'pb_common.h', 'pb_common.c',
+        self.assertEqual(files, {'telemetry.pb.c', 'telemetry.pb.h', 'telemetry_validate.c', 'telemetry_validate.h',
+                                 'pb.h', 'pb_common.h', 'pb_common.c',
                                  'pb_encode.h', 'pb_encode.c', 'pb_decode.h', 'pb_decode.c',
                                  'pb_validate.h', 'pb_validate.c', 'pb_filter_macros.h'})
 
@@ -344,7 +351,8 @@ class BackendTests(unittest.TestCase):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
                                           '--out', self.tmp)
         self.assertEqual(status, 0, err)
-        self.assertEqual(set(os.listdir(os.path.join(self.tmp, 'telemetry'))), {'telemetry.c', 'telemetry.h'})
+        self.assertEqual(set(os.listdir(os.path.join(self.tmp, 'telemetry'))),
+                         {'telemetry.pb.c', 'telemetry.pb.h', 'telemetry_validate.c', 'telemetry_validate.h'})
 
     def test_units_names_only(self):
         status, result, err = run_backend('units', '--protos-root', FIXTURES, '--names-only')
@@ -373,7 +381,8 @@ class BackendTests(unittest.TestCase):
         files = set(os.listdir(os.path.join(self.tmp, 'telemetry')))
         self.assertTrue({'pb.h', 'pb_encode.c', 'pb_decode.c', 'pb_common.c'} <= files)
         self.assertNotIn('pb_validate.c', files)
-        with open(os.path.join(self.tmp, 'telemetry', 'telemetry.h')) as handle:
+        self.assertNotIn('telemetry_validate.c', files)
+        with open(os.path.join(self.tmp, 'telemetry', 'telemetry.pb.h')) as handle:
             self.assertNotIn('pb_validate', handle.read())
 
     def test_gen_data_formats_round_trip(self):
@@ -476,7 +485,8 @@ class BackendTests(unittest.TestCase):
                               'gen-c', '--protos-root', FIXTURES, '--unit', 'envelope', '--out', out],
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertTrue(run.stdout.rstrip().endswith('__EXIT__=0'), run.stdout)
-        self.assertEqual(sorted(os.listdir(os.path.join(out, 'envelope'))), ['envelope.c', 'envelope.h'])
+        self.assertEqual(sorted(os.listdir(os.path.join(out, 'envelope'))),
+                         ['envelope.pb.c', 'envelope.pb.h', 'envelope_validate.c', 'envelope_validate.h'])
 
     def test_install_studio_dev(self):
         status, result, err = run_backend('install-studio', '--plugins-dir', self.tmp, '--dev')
