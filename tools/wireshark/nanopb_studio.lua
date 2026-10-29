@@ -308,7 +308,13 @@ local function gen_c()
     local title = "Generate C (merged + validation)"
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
-            return run_backend(add_common({ "gen-c", "--out", output_dir(), "--unit", units }))
+            -- Port-mapped messages are the protocol entrypoints that get a packet filter.
+            local args = add_common({ "gen-c", "--out", output_dir(), "--unit", units })
+            if config.port_map ~= "" then
+                args[#args + 1] = "--port-map"
+                args[#args + 1] = config.port_map
+            end
+            return run_backend(args)
         end)
     end)
 end

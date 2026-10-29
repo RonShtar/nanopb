@@ -187,7 +187,55 @@ class Unit(object):
 # gen-c
 # ---------------------------------------------------------------------------
 
-def run_generator(nanopb_root, unit, outdir, validate):
+def field_rules(field):
+    """The (validate.rules) option of a FieldDescriptorProto, or None."""
+
+    from google.protobuf import descriptor_pb2
+    from nanopb_data_generator import _load_validate_pb2
+
+    validate_pb2 = _load_validate_pb2()
+    # The descriptor set was parsed before the extension was known; parse the
+    # options again so the extension is resolved.
+    options = descriptor_pb2.FieldOptions.FromString(field.options.SerializeToString())
+    if options.HasExtension(validate_pb2.rules):
+        return options.Extensions[validate_pb2.rules]
+    return None
+
+
+def unit_entrypoints(unit, port_map):
+    """Messages of the unit that get a packet filter, and where they came from.
+
+    Port map entries are the protocol entrypoints the dissector uses. Without
+    any for this unit, the roots are the unit's top-level messages that no
+    other message of the unit uses as a field type or Any payload.
+    """
+
+    own = unit.messages()
+    mapped = [msg for _, _, msg in parse_port_map(port_map, None) if msg in own]
+    if mapped:
+        return sorted(set(mapped), key=mapped.index), 'port map'
+
+    referenced = set()
+
+    def walk(msg):
+        for fld in msg.field:
+            if fld.type == 11:  # TYPE_MESSAGE
+                referenced.add(fld.type_name.lstrip('.'))
+            rules = field_rules(fld)
+            if rules is not None and rules.HasField('any'):
+                for item in getattr(rules.any, 'in'):
+                    referenced.add(item.rsplit('/', 1)[-1].lstrip('.'))
+        for nested in msg.nested_type:
+            walk(nested)
+
+    for fdesc in unit.fds.file:
+        if fdesc.name in unit.names:
+            for msg in fdesc.message_type:
+                walk(msg)
+    return [m for m in own if m not in referenced], 'auto'
+
+
+def run_generator(nanopb_root, unit, outdir, validate, filters=()):
     protoc = os.path.join(nanopb_root, 'generator', 'protoc')
     common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
     common += ['-x', 'validate.proto', '-x', 'nanopb.proto']
@@ -195,13 +243,67 @@ def run_generator(nanopb_root, unit, outdir, validate):
     nanopb_opts = common + (['--protoc-insertion-points'] if validate else [])
     cmd += ['--nanopb_opt=' + o for o in nanopb_opts] + ['--nanopb_out=' + outdir]
     if validate:
-        cmd += ['--nanopb-validate_opt=' + o for o in common] + ['--nanopb-validate_out=' + outdir]
+        validate_opts = common + (['--filter=' + ';'.join(filters)] if filters else [])
+        cmd += ['--nanopb-validate_opt=' + o for o in validate_opts] + ['--nanopb-validate_out=' + outdir]
     cmd += unit.generated_files()
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           universal_newlines=True, cwd=outdir)
     if proc.returncode != 0:
         raise BackendError('generator failed for unit %s:\n%s' % (unit.name, proc.stdout))
     return proc.stdout
+
+
+def plugin_error(text):
+    """The plugin's own error lines from a failed generator run."""
+
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith('--nanopb-validate_out:'):
+            return '\n'.join([line.split(':', 1)[1].strip()] + lines[i + 1:]).strip()
+    return text.strip()
+
+
+def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
+    """Run the generator with as many of ``entries`` as the filter generator accepts.
+
+    The filter generator refuses ambiguous or unsupported protocol shapes (two
+    Any fields, an Any and a oneof, ...). Such an entrypoint is retried in
+    ``single`` mode (decode and validate the entrypoint itself); if that fails
+    too it is left out and reported. Validators are generated either way.
+    Returns (log, {message: mode}, {message: error}).
+    """
+
+    try:
+        log = run_generator(nanopb_root, unit, outdir, validate, entries)
+        return log, dict((e, 'auto') for e in entries), {}
+    except BackendError:
+        if not entries:
+            raise
+
+    def accepted(spec):
+        trial = tempfile.mkdtemp(prefix='nanopb_ws_try_')
+        try:
+            run_generator(nanopb_root, unit, trial, validate, [spec])
+            return None
+        except BackendError as exc:
+            return plugin_error(str(exc))
+        finally:
+            shutil.rmtree(trial, ignore_errors=True)
+
+    modes, errors, specs = {}, {}, []
+    for entry in entries:
+        error = accepted(entry)
+        if error is None:
+            modes[entry] = 'auto'
+            specs.append(entry)
+        elif accepted(entry + ':single') is None:
+            modes[entry] = 'single'
+            specs.append(entry + ':single')
+        else:
+            errors[entry] = error
+    shutil.rmtree(outdir, ignore_errors=True)
+    os.makedirs(outdir)
+    return run_generator(nanopb_root, unit, outdir, validate, specs), modes, errors
 
 
 def strip_internal_includes(text, internal):
@@ -261,12 +363,18 @@ def cmd_gen_c(args):
         outdir = os.path.join(args.out, name)
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
+        entries, source_of_entries = [], None
+        if validate and not args.no_filter:
+            entries, source_of_entries = unit_entrypoints(unit, args.port_map)
         gendir = tempfile.mkdtemp(prefix='nanopb_ws_gen_')
         try:
-            log = run_generator(args.nanopb_root, unit, gendir, validate)
+            log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
+                                                                   validate, entries)
             header, source, parts = merge_unit(unit, gendir, outdir, validate)
         finally:
             shutil.rmtree(gendir, ignore_errors=True)
+        with open(os.path.join(outdir, header)) as handle:
+            filters = re.findall(r'^int (\w+_filter_udp)\(', handle.read(), re.M)
         files = [header, source]
         if not args.no_runtime:
             runtime = RUNTIME_FILES + (VALIDATE_RUNTIME_FILES if validate else ())
@@ -275,8 +383,13 @@ def cmd_gen_c(args):
                 if os.path.isfile(src):
                     shutil.copy(src, os.path.join(outdir, fname))
                     files.append(fname)
-        results.append({'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
-                        'generator_log': log.strip()})
+        result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
+                  'filters': filters, 'generator_log': log.strip()}
+        if entries:
+            result['filter_entrypoints'] = {'from': source_of_entries, 'modes': modes}
+        if filter_errors:
+            result['filter_errors'] = filter_errors
+        results.append(result)
     return {'units': results}
 
 
@@ -579,6 +692,9 @@ def build_parser():
     # Copying the runtime used to be opt-in; the flag is still accepted.
     p.add_argument('--with-runtime', action='store_true', help=argparse.SUPPRESS)
     p.add_argument('--no-validate', action='store_true', help='skip validation code')
+    p.add_argument('--port-map', default=None,
+                   help='messages mapped here get a packet filter (default: unreferenced root messages)')
+    p.add_argument('--no-filter', action='store_true', help='do not generate packet filters')
     p.set_defaults(func=cmd_gen_c)
 
     p = sub.add_parser('gen-data', help='generate encoded sample messages')
