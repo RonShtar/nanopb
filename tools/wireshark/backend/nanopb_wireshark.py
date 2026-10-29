@@ -241,7 +241,7 @@ def unit_entrypoints(unit, port_map):
     return [m for m in own if m not in referenced], 'auto'
 
 
-def run_generator(nanopb_root, unit, outdir, validate, filters=()):
+def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None):
     protoc = os.path.join(nanopb_root, 'generator', 'protoc')
     common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
     common += ['-x', 'validate.proto', '-x', 'nanopb.proto']
@@ -250,6 +250,8 @@ def run_generator(nanopb_root, unit, outdir, validate, filters=()):
     cmd += ['--nanopb_opt=' + o for o in nanopb_opts] + ['--nanopb_out=' + outdir]
     if validate:
         validate_opts = common + (['--filter=' + ';'.join(filters)] if filters else [])
+        if protocol:
+            validate_opts.append('--protocol-filter=' + protocol)
         cmd += ['--nanopb-validate_opt=' + o for o in validate_opts] + ['--nanopb-validate_out=' + outdir]
     cmd += unit.generated_files()
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -297,7 +299,7 @@ def predicted_mode(unit, entry):
     return 'auto'
 
 
-def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
+def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries, protocol=None):
     """Run the generator with as many of ``entries`` as the filter generator accepts.
 
     The filter generator refuses ambiguous or unsupported protocol shapes (two
@@ -312,7 +314,7 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
         return name, mode or 'auto'
 
     try:
-        log = run_generator(nanopb_root, unit, outdir, validate, entries)
+        log = run_generator(nanopb_root, unit, outdir, validate, entries, protocol)
         return log, dict(mode_of(e) for e in entries), {}
     except BackendError:
         if not entries:
@@ -321,7 +323,7 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
     def accepted(spec):
         trial = tempfile.mkdtemp(prefix='nanopb_ws_try_')
         try:
-            run_generator(nanopb_root, unit, trial, validate, [spec])
+            run_generator(nanopb_root, unit, trial, validate, [spec], protocol)
             return None
         except BackendError as exc:
             return plugin_error(str(exc))
@@ -342,7 +344,7 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries):
             errors[name] = error
     shutil.rmtree(outdir, ignore_errors=True)
     os.makedirs(outdir)
-    return run_generator(nanopb_root, unit, outdir, validate, specs), modes, errors
+    return run_generator(nanopb_root, unit, outdir, validate, specs, protocol), modes, errors
 
 
 def strip_internal_includes(text, internal):
@@ -355,7 +357,7 @@ def strip_internal_includes(text, internal):
     return ''.join(lines)
 
 
-def merge_unit(unit, gendir, outdir, validate):
+def merge_unit(unit, gendir, outdir, validate, protocol=None):
     """Merge the unit's generated files into <unit>.pb.c/.h and <unit>_validate.c/.h.
 
     <unit>.pb.*: every .pb.c/.pb.h of the unit and its imports (types,
@@ -370,8 +372,9 @@ def merge_unit(unit, gendir, outdir, validate):
     def existing(names):
         return [n for n in names if os.path.isfile(os.path.join(gendir, n))]
 
-    pb_headers = existing([b + '.pb.h' for b in bases])
-    pb_sources = existing([b + '.pb.c' for b in bases])
+    protocol_files = ([protocol + '_filter.h'], [protocol + '_filter.c']) if protocol else ([], [])
+    pb_headers = existing([b + '.pb.h' for b in bases] + protocol_files[0])
+    pb_sources = existing([b + '.pb.c' for b in bases] + protocol_files[1])
     validate_headers = existing([b + '_validate.h' for b in bases]) if validate else []
     validate_sources = existing([b + '_validate.c' for b in bases]) if validate else []
     internal = set(pb_headers + validate_headers)
@@ -424,6 +427,34 @@ def merge_unit(unit, gendir, outdir, validate):
     return files, pb_h, pb_headers + pb_sources + validate_headers + validate_sources
 
 
+def protocol_name(unit):
+    """C name of the unit's protocol filter, or None if the unit never uses Any."""
+
+    if not any(f.name == 'google/protobuf/any.proto' for f in unit.fds.file):
+        return None
+    return c_identifier(unit.name)
+
+
+def protocol_messages(unit):
+    """Messages a protocol accepts as Any payload: every message of the unit's
+    compiled files (imports included) except map entries and google.protobuf.*,
+    as nanopb-validate --protocol-filter does."""
+
+    result = []
+
+    def walk(prefix, msgs):
+        for msg in msgs:
+            fqn = prefix + msg.name
+            if not msg.options.map_entry and not fqn.startswith('google.protobuf.'):
+                result.append(fqn)
+            walk(fqn + '.', msg.nested_type)
+
+    for fdesc in unit.fds.file:
+        if fdesc.name not in EXCLUDED_PROTOS:
+            walk(fdesc.package + '.' if fdesc.package else '', fdesc.message_type)
+    return result
+
+
 def validation_defines(unit):
     """Smallest PB_VALIDATE_MAX_PATH_DEPTH / _LENGTH that fit every validator of the unit.
 
@@ -458,8 +489,13 @@ def gen_c_summary(results):
     for r in results:
         lines.append('%s -> %s' % (r['unit'], r['dir']))
         lines.append('  ' + ', '.join(r['files']))
+        if r.get('protocol_filter'):
+            lines.append('  protocol filter (Any type_url = opcode, every message): %s/_tcp'
+                         % r['protocol_filter'])
+        elif r.get('protocol_filter_error'):
+            lines.append('  no protocol filter: ' + r['protocol_filter_error'].splitlines()[0])
         if r['filters']:
-            lines.append('  packet filters: ' + ', '.join(f + '/_tcp' for f in r['filters']))
+            lines.append('  per-message filters: ' + ', '.join(f + '/_tcp' for f in r['filters']))
         for message, error in sorted(r.get('filter_errors', {}).items()):
             lines.append('  no filter for %s: %s' % (message, error.splitlines()[0]))
         if r.get('recommended_defines'):
@@ -480,23 +516,38 @@ def cmd_gen_c(args):
         if validate and not args.no_filter:
             entries, source_of_entries = unit_entrypoints(unit, args.port_map)
         specs = [e + (':single' if predicted_mode(unit, e) == 'single' else '') for e in entries]
-        jobs.append((name, unit, entries, source_of_entries, specs))
+        protocol = protocol_name(unit) if validate and not args.no_filter else None
+        jobs.append((name, unit, entries, source_of_entries, specs, protocol))
 
     def generate(job):
         # Only subprocesses and file I/O: safe to run for several units at once.
-        name, unit, entries, source_of_entries, specs = job
+        name, unit, entries, source_of_entries, specs, protocol = job
         outdir = os.path.join(args.out, name)
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
         gendir = tempfile.mkdtemp(prefix='nanopb_ws_gen_')
+        protocol_error = None
         try:
-            log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
-                                                                   validate, specs)
-            files, header, parts = merge_unit(unit, gendir, outdir, validate)
+            try:
+                log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
+                                                                       validate, specs, protocol)
+            except BackendError as exc:
+                if not protocol:
+                    raise
+                # The protocol filter could not be generated (e.g. an Any with
+                # callback storage): keep everything else.
+                protocol_error, protocol = plugin_error(str(exc)), None
+                shutil.rmtree(gendir, ignore_errors=True)
+                os.makedirs(gendir)
+                log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
+                                                                       validate, specs)
+            files, header, parts = merge_unit(unit, gendir, outdir, validate, protocol)
         finally:
             shutil.rmtree(gendir, ignore_errors=True)
         with open(os.path.join(outdir, header)) as handle:
             filters = re.findall(r'^int (\w+_filter_udp)\(', handle.read(), re.M)
+        protocol_filter = protocol + '_filter_udp' if protocol and protocol + '_filter_udp' in filters else None
+        filters = [f for f in filters if f != protocol_filter]
         if args.with_runtime:
             runtime = RUNTIME_FILES + (VALIDATE_RUNTIME_FILES if validate else ())
             for fname in runtime:
@@ -505,7 +556,12 @@ def cmd_gen_c(args):
                     shutil.copy(src, os.path.join(outdir, fname))
                     files.append(fname)
         result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
-                  'filters': filters, 'generator_log': log.strip()}
+                  'protocol_filter': protocol_filter, 'filters': filters, 'generator_log': log.strip()}
+        if protocol_error:
+            result['protocol_filter_error'] = protocol_error
+        elif not protocol_filter and validate and not args.no_filter:
+            result['protocol_filter_error'] = "the protocol does not use google.protobuf.Any"
+
         if entries:
             result['filter_entrypoints'] = {'from': source_of_entries, 'modes': modes}
         if filter_errors:
@@ -1014,7 +1070,7 @@ FIELD_KEYS = ('name', 'type', 'label', 'type_name', 'presence', 'oneof', 'storag
               'max_count', 'fixed_length', 'rules')
 
 
-def render_schema_lua(messages, enums):
+def render_schema_lua(messages, enums, protocols=None):
     out = ['-- Generated by tools/wireshark/backend/nanopb_wireshark.py; do not edit.\n',
            'return {\n  messages = {\n']
     for name in sorted(messages):
@@ -1028,6 +1084,9 @@ def render_schema_lua(messages, enums):
             parts = ['%s = %s' % (k, lua_value(f[k])) for k in FIELD_KEYS if f.get(k) is not None]
             out.append('      [%d] = { %s },\n' % (number, ', '.join(parts)))
         out.append('    } },\n')
+    out.append('  },\n  protocols = {\n')
+    for name in sorted(protocols or {}):
+        out.append('    [%s] = %s,\n' % (lua_str(name), lua_value(protocols[name])))
     out.append('  },\n  enums = {\n')
     for name in sorted(enums):
         values = ', '.join('[%d] = %s' % (n, lua_str(v)) for n, v in sorted(enums[name].items()))
@@ -1045,7 +1104,8 @@ def schema_text(protos_root, extra_includes):
     # Always know google.protobuf.Any, even if no unit imports it.
     any_fds = compile_descriptor_set(['google/protobuf/any.proto'], [DEFAULT_INCLUDE])
     messages, enums = build_schema([u.fds for u in units] + [any_fds], nanopb_field_info(units))
-    return render_schema_lua(messages, enums), messages
+    protocols = dict((u.name, protocol_messages(u)) for u in units if protocol_name(u))
+    return render_schema_lua(messages, enums, protocols), messages
 
 
 def write_if_changed(path, text):
@@ -1089,7 +1149,14 @@ def parse_port_map(text, messages):
     return entries
 
 
-def install_schema(protos_root, includes, plugins, port_map):
+def protocols_of(schema):
+    """Protocol names in a rendered schema."""
+
+    block = schema.split('  protocols = {\n', 1)[-1].split('\n  },', 1)[0] if '  protocols = {' in schema else ''
+    return re.findall(r'^    \["([^"]+)"\] = ', block, re.M)
+
+
+def install_schema(protos_root, includes, plugins, port_map, protocol_ports=()):
     """Install the dissector, its schema and port map into ``plugins``.
 
     Only files whose content differs are written. Returns (result, changed, messages).
@@ -1101,10 +1168,13 @@ def install_schema(protos_root, includes, plugins, port_map):
     changed = write_if_changed(schema_path, text)
     ports = parse_port_map(port_map, messages)
     files = [schema_path]
-    if port_map is not None:
+    if port_map is not None or protocol_ports:
         lines = ['-- Default port map written by install-dissector.\nreturn {\n']
         for proto, port, msg in ports:
             lines.append('  { transport = %s, port = %d, message = %s },\n' % (lua_str(proto), port, lua_str(msg)))
+        # Ports decoded with a protocol's own dissector (as with Decode As).
+        for proto, port, name in protocol_ports:
+            lines.append('  { transport = %s, port = %d, protocol = %s },\n' % (lua_str(proto), port, lua_str(name)))
         lines.append('}\n')
         ports_path = os.path.join(data_dir, 'ports.luadata')
         changed = write_if_changed(ports_path, ''.join(lines)) or changed
@@ -1114,7 +1184,8 @@ def install_schema(protos_root, includes, plugins, port_map):
         changed = write_if_changed(target, handle.read()) or changed
     files.insert(0, target)
     result = {'plugins_dir': plugins, 'files': files, 'messages': len(messages),
-              'ports': ['%s:%d=%s' % p for p in ports]}
+              'ports': ['%s:%d=%s' % p for p in ports] + ['%s:%d=<protocol %s>' % p for p in protocol_ports],
+              'decode_as': ['nanopb_' + c_identifier(name) for name in sorted(protocols_of(text))]}
     return result, changed, messages
 
 
@@ -1131,6 +1202,7 @@ def cmd_install_dissector(args):
 
 AUTO_PORT_BASE = 15000
 DEFAULT_ANY_PORT = 15999
+DEFAULT_PROTOCOL_PORT = 16000
 ANY_URL_PREFIX = 'type.googleapis.com/'
 ANY_MESSAGE = 'google.protobuf.Any'
 
@@ -1181,6 +1253,35 @@ def _varint(n):
             return bytes(out)
 
 
+def write_packet_files(out, entries):
+    """Every packet as <out>/<unit>/packets/<frame>_<Message>_<verdict>.h (C array) and .hex.
+
+    Returns the packet directories. Old packet files are removed first, so the
+    directory always matches the capture.
+    """
+
+    dirs = set()
+    for entry in entries:
+        directory = os.path.join(out, entry['unit'], 'packets')
+        if directory not in dirs:
+            if os.path.isdir(directory):
+                for name in os.listdir(directory):
+                    if name.endswith(('.h', '.hex')):
+                        os.remove(os.path.join(directory, name))
+            else:
+                os.makedirs(directory)
+            dirs.add(directory)
+        ident = 'packet_%03d_%s_%s' % (entry['frame'], c_identifier(entry['message'].replace('.', '_')),
+                                       entry['expect'])
+        data = bytes.fromhex(entry['hex'])
+        with open(os.path.join(directory, ident + '.h'), 'w', newline='\n') as handle:
+            handle.write(c_array_header(ident, data))
+        with open(os.path.join(directory, ident + '.hex'), 'w', newline='\n') as handle:
+            handle.write(entry['hex'] + '\n')
+        entry['files'] = [os.path.join(directory, ident + ext) for ext in ('.h', '.hex')]
+    return dirs
+
+
 def auto_port_map(units, base=AUTO_PORT_BASE):
     """One UDP port per unit root message (see unit_entrypoints)."""
 
@@ -1201,10 +1302,19 @@ def cmd_gen_packets(args):
         raise BackendError('--valid and --max-invalid must not be negative')
     names = select_units(args)
     units = [Unit(args.protos_root, name, args.include) for name in names]
-    port_map = args.port_map or auto_port_map(units)
+    protocol_mode = args.mode == 'protocol'
+    # Protocol mode: every message of a unit, wrapped in an Any, on that
+    # protocol's own port (decoded like Decode As -> nanopb_<unit>).
+    protocol_ports, protocol_of = [], {}
+    if protocol_mode:
+        for i, unit in enumerate(units):
+            if protocol_name(unit):
+                protocol_ports.append(('udp', args.protocol_port + i, unit.name))
+                protocol_of[unit.name] = args.protocol_port + i
+    port_map = args.port_map or ('' if protocol_mode else auto_port_map(units))
     # Map the Any port explicitly; left to the heuristic, other protocols'
     # heuristic dissectors can claim some of the packets first.
-    if not any(port == args.any_port for _, port, _ in parse_port_map(port_map, None)):
+    if not protocol_mode and not any(port == args.any_port for _, port, _ in parse_port_map(port_map, None)):
         port_map = ','.join(p for p in (port_map, 'udp:%d=%s' % (args.any_port, ANY_MESSAGE)) if p)
 
     if args.no_install:
@@ -1212,7 +1322,8 @@ def cmd_gen_packets(args):
         installed, changed = None, False
     else:
         plugins = args.plugins_dir or default_plugins_dir()
-        installed, changed, messages = install_schema(args.protos_root, args.include, plugins, port_map)
+        installed, changed, messages = install_schema(args.protos_root, args.include, plugins, port_map,
+                                                      protocol_ports)
     roots = dict((msg, (proto, port)) for proto, port, msg in parse_port_map(port_map, messages)
                  if msg != ANY_MESSAGE)
     any_value = field_by_name(messages, ANY_MESSAGE, 'value') or {}
@@ -1221,7 +1332,13 @@ def cmd_gen_packets(args):
     packets, entries, skipped, errors = [], [], [], []
 
     def add(unit, msg, data, expect, seed, violate=None):
-        if msg in roots:
+        if protocol_mode:
+            transport, port = 'udp', protocol_of[unit]
+            payload, wrapped = any_wrap(msg, data), True
+            if (any_value.get('max_size') and len(data) > any_value['max_size']) or \
+                    (any_url.get('max_size') and len(ANY_URL_PREFIX + msg) > any_url['max_size']):
+                return False
+        elif msg in roots:
             transport, port = roots[msg]
             payload, wrapped = data, False
         else:
@@ -1243,6 +1360,9 @@ def cmd_gen_packets(args):
         return True
 
     for unit in units:
+        if protocol_mode and unit.name not in protocol_of:
+            skipped.append('%s: the protocol does not use google.protobuf.Any' % unit.name)
+            continue
         try:
             gen = unit_data_generator(unit, DataGenerator)
         except Exception as exc:
@@ -1293,16 +1413,24 @@ def cmd_gen_packets(args):
         write_pcapng(capture, packets, start=start)
     else:
         write_pcap(capture, packets, start=start, step=0.001)
+    packet_files = write_packet_files(args.out, entries)
     passed = sum(1 for e in entries if e['expect'] == 'passed')
     dropped = len(entries) - passed
-    ports = ['%s:%d=%s' % (proto, port, msg) for msg, (proto, port) in sorted(roots.items(), key=lambda x: x[1])]
-    ports.append('udp:%d=%s (every other message, wrapped in it)' % (args.any_port, ANY_MESSAGE))
+    if protocol_mode:
+        ports = ['udp:%d=protocol %s (Decode As nanopb_%s; every message wrapped in an Any)'
+                 % (port, name, c_identifier(name)) for _, port, name in protocol_ports]
+    else:
+        ports = ['%s:%d=%s' % (proto, port, msg) for msg, (proto, port) in sorted(roots.items(), key=lambda x: x[1])]
+        ports.append('udp:%d=%s (every other message, wrapped in it)' % (args.any_port, ANY_MESSAGE))
     manifest = {'generated_at': start, 'capture': capture, 'port_map': port_map, 'any_port': args.any_port,
+                'mode': args.mode, 'protocol_ports': ['%s:%d=%s' % p for p in protocol_ports],
                 'packets': entries}
     with open(base + '.json', 'w', newline='\n') as handle:
         json.dump(manifest, handle, indent=1)
     lines = ['%d packets: %d expected PASSED, %d expected DROPPED' % (len(entries), passed, dropped),
-             'Capture: ' + capture, 'Ports:'] + ['  ' + p for p in ports]
+             'Capture: ' + capture,
+             'Each packet as C array (.h) and hex stream (.hex): ' + ', '.join(sorted(packet_files)),
+             'Ports:'] + ['  ' + p for p in ports]
     lines += ['', 'frame  expect   message  [violated field / rule]']
     for e in entries:
         v = e['violate']
@@ -1312,10 +1440,12 @@ def cmd_gen_packets(args):
         lines += ['', 'Not generated:'] + ['  ' + s for s in skipped]
     with open(base + '.txt', 'w', newline='\n') as handle:
         handle.write('\n'.join(lines) + '\n')
-    summary = '\n'.join(lines[:3 + len(ports)])
+    summary = '\n'.join(lines[:4 + len(ports)])
     if skipped:
         summary += '\n%d rule(s) not generated, see %s.txt' % (len(skipped), base)
     result = {'pcap': capture, 'manifest': base + '.json', 'summary_file': base + '.txt',
+              'packet_dirs': sorted(packet_files), 'mode': args.mode,
+              'protocol_ports': ['%s:%d=%s' % p for p in protocol_ports],
               'passed': passed, 'dropped': dropped, 'port_map': port_map, 'ports': ports,
               'skipped': skipped, 'errors': errors, 'schema_changed': changed, 'summary': summary}
     if installed:
@@ -1550,6 +1680,11 @@ def build_parser():
     p.add_argument('--port-map', default='',
                    help='root messages sent on their own port (default: one UDP port per unit root, from %d)'
                    % AUTO_PORT_BASE)
+    p.add_argument('--mode', choices=('ports', 'protocol'), default='ports',
+                   help='ports: roots on their own port, others as Any on --any-port; protocol: every message '
+                        'of each protocol (unit) wrapped in an Any on that protocol\'s port (--protocol-port)')
+    p.add_argument('--protocol-port', type=int, default=DEFAULT_PROTOCOL_PORT,
+                   help='first UDP port in protocol mode, one per protocol (default %d)' % DEFAULT_PROTOCOL_PORT)
     p.add_argument('--any-port', type=int, default=DEFAULT_ANY_PORT,
                    help='UDP port for other messages, wrapped in google.protobuf.Any (default %d)' % DEFAULT_ANY_PORT)
     p.add_argument('--valid', type=int, default=2, help='valid packets per message (default 2)')
