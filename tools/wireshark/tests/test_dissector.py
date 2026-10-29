@@ -336,6 +336,75 @@ class GeneratedPacketsTests(LuaTestCase):
                                  '%s\n%s' % (entry, text))
 
 
+PROTOCOL_PORT = 16000
+
+
+class ProtocolDecodeTests(LuaTestCase):
+    """One Proto per protocol (folder of the protos root), as with Decode As: every
+    packet is an Any whose type_url selects a message of that protocol."""
+
+    def install(self, root, plugins=None):
+        plugins = plugins or self.tmp
+        status, result, err = run_backend('gen-packets', '--mode', 'protocol', '--protos-root', root,
+                                          '--out', plugins, '--plugins-dir', plugins,
+                                          '--protocol-port', str(PROTOCOL_PORT))
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(plugins, 'nanopb_any_dissector.lua')))
+        with open(result['manifest']) as handle:
+            return result, json.load(handle)
+
+    def dissect(self, port, data):
+        proto = self.mock.tables['udp.port'].entries[port]
+        self.assertIsNotNone(proto, port)
+        tree = self.mock.tree()
+        pinfo = self.mock.pinfo(PORT_TYPE['udp'], port)
+        self.assertEqual(proto.dissector(self.mock.tvb(data), pinfo, tree), len(data))
+        return self.mock.render(tree), pinfo
+
+    def test_protocols_registered_for_decode_as(self):
+        result, _ = self.install(FIXTURES)
+        name = 'nanopb_envelope'
+        self.assertIsNotNone(self.mock.protos[name], name)
+        self.assertTrue(self.mock.tables['udp.port'].decode_as_names[name], name)
+        self.assertTrue(self.mock.tables['tcp.port'].decode_as_names[name], name)
+        self.assertIn(name, result['summary'])
+        # telemetry does not use google.protobuf.Any, so it is no Any protocol.
+        self.assertIsNone(self.mock.protos['nanopb_telemetry'])
+        self.assertIn('telemetry: the protocol does not use google.protobuf.Any', result['skipped'])
+        # Generate test packets maps each protocol's port, as a Decode As would.
+        same = self.lua.eval('rawequal')
+        self.assertTrue(same(self.mock.tables['udp.port'].entries[PROTOCOL_PORT], self.mock.protos[name]))
+
+    def test_verdicts_match_manifest(self):
+        for root in (RULES_PROTOS, FIXTURES, os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')):
+            with self.subTest(root=root):
+                plugins = tempfile.mkdtemp(prefix='nanopb_ws_proto_', dir=self.tmp)
+                _, manifest = self.install(root, plugins)
+                self.assertTrue(manifest['packets'])
+                for entry in manifest['packets']:
+                    self.assertTrue(entry['any_wrapped'])
+                    text, pinfo = self.dissect(entry['port'], bytes.fromhex(entry['hex']))
+                    self.assertIn('Validation: %s' % entry['expect'].upper(), text, '%s\n%s' % (entry, text))
+                    self.assertIn(entry['message'], pinfo.cols.info.value)
+
+    def test_unknown_type_and_depth(self):
+        self.install(FIXTURES)
+        ping = 'demo.payloads.Ping'
+        # A message of another protocol on the envelope port.
+        text, _ = self.dissect(PROTOCOL_PORT, any_of('demo.telemetry.Telemetry', b''))
+        self.assertIn('Validation: DROPPED', text)
+        self.assertIn('filter.unknown_type', text)
+        text, _ = self.dissect(PROTOCOL_PORT, any_of(ping, b''))
+        self.assertIn('Validation: PASSED', text, text)
+        # Five nested Anys: the fifth is beyond PB_VALIDATE_FILTER_MAX_ANY_DEPTH (4).
+        body = any_of(ping, b'')
+        for _ in range(4):
+            body = any_of('demo.envelope.Envelope', f_bytes(2, body))
+        text, _ = self.dissect(PROTOCOL_PORT, body)
+        self.assertIn('filter.depth', text)
+        self.assertIn('Validation: DROPPED', text)
+
+
 class UnenforcedRulesTests(LuaTestCase):
     def test_not_checked_rules_never_drop(self):
         status, _, err = run_backend('install-dissector', '--protos-root',
@@ -493,9 +562,14 @@ class StudioTests(LuaTestCase):
         self.assertEqual(calls[len(calls)], 'apply')  # Lua tables are 1-based
         self.assertEqual(calls[len(calls) - 1], 'filter|nanopb.validation == "dropped"')
         self.assertIsNotNone(window.buttons['Open output folder'])
-        # The ports gen-packets picked are kept for the dissector and Generate C.
+        # Every packet is an Any on its protocol's port, mapped like a Decode As;
+        # no per-message port is picked, so the saved port map stays empty.
         with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
-            self.assertIn('udp:15000=demo.envelope.Envelope', handle.read())
+            self.assertIn('port_map = ""', handle.read())
+        with open(os.path.join(self.tmp, 'nanopb', 'ports.luadata')) as handle:
+            self.assertIn('protocol = "envelope"', handle.read())
+        self.assertIn('packets', window.text)
+        self.assertIn('Decode As', window.text)
 
         # Same protos again: nothing to reload.
         picker = self.picker('nanopb/Generate test packets (passed + dropped)...', title)

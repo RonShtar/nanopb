@@ -1156,9 +1156,22 @@ def protocols_of(schema):
     return re.findall(r'^    \["([^"]+)"\] = ', block, re.M)
 
 
-def install_schema(protos_root, includes, plugins, port_map, protocol_ports=()):
+def installed_protocol_ports(ports_path):
+    """Protocol port entries of an installed ports.luadata."""
+
+    try:
+        with open(ports_path, encoding='utf-8') as handle:
+            text = handle.read()
+    except OSError:
+        return []
+    return [(t, int(port), name) for t, port, name in
+            re.findall(r'\{ transport = "(udp|tcp)", port = (\d+), protocol = "([^"]+)" \}', text)]
+
+
+def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None):
     """Install the dissector, its schema and port map into ``plugins``.
 
+    ``protocol_ports`` of None keeps the protocol ports already installed.
     Only files whose content differs are written. Returns (result, changed, messages).
     """
 
@@ -1166,6 +1179,10 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=()):
     schema_path = os.path.join(data_dir, 'schema.luadata')
     text, messages = schema_text(protos_root, includes)
     changed = write_if_changed(schema_path, text)
+    if protocol_ports is None:
+        known = set(protocols_of(text))
+        protocol_ports = [p for p in installed_protocol_ports(os.path.join(data_dir, 'ports.luadata'))
+                          if p[2] in known]
     ports = parse_port_map(port_map, messages)
     files = [schema_path]
     if port_map is not None or protocol_ports:
@@ -1185,7 +1202,7 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=()):
     files.insert(0, target)
     result = {'plugins_dir': plugins, 'files': files, 'messages': len(messages),
               'ports': ['%s:%d=%s' % p for p in ports] + ['%s:%d=<protocol %s>' % p for p in protocol_ports],
-              'decode_as': ['nanopb_' + c_identifier(name) for name in sorted(protocols_of(text))]}
+              'decode_as': ['nanopb_' + c_identifier(name).lower() for name in sorted(protocols_of(text))]}
     return result, changed, messages
 
 
@@ -1418,7 +1435,7 @@ def cmd_gen_packets(args):
     dropped = len(entries) - passed
     if protocol_mode:
         ports = ['udp:%d=protocol %s (Decode As nanopb_%s; every message wrapped in an Any)'
-                 % (port, name, c_identifier(name)) for _, port, name in protocol_ports]
+                 % (port, name, c_identifier(name).lower()) for _, port, name in protocol_ports]
     else:
         ports = ['%s:%d=%s' % (proto, port, msg) for msg, (proto, port) in sorted(roots.items(), key=lambda x: x[1])]
         ports.append('udp:%d=%s (every other message, wrapped in it)' % (args.any_port, ANY_MESSAGE))

@@ -198,9 +198,21 @@ end
 local JSON_ESCAPES = { n = "\n", t = "\t", r = "\r", ['"'] = '"', ["\\"] = "\\", ["/"] = "/" }
 
 local function json_string(text, key)
-    local raw = text:match('"' .. key .. '"%s*:%s*"(.-[^\\])"') or text:match('"' .. key .. '"%s*:%s*""') and ""
-    if not raw then return nil end
-    return (raw:gsub("\\(.)", JSON_ESCAPES))
+    local _, start = text:find('"' .. key .. '"%s*:%s*"')
+    if not start then return nil end
+    -- Up to the first quote that is not escaped (the value may be empty).
+    local pos = start + 1
+    while pos <= #text do
+        local c = text:sub(pos, pos)
+        if c == "\\" then
+            pos = pos + 2
+        elseif c == '"' then
+            return (text:sub(start + 1, pos - 1):gsub("\\(.)", JSON_ESCAPES))
+        else
+            pos = pos + 1
+        end
+    end
+    return nil
 end
 
 local function json_bool(text, key)
@@ -414,13 +426,15 @@ end
 local DROPPED_FILTER = 'nanopb.validation == "dropped"'
 
 -- One button: valid and invalid packets of every message in one capture,
--- dissector refreshed, capture opened.
+-- dissector refreshed, capture opened. Every packet is a google.protobuf.Any
+-- (type_url = message) on its protocol's port, mapped like a Decode As to
+-- nanopb_<protocol>; each one is also written as a C array (.h) and .hex.
 local function gen_packets()
     local title = "Generate test packets"
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
-            local args = add_common({ "gen-packets", "--out", output_dir(), "--unit", units,
-                "--plugins-dir", PLUGINS_DIR })
+            local args = add_common({ "gen-packets", "--mode", "protocol", "--out", output_dir(),
+                "--unit", units, "--plugins-dir", PLUGINS_DIR })
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -429,15 +443,17 @@ local function gen_packets()
             if not ok then return false, text end
             local pcap = json_string(text, "pcap") or ""
             local summary = json_string(text, "summary") or text
-            if config.port_map == "" then
+            local picked = json_string(text, "port_map") or ""
+            if config.port_map == "" and picked ~= "" then
                 -- Keep the ports gen-packets picked, so the dissector and Generate C agree.
-                config.port_map = json_string(text, "port_map") or ""
+                config.port_map = picked
                 save_config()
             end
             local reload = json_bool(text, "schema_changed") and reload_lua_plugins
             local notes = { summary, "" }
             if open_capture_file then
                 notes[#notes + 1] = "Opening the capture. Each packet shows Validation: PASSED or DROPPED."
+                notes[#notes + 1] = "Other ports: Analyze > Decode As > UDP/TCP port > NANOPB_<PROTOCOL>."
             else
                 notes[#notes + 1] = "Open the capture with File > Open: " .. pcap
             end
@@ -476,6 +492,9 @@ local function install_dissector()
             "--port-map", config.port_map })
         local ok, text = run_backend(args)
         if ok then
+            text = text .. "\n\nDecode a port as one protocol (a folder of the protos directory; every packet a"
+                .. "\ngoogle.protobuf.Any whose type_url selects the message): Analyze > Decode As >"
+                .. "\nUDP/TCP port > NANOPB_<PROTOCOL> (names listed under decode_as above)."
             if reload_lua_plugins then
                 text = text .. "\n\nReloading Lua plugins..."
                 show("nanopb: install dissector", ok, text)

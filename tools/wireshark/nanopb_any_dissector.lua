@@ -163,7 +163,9 @@ nanopb.fields = fields
 local function default_port_map_string()
     local parts = {}
     for _, e in ipairs(default_ports) do
-        parts[#parts + 1] = string.format("%s:%d=%s", e.transport, e.port, e.message)
+        if e.message then  -- protocol entries are registered with their Decode As protocol
+            parts[#parts + 1] = string.format("%s:%d=%s", e.transport, e.port, e.message)
+        end
     end
     return table.concat(parts, ",")
 end
@@ -634,7 +636,12 @@ end
 
 -- Collect the fields of message `msg_name` at offset/length into a state
 -- table; decode failures are appended to `errors` (with their path).
-local function collect(tvb, offset, length, msg_name, depth, path, errors, with_any)
+-- `protocol` (protocol Decode As only): { name = ..., messages = set } plus the
+-- current Any nesting level `any_depth`, checked like <protocol>_filter_udp.
+local MAX_ANY_DEPTH = 4  -- PB_VALIDATE_FILTER_MAX_ANY_DEPTH
+
+local function collect(tvb, offset, length, msg_name, depth, path, errors, with_any, protocol, any_depth)
+    any_depth = any_depth or 0
     local msg = schema.messages[msg_name]
     local st = { msg = msg_name, offset = offset, length = length, fields = {}, which = {} }
     local function fail(id, detail, off, len, where)
@@ -696,7 +703,8 @@ local function collect(tvb, offset, length, msg_name, depth, path, errors, with_
                     add(number, fd, { v = raw, offset = start, length = pos + len - start,
                                       data_offset = pos, data_length = len })
                 elseif t == T.MESSAGE then
-                    local child = collect(tvb, pos, len, fd.type_name, depth + 1, fpath, errors, with_any)
+                    local child = collect(tvb, pos, len, fd.type_name, depth + 1, fpath, errors, with_any,
+                        protocol, any_depth)
                     add(number, fd, { child = child, offset = start, length = pos + len - start })
                 elseif fd.label == LABEL_REPEATED and
                         (VARINT_TYPES[t] or FIXED32_TYPES[t] or FIXED64_TYPES[t]) then
@@ -771,7 +779,20 @@ local function collect(tvb, offset, length, msg_name, depth, path, errors, with_
         local type_name = url:match("([^/]+)$")
         local value = st.fields[2] and st.fields[2][1]
         st.any_type = type_name
-        if with_any and type_name and schema.messages[type_name] then
+        if protocol then
+            -- The type_url is the opcode: only messages of the protocol, nested
+            -- at most MAX_ANY_DEPTH levels, and the payload is always checked.
+            if any_depth >= MAX_ANY_DEPTH then
+                fail("filter.depth", string.format("google.protobuf.Any nested more than %d levels", MAX_ANY_DEPTH))
+            elseif not (type_name and protocol.messages[type_name]) then
+                fail("filter.unknown_type", string.format("type_url %q is not a message of protocol %s",
+                    url, protocol.name))
+            else
+                st.any_payload = collect(tvb, value and value.data_offset or offset + length,
+                    value and value.data_length or 0, type_name, depth + 1, path .. "<" .. type_name .. ">",
+                    errors, true, protocol, any_depth + 1)
+            end
+        elseif with_any and type_name and schema.messages[type_name] then
             st.any_payload = collect(tvb, value and value.data_offset or offset + length, value and value.data_length or 0,
                 type_name, depth + 1, path .. "<" .. type_name .. ">", errors, with_any)
         end
@@ -1191,10 +1212,10 @@ validate_state = function(st, path, ctx)
 end
 
 -- Validate the whole packet as `msg_name`. Returns a verdict table.
-local function validate_packet(tvb, msg_name, pinfo)
+local function validate_packet(tvb, msg_name, pinfo, protocol)
     local errors = {}
-    local with_any = nanopb.prefs.validate_any
-    local st = collect(tvb, 0, tvb:len(), msg_name, 1, "", errors, with_any)
+    local with_any = protocol ~= nil or nanopb.prefs.validate_any
+    local st = collect(tvb, 0, tvb:len(), msg_name, 1, "", errors, with_any, protocol, 0)
     local ctx = { now = math.floor(pinfo.abs_ts or os.time()), violations = {}, unchecked = {}, checks = 0 }
     validate_state(st, "", ctx)
     return { errors = errors, violations = ctx.violations, unchecked = ctx.unchecked, checks = ctx.checks,
@@ -1269,13 +1290,14 @@ local function root_message(pinfo, tvb)
     return nil
 end
 
-local function dissect(tvb, pinfo, tree, forced_root)
+local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local length = tvb:len()
     if length == 0 then return 0 end
-    pinfo.cols.protocol = "NANOPB"
+    pinfo.cols.protocol = protocol and protocol.column or "NANOPB"
 
     local msg_name = forced_root or root_message(pinfo, tvb)
-    local root = tree:add(nanopb, tvb(), "nanopb Protobuf")
+    local root = tree:add(protocol and protocol.proto or nanopb, tvb(),
+        protocol and ("nanopb " .. protocol.name) or "nanopb Protobuf")
     if not schema_ok then root:add_proto_expert_info(e_no_schema) end
 
     if msg_name and not schema.messages[msg_name] then
@@ -1288,9 +1310,15 @@ local function dissect(tvb, pinfo, tree, forced_root)
     decode_message(tvb, 0, length, msg_name, top, 1, pinfo)
     local suffix = ""
     if msg_name and schema_ok and nanopb.prefs.validate then
-        suffix = add_validation(root, tvb, validate_packet(tvb, msg_name, pinfo), msg_name)
+        suffix = add_validation(root, tvb, validate_packet(tvb, msg_name, pinfo, protocol), msg_name)
     end
-    pinfo.cols.info:set(string.format("nanopb %s (%d bytes)%s", msg_name or "raw", length, suffix))
+    local shown = msg_name or "raw"
+    if protocol then
+        -- Show the message the type_url selects rather than "google.protobuf.Any".
+        local _, type_name = parse_any(tvb, 0, length)
+        shown = protocol.name .. " " .. (type_name or "?")
+    end
+    pinfo.cols.info:set(string.format("nanopb %s (%d bytes)%s", shown, length, suffix))
     return length
 end
 
@@ -1309,6 +1337,36 @@ end
 
 DissectorTable.get("udp.port"):add_for_decode_as(nanopb)
 DissectorTable.get("tcp.port"):add_for_decode_as(nanopb)
+
+-- One protocol per directory of the protos root (schema.protocols): choose it
+-- with Analyze > Decode As > UDP/TCP port > NANOPB_<NAME>. Every packet is a
+-- google.protobuf.Any whose type_url selects a message of that protocol, and
+-- it is validated like the generated <name>_filter_udp.
+local protocols = {}
+local protocol_names = {}
+for name in pairs(schema.protocols or {}) do protocol_names[#protocol_names + 1] = name end
+table.sort(protocol_names)
+for _, name in ipairs(protocol_names) do
+    -- Wireshark wants a lowercase filter name; Decode As shows it uppercased.
+    local ident = name:gsub("[^%w_]", "_"):lower()
+    local set = {}
+    for _, msg in ipairs(schema.protocols[name]) do set[msg] = true end
+    local proto = Proto("nanopb_" .. ident, "nanopb " .. name .. " (Any type_url = message)")
+    local protocol = { name = name, messages = set, proto = proto, column = "NANOPB_" .. ident:upper() }
+    function proto.dissector(tvb, pinfo, tree)
+        return dissect(tvb, pinfo, tree, ANY, protocol)
+    end
+    DissectorTable.get("udp.port"):add_for_decode_as(proto)
+    DissectorTable.get("tcp.port"):add_for_decode_as(proto)
+    protocols[name] = protocol
+end
+
+-- Ports mapped to a protocol (written by Generate test packets), like a Decode As.
+for _, e in ipairs(default_ports) do
+    if e.protocol and protocols[e.protocol] then
+        DissectorTable.get(e.transport .. ".port"):add(e.port, protocols[e.protocol].proto)
+    end
+end
 nanopb:register_heuristic("udp", heuristic)
 nanopb:register_heuristic("tcp", heuristic)
 apply_ports()

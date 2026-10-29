@@ -158,10 +158,15 @@ ENC_UTF_8 = 0
 DissectorTable = { get = function(name)
     local t = M.tables[name]
     if not t then
-        t = { name = name, entries = {}, decode_as = false }
+        t = { name = name, entries = {}, decode_as = false, decode_as_names = {} }
         function t:add(port, proto) self.entries[port] = proto end
-        function t:remove(port) self.entries[port] = nil end
-        function t:add_for_decode_as() self.decode_as = true end
+        function t:remove(port, proto)
+            if proto == nil or rawequal(self.entries[port], proto) then self.entries[port] = nil end
+        end
+        function t:add_for_decode_as(proto)
+            self.decode_as = true
+            self.decode_as_names[proto.name] = true
+        end
         M.tables[name] = t
     end
     return t

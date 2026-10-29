@@ -276,6 +276,76 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual('passed' if verdicts[entry['frame']] else 'dropped', entry['expect'],
                                  '%s frame %d %s %s' % (unit, entry['frame'], entry['message'], entry['violate']))
 
+    def test_protocol_packets_files_and_schema(self):
+        result, manifest = self.gen_packets(FIXTURES, '--mode', 'protocol')
+        self.assertEqual(manifest['protocol_ports'], ['udp:16000=envelope'])
+        self.assertIn('telemetry: the protocol does not use google.protobuf.Any', result['skipped'])
+        for entry in manifest['packets']:
+            self.assertEqual((entry['unit'], entry['port'], entry['any_wrapped']), ('envelope', 16000, True))
+            header, hexfile = entry['files']
+            self.assertEqual(os.path.dirname(header), os.path.join(self.tmp, 'packets', 'envelope', 'packets'))
+            self.assertTrue(os.path.basename(header).endswith('_%s.h' % entry['expect']), header)
+            with open(hexfile) as handle:
+                self.assertEqual(handle.read().strip(), entry['hex'])
+            with open(header) as handle:
+                self.assertIn('_DATA_SIZE %du' % entry['size'], handle.read())
+        with open(os.path.join(self.tmp, 'plugins', 'nanopb', 'schema.luadata')) as handle:
+            schema = handle.read()
+        self.assertRegex(schema, r'protocols = \{\n    \["envelope"\] = \{[^}]*"demo\.envelope\.Envelope"')
+        with open(os.path.join(self.tmp, 'plugins', 'nanopb', 'ports.luadata')) as handle:
+            self.assertIn('{ transport = "udp", port = 16000, protocol = "envelope" }', handle.read())
+        # install-dissector keeps the protocol port Generate test packets mapped.
+        status, result, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir',
+                                          os.path.join(self.tmp, 'plugins'), '--port-map', '')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['decode_as'], ['nanopb_envelope'])
+        self.assertIn('udp:16000=<protocol envelope>', result['ports'])
+
+    @unittest.skipIf(find_cc() is None, 'no C compiler (gcc/clang/cc, CC, or pip install ziglang)')
+    def test_protocol_packets_match_c_protocol_filter(self):
+        """Protocol mode: every packet's .h array through <unit>_filter_udp gives the manifest verdict."""
+
+        for root in (RULES_PROTOS, FIXTURES, STRESS_PROTOS):
+            with self.subTest(root=os.path.basename(os.path.dirname(root)) + '/' + os.path.basename(root)):
+                shutil.rmtree(os.path.join(self.tmp, 'packets'), ignore_errors=True)
+                _, manifest = self.gen_packets(root, '--mode', 'protocol')
+                self.check_with_protocol_filter(root, manifest)
+
+    def check_with_protocol_filter(self, root, manifest):
+        by_unit = {}
+        for entry in manifest['packets']:
+            by_unit.setdefault(entry['unit'], []).append(entry)
+        self.assertTrue(by_unit)
+        for unit, entries in by_unit.items():
+            out = os.path.join(self.tmp, 'cp_' + unit)
+            status, result, err = run_backend('gen-c', '--protos-root', root, '--unit', unit, '--out', out,
+                                              '--with-runtime')
+            self.assertEqual(status, 0, err)
+            self.assertEqual(result['units'][0]['protocol_filter'], unit + '_filter_udp')
+            unit_dir = os.path.join(out, unit)
+            lines = ['#include <stdio.h>', '#include "%s.pb.h"' % unit]
+            checks = []
+            for entry in entries:
+                header = entry['files'][0]
+                ident = os.path.splitext(os.path.basename(header))[0] + '_data'
+                lines.append('#include "%s"' % header.replace('\\', '/'))
+                checks.append('    printf("%%d %%d\\n", %d, %s_filter_udp(NULL, %s, %s_SIZE));'
+                              % (entry['frame'], unit, ident, ident.upper()))
+            lines += ['int main(void) {'] + checks + ['    return 0;', '}', '']
+            main = os.path.join(unit_dir, 'main_protocol.c')
+            with open(main, 'w') as handle:
+                handle.write('\n'.join(lines))
+            exe = os.path.join(unit_dir, 'protocol.exe')
+            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+            build = subprocess.run(find_cc() + ['-std=c99', '-I', unit_dir, '-o', exe] + sources,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(build.returncode, 0, build.stdout[-3000:])
+            run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
+            verdicts = dict((int(a), b == '0') for a, b in (line.split() for line in run.stdout.splitlines()))
+            for entry in entries:
+                self.assertEqual('passed' if verdicts[entry['frame']] else 'dropped', entry['expect'],
+                                 '%s frame %d %s %s' % (unit, entry['frame'], entry['message'], entry['violate']))
+
     def test_gen_c_exports_packet_filters(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', self.tmp)
         self.assertEqual(status, 0, err)
