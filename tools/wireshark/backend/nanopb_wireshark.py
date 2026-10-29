@@ -423,6 +423,50 @@ def merge_unit(unit, gendir, outdir, validate):
     return files, pb_h, pb_headers + pb_sources + validate_headers + validate_sources
 
 
+def validation_defines(unit):
+    """Smallest PB_VALIDATE_MAX_PATH_DEPTH / _LENGTH that fit every validator of the unit.
+
+    Each pb_validate_<msg>() keeps its own path stack relative to its message
+    (nested messages report from their own validator), so a path is at most
+    a field name plus an array index ("readings[65535]"). Smaller values
+    shrink pb_violations_t and pb_validate_context_t; see
+    docs/validation_performance.md.
+    """
+
+    longest, repeated = 1, False
+
+    def walk(msg):
+        nonlocal longest, repeated
+        for fld in msg.field:
+            longest = max(longest, len(fld.name))
+            repeated = repeated or fld.label == 3
+        for nested in msg.nested_type:
+            walk(nested)
+
+    for fdesc in unit.fds.file:
+        if fdesc.name not in EXCLUDED_PROTOS:
+            for msg in fdesc.message_type:
+                walk(msg)
+    index = len('[65535]') if repeated else 0  # pb_size_t is 16 bits without PB_FIELD_32BIT
+    return {'PB_VALIDATE_MAX_PATH_DEPTH': 2 if repeated else 1,
+            'PB_VALIDATE_MAX_PATH_LENGTH': longest + index + 1}
+
+
+def gen_c_summary(results):
+    lines = []
+    for r in results:
+        lines.append('%s -> %s' % (r['unit'], r['dir']))
+        lines.append('  ' + ', '.join(r['files']))
+        if r['filters']:
+            lines.append('  packet filters: ' + ', '.join(f + '/_tcp' for f in r['filters']))
+        for message, error in sorted(r.get('filter_errors', {}).items()):
+            lines.append('  no filter for %s: %s' % (message, error.splitlines()[0]))
+        if r.get('recommended_defines'):
+            lines.append('  smallest validation buffers: ' + ' '.join(
+                '-D%s=%d' % kv for kv in sorted(r['recommended_defines'].items())))
+    return '\n'.join(lines)
+
+
 def cmd_gen_c(args):
     validate = not args.no_validate
     results = []
@@ -453,12 +497,14 @@ def cmd_gen_c(args):
                     files.append(fname)
         result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
                   'filters': filters, 'generator_log': log.strip()}
+        if validate:
+            result['recommended_defines'] = validation_defines(unit)
         if entries:
             result['filter_entrypoints'] = {'from': source_of_entries, 'modes': modes}
         if filter_errors:
             result['filter_errors'] = filter_errors
         results.append(result)
-    return {'units': results}
+    return {'units': results, 'summary': gen_c_summary(results)}
 
 
 # ---------------------------------------------------------------------------

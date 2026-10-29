@@ -264,7 +264,10 @@ class BackendTests(unittest.TestCase):
                 handle.write('\n'.join(lines))
             exe = os.path.join(unit_dir, 'check.exe')
             sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
-            build = subprocess.run(find_cc() + ['-std=c99', '-I', unit_dir, '-o', exe] + sources,
+            # Built with the smallest validation buffers gen-c recommends: they
+            # must not change any verdict.
+            defines = ['-D%s=%d' % kv for kv in sorted(result['units'][0]['recommended_defines'].items())]
+            build = subprocess.run(find_cc() + ['-std=c99', '-I', unit_dir] + defines + ['-o', exe] + sources,
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
             self.assertEqual(build.returncode, 0, build.stdout[-3000:])
             run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
@@ -301,6 +304,11 @@ class BackendTests(unittest.TestCase):
                                                         'fleet.telemetry.Frame': 'single',
                                                         'fleet.status.Status': 'auto'}})
         self.assertNotIn('filter_errors', unit)
+        # A path is a field name plus an array index ("readings[65535]").
+        self.assertEqual(unit['recommended_defines'], {'PB_VALIDATE_MAX_PATH_DEPTH': 2,
+                                                       'PB_VALIDATE_MAX_PATH_LENGTH': 19})
+        self.assertIn('-DPB_VALIDATE_MAX_PATH_DEPTH=2 -DPB_VALIDATE_MAX_PATH_LENGTH=19', result['summary'])
+        self.assertIn('fleet.pb.h, fleet.pb.c, fleet_validate.h, fleet_validate.c', result['summary'])
 
     def test_gen_c_no_filter(self):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'envelope',

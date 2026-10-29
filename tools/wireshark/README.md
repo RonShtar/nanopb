@@ -131,8 +131,15 @@ code uses `#include <pb.h>`:
 
     gcc -I out/envelope -I path/to/nanopb -c out/envelope/envelope.pb.c out/envelope/envelope_validate.c
 
-For what costs time and stack on the hot path, and the build switches that
-matter, see `docs/validation_performance.md`.
+The result window also prints, per unit, the smallest validation buffers that
+fit its schema, e.g. `-DPB_VALIDATE_MAX_PATH_DEPTH=2
+-DPB_VALIDATE_MAX_PATH_LENGTH=19` for the stress `fleet` unit (the defaults are
+16 and 128). A validator reports paths relative to its own message, so a path
+is at most a field name plus an array index. These shrink `pb_violations_t`
+(2.3 KB by default) and the per-validator context; they are optional and must
+be the same for every file of the build. For what else costs time and stack
+on the hot path, and the build switches that matter, see
+`docs/validation_performance.md`.
 
 `gen-c --with-runtime` on the command line also copies those runtime files
 next to the generated ones, so the folder builds on its own.

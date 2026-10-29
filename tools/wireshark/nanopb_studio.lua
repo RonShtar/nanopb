@@ -351,7 +351,14 @@ local function gen_c()
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
             end
-            return run_backend(args)
+            local ok, text = run_backend(args)
+            if not ok then return false, text end
+            return true, (json_string(text, "summary") or text) .. "\n\n" ..
+                "<unit>.pb.c/.h: all messages, PB_BINDs and the packet filters (_udp/_tcp).\n" ..
+                "<unit>_validate.c/.h: all pb_validate_* validators.\n" ..
+                "Add all four to your project, next to the nanopb runtime.\n" ..
+                "The -D values are optional: they shrink the validation buffers to what this\n" ..
+                "schema needs (docs/validation_performance.md)."
         end)
     end)
 end
