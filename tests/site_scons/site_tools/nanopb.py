@@ -64,6 +64,11 @@ def _detect_python(env):
     if 'PYTHON' in env:
         return env['PYTHON']
 
+    # On Windows, 'python3' on PATH is often the Microsoft Store stub that
+    # only prints "Python was not found". SCons itself runs on Python 3.
+    if sys.platform == 'win32':
+        return env['ESCAPE'](sys.executable)
+
     p = env.WhereIs('python3')
     if p:
         return env['ESCAPE'](p)
@@ -121,7 +126,8 @@ def _detect_protocflags(env):
     n = _detect_nanopb(env)
     p1 = os.path.join(n, 'generator', 'protoc' + env['PROGSUFFIX'])
     p2 = os.path.join(n, 'generator-bin', 'protoc' + env['PROGSUFFIX'])
-    if p in [env['ESCAPE'](p1), env['ESCAPE'](p2)]:
+    p3 = os.path.join(n, 'generator', 'protoc.bat')
+    if p in [env['ESCAPE'](p1), env['ESCAPE'](p2), env['ESCAPE'](p3)]:
         # Using the bundled protoc, no options needed
         return ''
 

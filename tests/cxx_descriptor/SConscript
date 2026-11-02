@@ -23,6 +23,6 @@ for std in ["c++03", "c++11", "c++14", "c++17", "c++20"]:
         e.Append(CPPDEFINES = {'PB_C99_STATIC_ASSERT': 1})
 
     o1 = e.Object('message_descriptor_{}'.format(std), 'message_descriptor.cc')
-    o2 = e.Object('message.pb_{}'.format(std), 'message.pb.c')
+    o2 = e.Object('message.pb_{}{}'.format(std, e['OBJSUFFIX']), 'message.pb.c')
     p = e.Program([o1, o2, "$COMMON/pb_common.o"])
     e.RunTest(p)

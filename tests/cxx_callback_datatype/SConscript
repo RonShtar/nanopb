@@ -24,6 +24,6 @@ for std in ["c++11", "c++14", "c++17", "c++20"]:
         continue
 
     sources = [ 'cxx_callback_datatype.cpp', 'message.pb.cpp', '$NANOPB/pb_decode.c', '$NANOPB/pb_encode.c', '$NANOPB/pb_common.c' ]
-    objects = [ e.Object('{}_{}'.format(os.path.basename(s), std), s) for s in sources ]
+    objects = [ e.Object('{}_{}{}'.format(os.path.basename(s), std, e['OBJSUFFIX']), s) for s in sources ]
     p = e.Program(target = 'cxx_callback_datatype_{}'.format(std), source = objects)
     e.RunTest(p)

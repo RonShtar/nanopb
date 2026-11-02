@@ -161,7 +161,7 @@ def _debug_target(src):
     base, _ext = _os.path.splitext(src)
     return "debug/" + base
 
-debug_objs = [debug_env.Object(target = _debug_target(s), source = s) for s in sources]
+debug_objs = [debug_env.Object(target = _debug_target(s) + debug_env['OBJSUFFIX'], source = s) for s in sources]
 debug_pb_validate_obj = debug_env.Object("debug/pb_validate.o", "$NANOPB/pb_validate.c")
 
 debug_test_prog = debug_env.Program(

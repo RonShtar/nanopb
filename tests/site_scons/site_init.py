@@ -90,6 +90,10 @@ def add_nanopb_builders(env):
     def compare_files(target, source, env):
         data1 = open(str(source[0]), 'rb').read()
         data2 = open(str(source[1]), 'rb').read()
+        if sys.platform == 'win32':
+            # Test programs print text with CRLF line endings on Windows.
+            data1 = data1.replace(b'\r\n', b'\n')
+            data2 = data2.replace(b'\r\n', b'\n')
         if data1 == data2:
             print('\033[32m[ OK ]\033[0m   Files equal: ' + str(source[0]) + ' and ' + str(source[1]))
             return 0
