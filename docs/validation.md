@@ -12,16 +12,31 @@ The validation feature allows you to:
 
 ## Enabling Validation
 
-Validation code is produced by a separate protoc plugin,
-`protoc-gen-nanopb-validate`. Running that plugin *is* the request for
-validation - there is no `--validate` flag any more.
+One command generates the messages and their validators:
 
 ```bash
-protoc   --nanopb_out=--protoc-insertion-points:.   --nanopb-validate_out=.   message.proto
+python generator/nanopb_generator.py --validate message.proto
 ```
 
 This writes the usual `message.pb.h` / `message.pb.c`, plus
-`message_validate.h` / `message_validate.c`.
+`message_validate.h` / `message_validate.c`. All other nanopb options work as
+usual (`-D outdir`, `-I dir`, `-C`, `-s`, `-f`, ...) and reach both code
+generators. Options of the validator itself go in `--validate-opt`, e.g. a
+packet filter:
+
+```bash
+python generator/nanopb_generator.py --validate --validate-opt=--filter=pkg.Envelope message.proto
+```
+
+### With protoc directly
+
+`--validate` runs protoc with two plugins: nanopb, then the separate
+`protoc-gen-nanopb-validate`. To call protoc yourself (or from a build
+system):
+
+```bash
+protoc   --nanopb_out=--protoc-insertion-points,-x,validate.proto:.   --nanopb-validate_out=-x,validate.proto:.   message.proto
+```
 
 Two things are required and easy to get wrong:
 
@@ -139,8 +154,27 @@ message Collection {
         (validate.rules).repeated.max_items = 50
     ];
     
-    // Unique items only
+    // Unique items only (scalar, string and bytes items; not messages)
     repeated int32 ids = 2 [(validate.rules).repeated.unique = true];
+}
+```
+
+### Map Constraints
+
+`map.keys` and `map.values` take the same rules as a field and apply them to
+every entry's key and value. A violation names the entry, e.g.
+`counts[1].key`. The map needs a `max_count` (static allocation).
+
+```protobuf
+message Inventory {
+    map<string, int32> counts = 1 [
+        (nanopb).max_count = 8,
+        (validate.rules).map = {
+            max_pairs: 4,
+            keys: {string: {min_len: 3, prefix: "k_"}},
+            values: {int32: {gte: 0, lt: 100}}
+        }
+    ];
 }
 ```
 
@@ -483,7 +517,8 @@ message/field and option, not a silently-ignored no-op:
 - `(validate.message).requires`, `.mutex`, `.at_least` -- message-level
   cross-field constraints
 - `(validate.rules).oneof_required` -- require a specific oneof arm
-- `(validate.rules).repeated.map.no_sparse`
+- `(validate.rules).map.no_sparse`
+- `(validate.rules).repeated.unique` on repeated message fields
 - `(validate.rules).string.pattern`, `(validate.rules).bytes.pattern` -- no
   regex engine
 - `(validate.rules).string.min_bytes`, `.max_bytes`

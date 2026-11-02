@@ -1,0 +1,24 @@
+/* map.keys / map.values rules apply to every entry's key and value. */
+syntax = "proto3";
+
+import "validate.proto";
+
+enum Color {
+    COLOR_UNSET = 0;
+    RED = 1;
+    GREEN = 2;
+}
+
+message Inventory {
+    map<string, int32> counts = 1 [(validate.rules).map = {
+        max_pairs: 3,
+        keys: {string: {min_len: 3, prefix: "k_"}},
+        values: {int32: {gte: 0, lt: 100}}
+    }];
+    map<int32, Color> colors = 2 [(validate.rules).map = {
+        keys: {int32: {gt: 0}},
+        values: {enum: {defined_only: true}}
+    }];
+    map<uint32, string> names = 3 [(validate.rules).map.values.string = {in: ["a", "bb"]}];
+    map<int64, int64> wide = 4 [(validate.rules).map.keys.int64.lt = -4000000000];
+}

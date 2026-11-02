@@ -233,6 +233,8 @@ class ProtoFieldInfo:
     label: int = field(init=False)
     constraints: List[ValidationConstraint] = field(default_factory=list, init=False)
     item_constraints: List[ValidationConstraint] = field(default_factory=list, init=False)
+    map_key_constraints: List[ValidationConstraint] = field(default_factory=list, init=False)
+    map_value_constraints: List[ValidationConstraint] = field(default_factory=list, init=False)
     max_size: Optional[int] = field(default=None, init=False)
     max_count: Optional[int] = field(default=None, init=False)
     fixed_length: bool = field(default=False, init=False)
@@ -373,6 +375,15 @@ class ProtoFieldInfo:
             self.item_constraints.extend(
                 self._collect_rules(rules_option.repeated.items, top_level=False)
             )
+        if rules_option.HasField('map'):
+            if rules_option.map.HasField('keys'):
+                self.map_key_constraints.extend(
+                    self._collect_rules(rules_option.map.keys, top_level=False)
+                )
+            if rules_option.map.HasField('values'):
+                self.map_value_constraints.extend(
+                    self._collect_rules(rules_option.map.values, top_level=False)
+                )
 
     def _collect_rules(self, rules_option: Any, top_level: bool) -> List[ValidationConstraint]:
         """Flatten a validate.FieldRules message into constraints."""
@@ -1852,13 +1863,18 @@ class DataGenerator:
             count = self._random.randint(low, high)
         entry = self.registry.resolve_message(field_info.map_entry)
         key_info, value_info = entry.fields['key'], entry.fields['value']
+        # map.keys / map.values rules are declared on the map field.
+        key_constraints = key_info.constraint_map()
+        key_constraints.update({c.rule_type: c.value for c in field_info.map_key_constraints})
+        value_constraints = value_info.constraint_map()
+        value_constraints.update({c.rule_type: c.value for c in field_info.map_value_constraints})
 
         pairs: Dict[Any, Any] = {}
         attempts = 0
         while len(pairs) < count and attempts < count * 30 + 30:
             attempts += 1
-            key = self._generate_valid_element(key_info, key_info.constraint_map(), active_stack)
-            value = self._generate_valid_element(value_info, value_info.constraint_map(), active_stack)
+            key = self._generate_valid_element(key_info, key_constraints, active_stack)
+            value = self._generate_valid_element(value_info, value_constraints, active_stack)
             if key is None or value is None or key in pairs:
                 continue
             pairs[key] = value

@@ -1,0 +1,3 @@
+Inventory.* max_count:4
+Inventory.*.key max_size:8
+Inventory.*.value max_size:8

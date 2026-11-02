@@ -460,18 +460,23 @@ def validation_defines(unit):
 
     Each pb_validate_<msg>() keeps its own path stack relative to its message
     (nested messages report from their own validator), so a path is at most
-    a field name plus an array index ("readings[65535]"). Smaller values
-    shrink pb_violations_t and pb_validate_context_t; see
+    a field name plus an array index ("readings[65535]"), or with map.keys /
+    map.values rules the entry's key or value too ("counts[65535].value").
+    Smaller values shrink pb_violations_t and pb_validate_context_t; see
     docs/validation_performance.md.
     """
 
-    longest, repeated = 1, False
+    longest, repeated, map_rules = 1, False, False
 
     def walk(msg):
-        nonlocal longest, repeated
+        nonlocal longest, repeated, map_rules
         for fld in msg.field:
             longest = max(longest, len(fld.name))
             repeated = repeated or fld.label == 3
+            rules_option = field_rules(fld) if fld.label == 3 else None
+            if rules_option is not None and rules_option.HasField('map') and \
+                    (rules_option.map.HasField('keys') or rules_option.map.HasField('values')):
+                map_rules = True
         for nested in msg.nested_type:
             walk(nested)
 
@@ -480,6 +485,9 @@ def validation_defines(unit):
             for msg in fdesc.message_type:
                 walk(msg)
     index = len('[65535]') if repeated else 0  # pb_size_t is 16 bits without PB_FIELD_32BIT
+    if map_rules:
+        return {'PB_VALIDATE_MAX_PATH_DEPTH': 3,
+                'PB_VALIDATE_MAX_PATH_LENGTH': longest + index + len('.value') + 1}
     return {'PB_VALIDATE_MAX_PATH_DEPTH': 2 if repeated else 1,
             'PB_VALIDATE_MAX_PATH_LENGTH': longest + index + 1}
 
@@ -873,12 +881,19 @@ def rule_entry(rule_id, kind, params, field_type):
     return entry
 
 
-def field_rule_entries(field):
-    """The field's validate.proto rules as dissector rule entries."""
+def field_rule_entries(field, rules_option=None):
+    """The field's validate.proto rules as dissector rule entries.
+
+    rules_option overrides the field's own (validate.rules), e.g. the
+    map.keys / map.values rules applied to a map entry's key and value.
+    map.keys / map.values themselves are not listed here: build_schema puts
+    them on the fields of the map's *Entry message.
+    """
 
     import nanopb_validator
 
-    rules_option = field_rules(field)
+    if rules_option is None:
+        rules_option = field_rules(field)
     if rules_option is None:
         return []
     option = type(rules_option)()
@@ -892,7 +907,31 @@ def field_rule_entries(field):
                     entries.append({'id': '%s.%s' % (kind, name), 'kind': 'UNSUPPORTED'})
                     sub.ClearField(name)
     rules = nanopb_validator.FieldValidator(field, option).rules
-    return [rule_entry(r.constraint_id, r.rule_type, r.params, field.type) for r in rules] + entries
+    return [rule_entry(r.constraint_id, r.rule_type, r.params, field.type) for r in rules
+            if r.rule_type != nanopb_validator.RULE_MAP_ENTRIES] + entries
+
+
+def add_map_entry_rules(msg, messages):
+    """Put a map field's map.keys / map.values rules on its *Entry message's
+    key and value fields, so the dissector checks them on every entry (the
+    paths, e.g. counts[1].key, match the C validator's)."""
+
+    nested = dict((n.name, n) for n in msg.nested_type)
+    for fld in msg.field:
+        rules_option = field_rules(fld)
+        if rules_option is None or not rules_option.HasField('map'):
+            continue
+        entry_desc = nested.get(fld.type_name.rsplit('.', 1)[-1])
+        entry = messages.get(fld.type_name.lstrip('.'))
+        if entry_desc is None or entry is None or not entry_desc.options.map_entry:
+            continue
+        entry_fields = entry['fields']
+        for sub in entry_desc.field:
+            part = {'key': 'keys', 'value': 'values'}.get(sub.name)
+            if part and rules_option.map.HasField(part):
+                rules = field_rule_entries(sub, getattr(rules_option.map, part))
+                if rules:
+                    entry_fields[sub.number].setdefault('rules', []).extend(rules)
 
 
 def message_rule_entries(msg):
@@ -999,6 +1038,7 @@ def build_schema(fds_list, field_infos=None):
             messages[full]['message_rules'] = message_rules
         for nested in msg.nested_type:
             add_message(full + '.', nested, syntax)
+        add_map_entry_rules(msg, messages)
         for enum in msg.enum_type:
             add_enum(full + '.', enum)
 

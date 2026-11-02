@@ -272,6 +272,13 @@ class ValidationTests(LuaTestCase):
                          'uint32.lte')
         pairs = b''.join(f_bytes(4, f_bytes(1, k) + f_varint(2, 1)) for k in ('a', 'b', 'c'))
         self.assertDrops(self.lists(pairs), 'lists.counts', 'map.max_pairs')
+        # map.keys / map.values apply to every entry, with the C validator's paths
+        self.assertPasses(self.lists(f_bytes(4, f_bytes(1, 'abc') + f_varint(2, 0))))
+        self.assertDrops(self.lists(f_bytes(4, f_bytes(1, 'abcd') + f_varint(2, 1))), 'lists.counts[0].key',
+                         'string.max_len')
+        self.assertDrops(self.lists(f_bytes(4, f_bytes(1, 'a') + f_varint(2, 1)),
+                                    f_bytes(4, f_bytes(1, 'b') + f_varint(2, (1 << 64) - 1))),
+                         'lists.counts[1].value', 'int32.gte')
 
     def test_any(self):
         self.assertPasses(envelope(extra=f_bytes(7, any_of('rules.Inner', inner()))))

@@ -239,7 +239,8 @@ message MapRules {
   optional uint32 min_pairs = 1;     // Minimum number of key-value pairs
   optional uint32 max_pairs = 2;     // Maximum number of key-value pairs
   optional bool no_sparse = 3;       // Disallow keys with empty values
-  // Note: Per-key/value validation rules are not supported to avoid circular dependencies
+  optional FieldRules keys = 4;      // Rules for every entry's key
+  optional FieldRules values = 5;    // Rules for every entry's value
 }
 
 // Rules for google.protobuf.Any fields

@@ -54,6 +54,7 @@ The generator produces C code that uses macros from pb_validate.h to:
 - Handle optional fields and pointers appropriately
 """
 
+import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -132,6 +133,7 @@ RULE_MAX_ITEMS = 'MAX_ITEMS'
 RULE_UNIQUE = 'UNIQUE'
 RULE_ITEMS = 'ITEMS'
 RULE_NO_SPARSE = 'NO_SPARSE'
+RULE_MAP_ENTRIES = 'MAP_ENTRIES'
 RULE_ANY_IN = 'ANY_IN'
 RULE_ANY_NOT_IN = 'ANY_NOT_IN'
 RULE_TIMESTAMP_GT_NOW = 'TIMESTAMP_GT_NOW'
@@ -981,9 +983,10 @@ class FieldValidator:
         """
         Parse validation rules for map fields.
         
-        Map rules include min/max pair counts and the no_sparse constraint.
-        TODO: Key and value validation rules are not yet implemented.
-        
+        Map rules include min/max pair counts, the no_sparse constraint and
+        the keys/values rules, which apply to every entry's key and value
+        (RULE_MAP_ENTRIES, emitted by ValidatorGenerator._emit_map_entries).
+
         Args:
             rules: The MapRules message from validate.proto
         """
@@ -993,7 +996,11 @@ class FieldValidator:
             self.rules.append(ValidationRule(RULE_MAX_ITEMS, 'map.max_pairs', {'value': rules.max_pairs}))
         if rules.HasField('no_sparse') and rules.no_sparse:
             self.rules.append(ValidationRule(RULE_NO_SPARSE, 'map.no_sparse'))
-        # TODO: Handle key/value validation rules
+        if rules.HasField('keys') or rules.HasField('values'):
+            self.rules.append(ValidationRule(RULE_MAP_ENTRIES, 'map', {
+                'key_rules': rules.keys if rules.HasField('keys') else None,
+                'value_rules': rules.values if rules.HasField('values') else None,
+            }))
     
     def _parse_any_rules(self, rules: Any) -> None:
         """
@@ -1366,7 +1373,10 @@ class RepeatedRuleEmitter(RuleEmitter):
         elif rule_ir.rule_type == RULE_UNIQUE:
             pbtype = getattr(rule_ir.context.field, 'pbtype', None)
             if pbtype in ('MESSAGE', 'MSG_W_CB'):
-                return '        /* NOTE: repeated.unique is not supported for message types */\n'
+                raise ValidationRuleNotImplementedError(
+                    'validate.proto option "repeated.unique" on field "%s" has no C-runtime '
+                    'enforcement for message items. Remove it from the .proto, or wait '
+                    'for support.' % field_name)
             elif pbtype == 'STRING':
                 return '        PB_VALIDATE_REPEATED_UNIQUE_STRING(ctx, msg, %s, "%s");\n' % (
                     field_name, rule_ir.constraint_id)
@@ -2191,6 +2201,8 @@ class ValidatorGenerator:
             return 'per-item validation rules'
         if rt == RULE_NO_SPARSE:
             return 'no sparse map entries'
+        if rt == RULE_MAP_ENTRIES:
+            return 'per-entry key/value rules'
         # Fallback
         return rt.replace('_', ' ').lower()
 
@@ -2491,6 +2503,59 @@ class ValidatorGenerator:
         # Emit via emitter registry
         return self.emitter_registry.emit(rule_ir, self.proto_file, message_name)
 
+    def _emit_map_entries(self, rule: ValidationRule, field: Any, message_name: str) -> str:
+        """C code applying map.keys / map.values to every entry of a map field.
+
+        The entry's key and value are ordinary fields of the synthetic
+        <Field>Entry message, so their rules go through the normal emitters;
+        the generated code then reads them from the current entry
+        (``__pb_entry``) instead of from ``msg``.
+        """
+        field_name = getattr(field, 'name', '')
+        ctype = getattr(field, 'ctype', None)
+        entry = self._message_by_name(ctype)
+        desc = getattr(entry, 'desc', None)
+        if entry is None or desc is None or not desc.options.map_entry \
+                or getattr(field, 'allocation', None) != 'STATIC' \
+                or getattr(field, 'rules', None) != 'REPEATED':
+            raise ValidationRuleNotImplementedError(
+                'validate.proto option "map.keys"/"map.values" on message "%s" field "%s" '
+                'needs a statically allocated map (give it a max_count).'
+                % (message_name, field_name))
+
+        body = ''
+        for part in ('key', 'value'):
+            part_rules = rule.params.get(part + '_rules')
+            if part_rules is None:
+                continue
+            sub_field = next((f for f in entry.fields if getattr(f, 'name', '') == part), None)
+            sub_rules = FieldValidator(sub_field, part_rules, self.proto_file).rules
+            if not sub_rules:
+                continue
+            code = ''.join(self._emit_rule(r, sub_field, message_name=message_name)
+                           for r in sub_rules)
+            if not code.strip():
+                raise ValidationRuleNotImplementedError(
+                    'validate.proto option "map.%ss" on message "%s" field "%s" produced '
+                    'no check. Remove it from the .proto, or wait for support.'
+                    % (part, message_name, field_name))
+            code = re.sub(r'\bmsg\b(?=\s*(->|,))', '__pb_entry', code)
+            body += '            PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % part
+            body += ''.join('        ' + line if line.strip() else line
+                            for line in code.splitlines(True))
+            body += '            PB_VALIDATE_FIELD_END(ctx);\n'
+        if not body:
+            return ''
+
+        out = '        /* map.keys / map.values */\n'
+        out += '        for (pb_size_t __pb_mi = 0; __pb_mi < msg->%s_count; ++__pb_mi) {\n' % field_name
+        out += '            const %s *__pb_entry = &msg->%s[__pb_mi];\n' % (ctype, field_name)
+        out += '            pb_validate_context_push_index(&ctx, __pb_mi);\n'
+        out += body
+        out += '            pb_validate_context_pop_index(&ctx);\n'
+        out += '        }\n'
+        return out
+
     def generate_source(self):
         """Generate validation source file content."""
         if not self.validators:
@@ -2563,7 +2628,10 @@ class ValidatorGenerator:
                 yield '    PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % field_name
                 
                 for rule in field_validator.rules:
-                    yield self._emit_rule(rule, field, message_name=struct_name)
+                    if rule.rule_type == RULE_MAP_ENTRIES:
+                        yield self._emit_map_entries(rule, field, struct_name)
+                    else:
+                        yield self._emit_rule(rule, field, message_name=struct_name)
 
                 # Automatic recursion for nested message fields
                 try:
