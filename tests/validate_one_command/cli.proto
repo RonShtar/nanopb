@@ -1,0 +1,10 @@
+/* Generated with one command: nanopb_generator.py --validate cli.proto */
+syntax = "proto3";
+
+import "validate.proto";
+
+message Command {
+    string name = 1 [(validate.rules).string = {in: ["start", "stop"]}];
+    int32 arg = 2 [(validate.rules).int32 = {gte: 0, lte: 100}];
+    map<string, int32> limits = 3 [(validate.rules).map.values.int32.gt = 0];
+}

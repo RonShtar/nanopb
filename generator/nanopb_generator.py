@@ -70,6 +70,7 @@ import itertools
 import tempfile
 import shutil
 import shlex
+import subprocess
 import os
 from functools import reduce
 
@@ -3029,6 +3030,12 @@ optparser.add_option("--protoc-insertion-points", dest="protoc_insertion_points"
     help="Include insertion point comments in output for use by custom protoc plugins")
 optparser.add_option("-C", "--c-style", dest="c_style", action="store_true", default=False,
     help="Use C naming convention.")
+optparser.add_option("--validate", dest="validate", action="store_true", default=False,
+    help="Also generate <file>_validate.c/.h from the validate.proto rules "
+         "(runs protoc with the nanopb and nanopb-validate plugins).")
+optparser.add_option("--validate-opt", dest="validate_opts", action="append", default=[], metavar="OPTION",
+    help="With --validate: pass an option to the validate plugin, e.g. "
+         "--validate-opt=--filter=pkg.Envelope or --validate-opt=--protocol-filter=NAME")
 
 
 def parse_custom_style(option, opt_str, value, parser):
@@ -3228,6 +3235,41 @@ def process_file(filename, fdesc, options, other_files = {}):
     return {'headername': headername, 'headerdata': headerdata,
             'sourcename': sourcename, 'sourcedata': sourcedata}
 
+def run_with_validation(argv, options, filenames):
+    '''--validate: run protoc with both plugins, so that one command writes
+    <file>.pb.c/.pb.h and <file>_validate.c/_validate.h.
+
+    nanopb must emit insertion points and run before the validate plugin,
+    naming options must reach both plugins, and validate.proto is excluded
+    from the generated #includes.
+    '''
+    shared = []
+    skip_next = False
+    for arg in argv:
+        if skip_next:
+            skip_next = False
+        elif arg in filenames or arg in ('--validate', '--protoc-insertion-points'):
+            pass
+        elif arg in ('--validate-opt', '--protoc-opt', '-D', '--output-dir'):
+            skip_next = True
+        elif arg.startswith(('--validate-opt=', '--protoc-opt=', '--output-dir=', '-D')):
+            pass
+        else:
+            shared.append(arg)
+    shared += ['-x', 'validate.proto']
+
+    gendir = os.path.dirname(os.path.abspath(__file__))
+    outdir = options.output_dir or '.'
+    args = ['-I%s' % p for p in (options.options_path or ['.'])]
+    args += ['-I' + os.path.join(gendir, 'proto'), '-I' + gendir]
+    args += options.protoc_opts
+    args += ['--nanopb_out=' + outdir,
+             '--nanopb_opt=' + ','.join(['--protoc-insertion-points'] + shared),
+             '--nanopb-validate_out=' + outdir,
+             '--nanopb-validate_opt=' + ','.join(shared + options.validate_opts)]
+    args += filenames
+    return subprocess.call([sys.executable, os.path.join(gendir, 'protoc')] + args)
+
 def main_cli():
     '''Main function when invoked directly from the command line.'''
 
@@ -3237,6 +3279,9 @@ def main_cli():
         optparser.print_help()
         sys.stderr.write("\noutput_dir does not exist: %s\n" % options.output_dir)
         sys.exit(1)
+
+    if options.validate:
+        sys.exit(run_with_validation(sys.argv[1:], options, filenames))
 
     # Load .pb files into memory and compile any .proto files.
     include_path = ['-I%s' % p for p in options.options_path]
