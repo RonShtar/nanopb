@@ -241,19 +241,51 @@ end
 -- Wire format decoding
 -- ---------------------------------------------------------------------------
 
--- Returns UInt64 value and byte length, or nil if truncated / too long.
-local function read_varint(tvb, offset, limit)
-    local value = UInt64(0)
-    local shift = 0
-    local pos = offset
+local TWO31 = 2147483648
+local TWO32 = 4294967296
+
+-- The bytes of the packet being dissected, read once per packet: a
+-- tvb(pos, 1) range per byte was the dissector's main cost.
+local packet_tvb, packet_bytes = nil, ""
+
+local function set_packet(tvb)
+    packet_tvb = tvb
+    packet_bytes = tvb:len() > 0 and tvb():raw() or ""
+end
+
+local POW2 = {}
+for i = 0, 70 do POW2[i] = 2 ^ i end
+
+-- Varint at pos as 32-bit halves (lo, hi) and the next position.
+local function varint_halves(tvb, pos, limit)
+    local bytes = tvb == packet_tvb and packet_bytes or nil
+    if pos >= limit then return nil end
+    local b = bytes and bytes:byte(pos + 1) or tvb(pos, 1):uint()
+    if b < 128 then return b, 0, pos + 1 end  -- most keys and lengths
+    local lo, hi, shift = 0, 0, 0
     while pos < limit and shift < 70 do
-        local b = tvb(pos, 1):uint()
-        value = value:bor(UInt64(b % 128):lshift(shift))
+        b = bytes and bytes:byte(pos + 1) or tvb(pos, 1):uint()
         pos = pos + 1
-        if b < 128 then return value, pos - offset end
+        local v = b % 128
+        if shift < 28 then
+            lo = lo + v * POW2[shift]
+        elseif shift == 28 then
+            lo = lo + (v % 16) * POW2[28]
+            hi = hi + math.floor(v / 16)
+        else
+            hi = hi + v * POW2[shift - 32]
+        end
+        if b < 128 then return lo, hi % TWO32, pos end
         shift = shift + 7
     end
     return nil
+end
+
+-- Returns UInt64 value and byte length, or nil if truncated / too long.
+local function read_varint(tvb, offset, limit)
+    local lo, hi, pos = varint_halves(tvb, offset, limit)
+    if not lo then return nil end
+    return UInt64(lo, hi), pos - offset
 end
 
 local function to_int64(u)
@@ -537,31 +569,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local TIMESTAMP = "google.protobuf.Timestamp"
-local TWO31 = 2147483648
-local TWO32 = 4294967296
 local SIGNED64 = { [T.INT64] = true, [T.SINT64] = true, [T.SFIXED64] = true }
 local UNSIGNED64 = { [T.UINT64] = true, [T.FIXED64] = true }
-
--- Varint at pos as 32-bit halves (lo, hi) and the next position.
-local function varint_halves(tvb, pos, limit)
-    local lo, hi, shift = 0, 0, 0
-    while pos < limit and shift < 70 do
-        local b = tvb(pos, 1):uint()
-        pos = pos + 1
-        local v = b % 128
-        if shift < 28 then
-            lo = lo + v * 2 ^ shift
-        elseif shift == 28 then
-            lo = lo + (v % 16) * 2 ^ 28
-            hi = hi + math.floor(v / 16)
-        else
-            hi = hi + v * 2 ^ (shift - 32)
-        end
-        if b < 128 then return lo, hi % TWO32, pos end
-        shift = shift + 7
-    end
-    return nil
-end
 
 local function ukey(lo, hi) return string.format("%08x%08x", hi, lo) end
 local function skey(lo, hi) return string.format("%08x%08x", (hi + TWO31) % TWO32, lo) end
@@ -1062,10 +1071,17 @@ local function check_value(rule, fd, value)
     return nil
 end
 
+-- The schema does not change while dissecting, so each field table is
+-- sorted once.
+local sorted_cache = setmetatable({}, { __mode = "k" })
+
 local function sorted_numbers(t)
-    local numbers = {}
+    local numbers = sorted_cache[t]
+    if numbers then return numbers end
+    numbers = {}
     for n in pairs(t) do numbers[#numbers + 1] = n end
     table.sort(numbers)
+    sorted_cache[t] = numbers
     return numbers
 end
 
@@ -1312,6 +1328,7 @@ end
 local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local length = tvb:len()
     if length == 0 then return 0 end
+    set_packet(tvb)
     local msg_name = forced_root or root_message(pinfo, tvb)
     if not protocol and msg_name == ANY then protocol = primary_protocol() end
     pinfo.cols.protocol = protocol and protocol.column or "NANOPB"
@@ -1349,6 +1366,8 @@ end
 -- google.protobuf.Any of a type known to the schema.
 local function heuristic(tvb, pinfo, tree)
     if not nanopb.prefs.heuristic or not schema_ok then return false end
+    if tvb:len() == 0 then return false end
+    set_packet(tvb)
     if not is_known_any(tvb) then return false end
     dissect(tvb, pinfo, tree, ANY)
     return true

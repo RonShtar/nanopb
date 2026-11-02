@@ -287,6 +287,7 @@ right away.
 | A packet is claimed by another protocol (e.g. KNXnet/IP) | The heuristics of other dissectors run on unmapped ports. Map the port with Decode As. |
 | `pb_callback_t` in the generated header | A string, bytes or repeated field has no `max_size` / `max_count` in its `.options` file. |
 | Wireshark is busy while generating | Generation runs in Python while Wireshark waits, about a second per protocol. Units are generated in parallel. |
+| Ports differ between machines or test setups | Set the environment variable `NANOPB_WS_PORTS` to another port map file (same format as `nanopb/ports.luadata`) before starting Wireshark or tshark; it replaces the installed one. |
 
 ## Testing the tools
 

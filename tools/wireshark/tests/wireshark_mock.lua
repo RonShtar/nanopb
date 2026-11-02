@@ -12,7 +12,11 @@ local function u64(v) return setmetatable({ v = v }, U64) end
 local function i64(v) return setmetatable({ v = v }, I64) end
 local function raw(x) if type(x) == "table" then return x.v end return math.tointeger(x) end
 
-UInt64 = setmetatable({}, { __call = function(_, n) return u64(math.tointeger(n or 0)) end })
+-- As in Wireshark, UInt64(low, high) builds the value from two 32-bit halves.
+UInt64 = setmetatable({}, { __call = function(_, n, high)
+    if high then return u64((math.tointeger(high) << 32) | math.tointeger(n)) end
+    return u64(math.tointeger(n or 0))
+end })
 Int64 = setmetatable({}, { __call = function(_, n) return i64(math.tointeger(n or 0)) end })
 function Int64.fromhex(h) return i64(math.tointeger(tonumber(h, 16) or 0) or 0) end
 function UInt64.fromhex(h) return u64(math.tointeger(tonumber(h, 16) or 0) or 0) end
