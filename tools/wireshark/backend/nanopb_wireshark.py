@@ -1836,6 +1836,57 @@ def cmd_units(args):
     return {'protos_root': os.path.abspath(args.protos_root), 'units': result}
 
 
+def cmd_pick_units(args):
+    """Tick boxes in a scrolling list; Wireshark's own windows cannot show them."""
+
+    if os.environ.get('NANOPB_WS_NO_TK'):
+        raise BackendError('tick box window disabled')
+    try:
+        import tkinter
+        from tkinter import ttk
+    except ImportError:
+        raise BackendError('tkinter is not available')
+    off = set(n for n in args.off.split(',') if n)
+    root = tkinter.Tk()
+    root.title(args.title)
+    root.geometry('420x480')
+    root.attributes('-topmost', True)
+    chosen = []
+
+    buttons = ttk.Frame(root)
+    buttons.pack(side='bottom', fill='x', padx=6, pady=6)
+    canvas = tkinter.Canvas(root, highlightthickness=0)
+    bar = ttk.Scrollbar(root, orient='vertical', command=canvas.yview)
+    canvas.configure(yscrollcommand=bar.set)
+    bar.pack(side='right', fill='y')
+    canvas.pack(side='left', fill='both', expand=True)
+    inner = ttk.Frame(canvas)
+    canvas.create_window((0, 0), window=inner, anchor='nw')
+    inner.bind('<Configure>', lambda _: canvas.configure(scrollregion=canvas.bbox('all')))
+    canvas.bind_all('<MouseWheel>', lambda e: canvas.yview_scroll(-e.delta // 120, 'units'))
+
+    boxes = [(n, tkinter.BooleanVar(value=n not in off)) for n in args.names.split(',')]
+    for name, var in boxes:
+        ttk.Checkbutton(inner, text=name, variable=var).pack(anchor='w', padx=8, pady=2)
+
+    def set_all(value):
+        for _, var in boxes:
+            var.set(value)
+
+    def generate():
+        chosen.extend(n for n, var in boxes if var.get())
+        if chosen:
+            root.destroy()
+
+    for label, command, side in (('Select all', lambda: set_all(True), 'left'),
+                                 ('Select none', lambda: set_all(False), 'left'),
+                                 ('Cancel', root.destroy, 'right'),
+                                 ('Generate', generate, 'right')):
+        ttk.Button(buttons, text=label, command=command).pack(side=side, padx=2)
+    root.mainloop()
+    return {'units': chosen}
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1922,6 +1973,12 @@ def build_parser():
                    help='also install / refresh the dissector and schema here (default: personal plugins folder)')
     p.add_argument('--no-install', action='store_true', help='do not touch the Wireshark plugins folder')
     p.set_defaults(func=cmd_gen_packets)
+
+    p = sub.add_parser('pick-units', help='choose units with tick boxes; prints the chosen ones')
+    p.add_argument('--title', default='Choose protocols')
+    p.add_argument('--names', required=True, help='comma-separated units')
+    p.add_argument('--off', default='', help='comma-separated units that start unticked')
+    p.set_defaults(func=cmd_pick_units)
 
     p = sub.add_parser('install-studio', help='install nanopb_studio.lua into a plugins dir')
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')

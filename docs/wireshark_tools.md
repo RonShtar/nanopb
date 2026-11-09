@@ -174,8 +174,9 @@ entry is called `NANOPB_IP` instead.
 
 ### Step 3: generate test packets
 
-The protocol list is numbered and scrolls: press **Choose...** and enter
-numbers or names, e.g. `1,3,5-8` or `gps,motor`.
+Generate C and Generate test packets open a scrolling list of tick boxes.
+Wireshark waits until you press Generate or Cancel there. Without tkinter, you
+get a numbered list instead: press **Choose...** and enter numbers or names.
 
 1. **Tools > nanopb > Generate test packets (passed + dropped)**.
 2. Enter the input directory and an output directory (empty means

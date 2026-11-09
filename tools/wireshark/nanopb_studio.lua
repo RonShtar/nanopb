@@ -364,6 +364,18 @@ local function parse_selection(text, names)
     return picked
 end
 
+-- The units ticked in the tick box window: {} if cancelled, nil if it cannot open.
+local function tick_units(title, names, selected)
+    local off = {}
+    for _, name in ipairs(names) do
+        if not selected[name] then off[#off + 1] = name end
+    end
+    local started, ok, text = pcall(run_backend, { "pick-units", "--title", title,
+        "--names", table.concat(names, ","), "--off", table.concat(off, ",") })
+    if not (started and ok) then return nil end
+    return (parse_unit_names(text))
+end
+
 local function pick_units(title, generate)
     local names, merged = scan_units(config.protos_root)
     if names == nil and merged then
@@ -387,6 +399,16 @@ local function pick_units(title, generate)
     -- generating both would link the same code twice.
     local selected = {}
     for _, name in ipairs(names) do selected[name] = merged[name] == nil end
+
+    local ticked = tick_units(title, names, selected)
+    if ticked then
+        if #ticked > 0 then
+            local done, out, buttons, after = generate(table.concat(ticked, ","))
+            show(title, done, out, output_dir(), buttons)
+            if done and after then after() end
+        end
+        return
+    end
 
     local win = TextWindow.new(title .. ": choose units")
     local function render(note)

@@ -12,6 +12,9 @@ TOOL_DIR = os.path.dirname(TESTS_DIR)
 REPO_ROOT = os.path.dirname(os.path.dirname(TOOL_DIR))
 FIXTURES = os.path.join(TESTS_DIR, 'fixtures', 'protos')
 
+# The tests use the text list; the tick box window needs someone to click it.
+os.environ['NANOPB_WS_NO_TK'] = '1'
+
 sys.path.insert(0, os.path.join(TOOL_DIR, 'backend'))
 import nanopb_wireshark  # noqa: E402
 
