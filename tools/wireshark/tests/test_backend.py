@@ -633,6 +633,21 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result['shared_names'], ['same.Msg'])
         self.assertIn('same.Msg', result['summary'])
 
+    @unittest.skipUnless(sys.platform == 'win32', 'the plugin launcher only uses PATH on Windows')
+    def test_gen_c_ignores_a_different_python_on_path(self):
+        fake = os.path.join(self.tmp, 'fake')
+        os.makedirs(fake)
+        with open(os.path.join(fake, 'python.bat'), 'w') as handle:
+            handle.write('@echo Could not import protobuf 1>&2\n@exit /b 1\n')
+        path = os.environ['PATH']
+        os.environ['PATH'] = fake + os.pathsep + path
+        try:
+            status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'telemetry',
+                                         '--out', os.path.join(self.tmp, 'out'))
+        finally:
+            os.environ['PATH'] = path
+        self.assertEqual(status, 0, err)
+
     def test_errors(self):
         status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'nope', '--out', self.tmp)
         self.assertEqual(status, 1)

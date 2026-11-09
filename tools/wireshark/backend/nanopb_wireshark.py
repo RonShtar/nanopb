@@ -270,6 +270,15 @@ def unit_entrypoints(unit, port_map):
     return [m for m in own if m not in referenced], 'auto'
 
 
+def generator_env():
+    """Environment for protoc's plugins: on Windows they start `python` from PATH,
+    which must be this Python, the one with protobuf installed."""
+
+    env = dict(os.environ)
+    env['PATH'] = os.path.dirname(sys.executable) + os.pathsep + env.get('PATH', '')
+    return env
+
+
 def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None):
     protoc = os.path.join(nanopb_root, 'generator', 'protoc')
     common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
@@ -286,7 +295,7 @@ def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None
         cmd += ['--nanopb-validate_opt=' + o for o in validate_opts] + ['--nanopb-validate_out=' + outdir]
     cmd += unit.generated_files()
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                          universal_newlines=True, cwd=outdir)
+                          universal_newlines=True, cwd=outdir, env=generator_env())
     if proc.returncode != 0:
         raise BackendError('generator failed for unit %s:\n%s' % (unit.name, proc.stdout))
     return proc.stdout
