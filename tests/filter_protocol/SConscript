@@ -18,6 +18,9 @@ test_env.Prepend(CPPPATH = ['.'])
 test_env.Object("pb_validate.o", "$NANOPB/pb_validate.c")
 
 pb_files = test_env.NanopbProto(["protocol", "protocol.options"])
+# --protocol-filter reads the Any max_size from here, so it must be in the
+# build directory before protocol.proto is generated.
+test_env.Depends(pb_files, "google/protobuf/any.options")
 for name in ("protocol_validate.c", "protocol_validate.h", "demo_filter.c", "demo_filter.h"):
     test_env.SideEffect(name, pb_files)
 
