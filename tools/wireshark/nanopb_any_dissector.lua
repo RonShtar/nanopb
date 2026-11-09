@@ -1383,6 +1383,8 @@ local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local msg_name, stale = forced_root, nil
     if not msg_name then msg_name, stale = root_message(pinfo, tvb) end
     if not protocol and msg_name == ANY then protocol = primary_protocol() or packet_owner(tvb, length) end
+    -- A protocol with one root message can carry it directly, with no Any around it.
+    if protocol and msg_name == ANY and protocol.root and not is_known_any(tvb) then msg_name = protocol.root end
     use_view(protocol and protocol.view or shared_view)
     -- A message on a port map entry is decoded as itself, but is still shown
     -- under the protocol it belongs to.
@@ -1411,7 +1413,8 @@ local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local shown = msg_name or "raw"
     if protocol then
         -- Show the message the type_url selects rather than "google.protobuf.Any".
-        local _, type_name = parse_any(tvb, 0, length)
+        local type_name = msg_name
+        if msg_name == ANY then _, type_name = parse_any(tvb, 0, length) end
         shown = protocol.name .. " " .. (type_name or "?")
     end
     pinfo.cols.info:set(string.format(shown_protocol and "%s (%d bytes)%s" or "nanopb %s (%d bytes)%s",
@@ -1457,6 +1460,7 @@ for _, name in ipairs(protocol_names) do
     local set = {}
     for _, msg in ipairs(schema.protocols[name]) do set[msg] = true end
     local protocol = { name = name, messages = set, proto = proto, column = ident:upper(),
+                       root = (schema.roots or {})[name],
                        view = protocol_views[name] }
     function proto.dissector(tvb, pinfo, tree)
         return dissect(tvb, pinfo, tree, ANY, protocol)

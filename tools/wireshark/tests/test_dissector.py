@@ -391,7 +391,6 @@ class ProtocolDecodeTests(LuaTestCase):
                 _, manifest = self.install(root, plugins)
                 self.assertTrue(manifest['packets'])
                 for entry in manifest['packets']:
-                    self.assertTrue(entry['any_wrapped'])
                     text, pinfo = self.dissect(entry['port'], bytes.fromhex(entry['hex']))
                     self.assertIn('Validation: %s' % entry['expect'].upper(), text, '%s\n%s' % (entry, text))
                     self.assertIn(entry['message'], pinfo.cols.info.value)
@@ -449,6 +448,48 @@ class ProtocolDecodeTests(LuaTestCase):
             text = self.mock.render(tree)
             self.assertIn('Root message not in schema: ' + stale, text)
             self.assertIn('demo.payloads.Ping', text)
+
+    def write_protos(self, files):
+        root = os.path.join(self.tmp, 'one_message')
+        for path, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(root, path)), exist_ok=True)
+            with open(os.path.join(root, path), 'w') as handle:
+                handle.write(text)
+        return root
+
+    def test_one_message_protocol_needs_no_any(self):
+        rules = 'import "validate/validate.proto";\nmessage Header { uint32 seq = 1; }\n'
+        root = self.write_protos({
+            'radio/radio.proto': 'syntax = "proto3";\npackage radio;\n' + rules +
+                                 'message Frame { Header h = 1; uint32 ch = 2 [(validate.rules).uint32.lte = 16]; }\n'})
+        os.makedirs(os.path.join(root, 'radio', 'validate'))
+        shutil.copy(os.path.join(REPO_ROOT, 'generator', 'proto', 'validate.proto'),
+                    os.path.join(root, 'radio', 'validate'))
+        _, manifest = self.install(root)
+        self.assertEqual(set(e['message'] for e in manifest['packets']), {'radio.Frame'})
+        self.assertEqual(set(e['expect'] for e in manifest['packets']), {'passed', 'dropped'})
+        for entry in manifest['packets']:
+            self.assertFalse(entry['any_wrapped'])
+            text, pinfo = self.dissect(entry['port'], bytes.fromhex(entry['hex']))
+            self.assertIn('Validation: ' + entry['expect'].upper(), text)
+            self.assertEqual(pinfo.cols.protocol, 'RADIO')
+            self.assertIn('radio radio.Frame', pinfo.cols.info.value)
+
+    def test_one_root_protocol_takes_plain_and_any_packets(self):
+        root = self.write_protos({
+            'only/only.proto': 'syntax = "proto3";\npackage only;\nimport "google/protobuf/any.proto";\n'
+                               'message Only { uint32 v = 1; google.protobuf.Any extra = 2; }\n'})
+        status, _, err = run_backend('install-dissector', '--protos-root', root, '--plugins-dir', self.tmp,
+                                     '--port-map', '')
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        for data, shown in ((f_varint(1, 7), 'v: 7'), (any_of('only.Only', f_varint(1, 9)), 'v: 9')):
+            tree = self.mock.tree()
+            self.mock.protos['only'].dissector(self.mock.tvb(data), self.mock.pinfo(PORT_TYPE['udp'], 6000), tree)
+            text = self.mock.render(tree)
+            self.assertIn('only.Only', text)
+            self.assertIn(shown, text)
+            self.assertIn('Validation: PASSED', text)
 
     def test_same_message_name_in_two_protocols(self):
         root = os.path.join(self.tmp, 'same_names')

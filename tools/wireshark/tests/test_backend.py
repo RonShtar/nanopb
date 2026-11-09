@@ -281,7 +281,8 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(manifest['protocol_ports'], ['udp:16000=envelope', 'udp:16001=telemetry'])
         for entry in manifest['packets']:
             port = {'envelope': 16000, 'telemetry': 16001}[entry['unit']]
-            self.assertEqual((entry['port'], entry['any_wrapped']), (port, True))
+            # telemetry never uses Any and has one root message: it is sent as it is.
+            self.assertEqual((entry['port'], entry['any_wrapped']), (port, entry['unit'] != 'telemetry'))
             header, hexfile = entry['files']
             self.assertEqual(os.path.dirname(header), os.path.join(self.tmp, 'packets', entry['unit'], 'packets'))
             self.assertTrue(os.path.basename(header).endswith('_%s.h' % entry['expect']), header)

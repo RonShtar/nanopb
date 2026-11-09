@@ -55,6 +55,13 @@ A protocol's packet is a `google.protobuf.Any`. Its `type_url` (for example
 it works as the opcode. Any `Any` fields inside the message are resolved the
 same way, at most 4 levels deep. Oneofs are ordinary fields.
 
+A protocol with one root message (one that no other message uses) doesn't need
+an `Any`: a packet that isn't an `Any` of a known message is decoded as that
+message. If the folder never uses `Any`, generated test packets are that plain
+message, matching its `<package>_<Message>_filter_udp`. A folder with several
+unrelated root messages and no `Any` can't tell them apart from the bytes: map
+each port to its message with the port map.
+
 ## Installation
 
 ### 1. Check the requirements
