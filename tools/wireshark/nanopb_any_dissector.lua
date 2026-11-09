@@ -119,11 +119,11 @@ local function enum_valstring(type_name)
     return copy
 end
 
-local typed_fields = {}  -- [msg_name][number] = ProtoField
-for msg_name, msg in pairs(schema.messages) do
-    typed_fields[msg_name] = {}
+local function add_typed_fields(typed, messages, prefix)
+  for msg_name, msg in pairs(messages) do
+    typed[msg_name] = {}
     for number, fd in pairs(msg.fields) do
-        local abbr = "nanopb." .. msg_name .. "." .. fd.name
+        local abbr = prefix .. msg_name .. "." .. fd.name
         local label = fd.name
         local t = fd.type
         local pf
@@ -149,12 +149,41 @@ for msg_name, msg in pairs(schema.messages) do
             pf = ProtoField.bytes(abbr, label)
         end
         if pf then
-            typed_fields[msg_name][number] = pf
+            typed[msg_name][number] = pf
             fields[#fields + 1] = pf
         end
     end
+  end
 end
+
+local shared_typed_fields = {}  -- [msg_name][number] = ProtoField
+add_typed_fields(shared_typed_fields, schema.messages, "nanopb.")
+local typed_fields = shared_typed_fields
+
+-- A message name defined differently by several protocols: each of those
+-- protocols sees its own definitions on top of the shared ones. dissect()
+-- selects the view of the packet's protocol.
+local shared_view = { messages = schema.messages, enums = schema.enums, typed = shared_typed_fields }
+local function scoped_view(name)
+    local own = schema.scoped and schema.scoped[name]
+    if not own then return shared_view end
+    local typed = setmetatable({}, { __index = shared_typed_fields })
+    local saved_enums = schema.enums
+    schema.enums = setmetatable(own.enums or {}, { __index = saved_enums })
+    add_typed_fields(typed, own.messages or {}, "nanopb.scoped." .. name:gsub("[^%w_]", "_") .. ".")
+    local view = { messages = setmetatable(own.messages or {}, { __index = shared_view.messages }),
+                   enums = schema.enums, typed = typed }
+    schema.enums = saved_enums
+    return view
+end
+
+local protocol_views = {}
+for name in pairs(schema.protocols or {}) do protocol_views[name] = scoped_view(name) end
 nanopb.fields = fields
+
+local function use_view(view)
+    schema.messages, schema.enums, typed_fields = view.messages, view.enums, view.typed
+end
 
 -- ---------------------------------------------------------------------------
 -- Preferences and port registration
@@ -1312,29 +1341,44 @@ end
 -- Dissector entry point
 -- ---------------------------------------------------------------------------
 
+-- Returns the root message and, if a saved preference names a message that
+-- is not in the loaded protos, that name. The preferences outlive the protos
+-- they were written for, so such a name must not stop the packet decoding.
 local function root_message(pinfo, tvb)
     local transport = (pinfo.port_type == 3 and "udp") or (pinfo.port_type == 2 and "tcp") or nil
+    local stale
     if transport then
         local map = port_map[transport]
         local msg = map[pinfo.match_uint] or map[pinfo.dst_port] or map[pinfo.src_port]
-        if msg then return msg end
+        if msg and schema.messages[msg] then return msg end
+        stale = msg
     end
-    if nanopb.prefs.default_message ~= "" then return nanopb.prefs.default_message end
-    if primary_protocol() then return ANY end
-    if nanopb.prefs.any_fallback and looks_like_any(tvb, 0, tvb:len()) then return ANY end
-    return nil
+    local default_message = nanopb.prefs.default_message
+    if default_message ~= "" then
+        if schema.messages[default_message] then return default_message end
+        stale = stale or default_message
+    end
+    if primary_protocol() then return ANY, stale end
+    if nanopb.prefs.any_fallback and looks_like_any(tvb, 0, tvb:len()) then return ANY, stale end
+    return nil, stale
 end
 
 local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local length = tvb:len()
     if length == 0 then return 0 end
     set_packet(tvb)
-    local msg_name = forced_root or root_message(pinfo, tvb)
+    local msg_name, stale = forced_root, nil
+    if not msg_name then msg_name, stale = root_message(pinfo, tvb) end
     if not protocol and msg_name == ANY then protocol = primary_protocol() end
+    use_view(protocol and protocol.view or shared_view)
     pinfo.cols.protocol = protocol and protocol.column or "NANOPB"
     local root = tree:add(protocol and protocol.proto or nanopb, tvb(),
         protocol and ("nanopb " .. protocol.name) or "nanopb Protobuf")
     if not schema_ok then root:add_proto_expert_info(e_no_schema) end
+    if stale then
+        root:add_proto_expert_info(e_unknown_type, "Root message not in schema: " .. stale
+            .. " (remove it from Edit > Preferences > Protocols > NANOPB: Port map, Default message)")
+    end
 
     if msg_name and not schema.messages[msg_name] then
         root:add_proto_expert_info(e_unknown_type, "Root message not in schema: " .. msg_name)
@@ -1392,7 +1436,8 @@ for _, name in ipairs(protocol_names) do
     end
     local set = {}
     for _, msg in ipairs(schema.protocols[name]) do set[msg] = true end
-    local protocol = { name = name, messages = set, proto = proto, column = ident:upper() }
+    local protocol = { name = name, messages = set, proto = proto, column = ident:upper(),
+                       view = protocol_views[name] }
     function proto.dissector(tvb, pinfo, tree)
         return dissect(tvb, pinfo, tree, ANY, protocol)
     end

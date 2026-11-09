@@ -532,6 +532,107 @@ class BackendTests(unittest.TestCase):
         self.assertIn('port = 5000, message = "demo.envelope.Envelope"', ports)
         self.assertEqual(result['ports'], ['udp:5000=demo.envelope.Envelope', 'tcp:7000=demo.payloads.Ping'])
 
+    def vendored_layout(self):
+        """protocol1/protocolvalid/ron.proto with its imports vendored in subfolders."""
+
+        unit = os.path.join(self.tmp, 'protocol1', 'protocolvalid')
+        generator_protos = os.path.join(os.path.dirname(os.path.dirname(TOOL_DIR)), 'generator', 'proto')
+        for name in ('validate', 'nanopb'):
+            os.makedirs(os.path.join(unit, name))
+            shutil.copy(os.path.join(generator_protos, name + '.proto'), os.path.join(unit, name))
+        # A flat copy of the google protos: not importable, and not a unit either.
+        os.makedirs(os.path.join(unit, 'google'))
+        with open(os.path.join(unit, 'google', 'timestamp.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage flat;\nmessage Timestamp { int64 seconds = 1; }\n')
+        with open(os.path.join(unit, 'ron.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage ron;\n'
+                         'import "google/protobuf/timestamp.proto";\n'
+                         'import "validate/validate.proto";\n'
+                         'import "nanopb/nanopb.proto";\n'
+                         'message Ron {\n'
+                         '  google.protobuf.Timestamp ts = 1;\n'
+                         '  uint32 a = 2 [(validate.rules).uint32.lte = 9];\n'
+                         '  string name = 3 [(nanopb).max_size = 8];\n'
+                         '}\n')
+        return unit
+
+    def assert_only_ron_generated(self, status, result, err):
+        self.assertEqual(status, 0, err)
+        self.assertEqual([r['unit'] for r in result['units']], ['protocolvalid'])
+        self.assertEqual(result['units'][0]['filters'], ['ron_Ron_filter_udp'])
+        out = os.path.join(self.tmp, 'out', 'protocolvalid')
+        with open(os.path.join(out, 'protocolvalid.pb.h')) as handle:
+            header = handle.read()
+        self.assertIn('ron.pb.h', header)
+        self.assertNotIn('validate/validate.pb.h', header)
+        self.assertNotIn('nanopb/nanopb.pb.h', header)
+        self.assertNotIn('validate_RepeatedRules', header)
+
+    def test_gen_c_folder_of_units_with_vendored_imports(self):
+        unit = self.vendored_layout()
+        self.assert_only_ron_generated(*run_backend('gen-c', '--protos-root', os.path.dirname(unit),
+                                                    '--out', os.path.join(self.tmp, 'out')))
+
+    def test_gen_c_from_the_unit_folder_itself(self):
+        unit = self.vendored_layout()
+        self.assert_only_ron_generated(*run_backend('gen-c', '--protos-root', unit,
+                                                    '--out', os.path.join(self.tmp, 'out')))
+        status, result, err = run_backend('units', '--protos-root', unit, '--names-only')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'], ['protocolvalid'])
+
+    def test_loose_shared_proto_does_not_hide_unit_folders(self):
+        with open(os.path.join(self.tmp, 'common.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage common;\nmessage C { uint32 a = 1; }\n')
+        os.makedirs(os.path.join(self.tmp, 'app'))
+        with open(os.path.join(self.tmp, 'app', 'app.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage app;\nimport "common.proto";\nmessage A { common.C c = 1; }\n')
+        status, result, err = run_backend('units', '--protos-root', self.tmp, '--names-only')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'], ['app'])
+
+    def test_no_units_says_what_to_enter(self):
+        status, _, err = run_backend('gen-c', '--protos-root', self.tmp, '--out', os.path.join(self.tmp, 'out'))
+        self.assertEqual(status, 1)
+        self.assertIn('enter the folder that holds your .proto files', err)
+
+    def test_stale_port_map_does_not_block_loading(self):
+        unit = self.vendored_layout()
+        plugins = os.path.join(self.tmp, 'plugins')
+        stale = 'udp:5000=proto.messages.BaseMessage'
+        status, result, err = run_backend('install-dissector', '--protos-root', unit, '--plugins-dir', plugins,
+                                          '--port-map', stale + ',udp:5001=ron.Ron', '--drop-stale-ports')
+        self.assertEqual(status, 0, err)
+        self.assertTrue(result['ports_pruned'])
+        self.assertEqual(result['port_map'], 'udp:5001=ron.Ron')
+        self.assertIn('proto.messages.BaseMessage', result['summary'])
+        with open(os.path.join(plugins, 'nanopb', 'ports.luadata')) as handle:
+            self.assertNotIn('BaseMessage', handle.read())
+
+    def test_install_studio_once_sets_up_every_feature(self):
+        unit = self.vendored_layout()
+        root = os.path.dirname(unit)
+        plugins = os.path.join(self.tmp, 'plugins')
+        status, result, err = run_backend('install-studio', '--plugins-dir', plugins, '--protos-root', root)
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['protocols'], ['PROTOCOLVALID'])
+        self.assertTrue(os.path.isfile(os.path.join(plugins, 'nanopb', 'schema.luadata')))
+        from nanopb_wireshark import read_lua_config
+        config = read_lua_config(os.path.join(plugins, 'nanopb', 'studio_config.luadata'))
+        self.assertEqual(config['protos_root'], root)
+
+    def test_same_message_name_in_two_protocols(self):
+        root = os.path.join(self.tmp, 'protos')
+        for name, body in (('a', 'uint32 x = 1;'), ('b', 'string y = 1; uint32 z = 2;')):
+            os.makedirs(os.path.join(root, name))
+            with open(os.path.join(root, name, name + '.proto'), 'w') as handle:
+                handle.write('syntax = "proto3";\npackage same;\nmessage Msg { %s }\n' % body)
+        status, result, err = run_backend('install-dissector', '--protos-root', root,
+                                          '--plugins-dir', os.path.join(self.tmp, 'plugins'), '--port-map', '')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['shared_names'], ['same.Msg'])
+        self.assertIn('same.Msg', result['summary'])
+
     def test_errors(self):
         status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--unit', 'nope', '--out', self.tmp)
         self.assertEqual(status, 1)

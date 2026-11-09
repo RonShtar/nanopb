@@ -85,6 +85,14 @@ About Wireshark > Folders): `%APPDATA%\Wireshark\plugins` on Windows,
 | `nanopb/project/` | a private copy of the generator, the runtime and the backend, so the plugins never depend on where this checkout is |
 | `nanopb/studio_config.luadata` | the Python to use, and your last directories and port map |
 
+**To set up everything in one step**, also give the directory that has one
+subfolder per protocol:
+
+    python tools/wireshark/backend/nanopb_wireshark.py install-studio --protos-root <directory>
+
+The next time Wireshark starts, Decode As lists your protocols and every
+Tools > nanopb dialog already shows that directory, so you only press OK.
+
 The copy records the Python that ran `install-studio`. To use a different
 folder, add `--plugins-dir <folder>`. For tool development, `--dev` runs this
 checkout directly instead of a copy.
@@ -281,6 +289,9 @@ right away.
 |---------|---------------|
 | No Tools > nanopb menu | The files aren't in the *Personal Lua Plugins* folder, or Lua failed to load them; look at Help > About Wireshark > Plugins. |
 | "Backend did not run" | The Python in `nanopb/studio_config.luadata` is wrong, or is the Windows Store stub. Run `install-studio` again with the right Python. |
+| `google/protobuf/timestamp.proto does not exist` | This comes from Wireshark's own Edit > Preferences > Protocols > ProtoBuf > Protobuf search paths, which the nanopb tools don't use. Remove your entry there and use Tools > nanopb > Load protos directory. If you keep the entry, the file must be at `<search path>/google/protobuf/timestamp.proto`. |
+| `Root message not in schema: some.Message` | Edit > Preferences > Protocols > NANOPB > Port map or Default message still names a message of protos you no longer load. Clear it there. The packet still decodes with your Protocol preference or as an Any. |
+| Two protocols define the same `package.Message` differently | Each protocol keeps its own definition when you choose it with Decode As or the Protocol preference. Plain NANOPB (auto-detected packets and the port map) uses the first one. Generate C keeps them in separate files, but linking two of them into one program clashes. |
 | `protoc failed` | Run the same backend subcommand in a terminal to see the whole error; check that `protobuf` and `grpcio-tools` are installed for that Python. |
 | My protocol isn't in Decode As | Run **Load protos directory into Wireshark** again, then press Ctrl+Shift+L. The folder must contain at least one message of its own. |
 | A packet has no Validation subtree | It wasn't decoded as nanopb: another dissector claimed it, or nothing maps its port. Use Decode As, the Protocol preference or the port map. |

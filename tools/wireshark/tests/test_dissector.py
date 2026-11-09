@@ -434,6 +434,46 @@ class ProtocolDecodeTests(LuaTestCase):
         self.assertIn('Validation: PASSED', self.mock.render(tree))
         self.assertIn('envelope demo.payloads.Ping', pinfo.cols.info.value)
 
+    def test_stale_preference_does_not_stop_decoding(self):
+        self.install(FIXTURES)
+        nanopb = self.mock.protos['nanopb']
+        stale = 'proto.messages.BaseMessage'
+        ping = any_of('demo.payloads.Ping', b'')
+        for pref, value in (('port_map', 'udp:6000=' + stale), ('default_message', stale)):
+            nanopb.pref_values['port_map'] = ''
+            nanopb.pref_values['default_message'] = ''
+            nanopb.pref_values[pref] = value
+            nanopb.prefs_changed()
+            tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+            nanopb.dissector(self.mock.tvb(ping), pinfo, tree)
+            text = self.mock.render(tree)
+            self.assertIn('Root message not in schema: ' + stale, text)
+            self.assertIn('demo.payloads.Ping', text)
+
+    def test_same_message_name_in_two_protocols(self):
+        root = os.path.join(self.tmp, 'same_names')
+        for name, body in (('a', 'uint32 x = 1;'), ('b', 'string y = 1;')):
+            os.makedirs(os.path.join(root, name))
+            with open(os.path.join(root, name, name + '.proto'), 'w') as handle:
+                handle.write('syntax = "proto3";\npackage same;\nmessage Msg { %s }\n' % body)
+        status, _, err = run_backend('install-dissector', '--protos-root', root, '--plugins-dir', self.tmp,
+                                     '--port-map', '')
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        results = {}
+        for name, payload in (('a', f_varint(1, 7)), ('b', f_bytes(1, b'hello'))):
+            tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+            data = any_of('same.Msg', payload)
+            self.assertEqual(self.mock.protos[name].dissector(self.mock.tvb(data), pinfo, tree), len(data))
+            results[name] = self.mock.render(tree)
+        self.assertIn('x', results['a'])
+        self.assertNotIn('y:', results['a'])
+        self.assertIn('hello', results['b'])
+        # Packets of the first protocol still decode after one of the second.
+        tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+        self.mock.protos['a'].dissector(self.mock.tvb(any_of('same.Msg', f_varint(1, 7))), pinfo, tree)
+        self.assertEqual(self.mock.render(tree), results['a'])
+
     def test_protocol_name_taken_gets_prefix(self):
         self.lua.execute('Proto("envelope", "someone else")')
         self.install(FIXTURES)
@@ -613,6 +653,37 @@ class StudioTests(LuaTestCase):
         before = len(calls)
         picker.buttons['Generate']()
         self.assertEqual([calls[i] for i in range(before + 1, len(calls) + 1)], ['open|%s|' % pcap])
+
+    def test_unit_folder_with_vendored_imports_as_input(self):
+        unit = os.path.join(self.tmp, 'protos', 'protocolvalid')
+        for name in ('validate', 'nanopb'):
+            os.makedirs(os.path.join(unit, name))
+            shutil.copy(os.path.join(REPO_ROOT, 'generator', 'proto', name + '.proto'), os.path.join(unit, name))
+        with open(os.path.join(unit, 'ron.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage ron;\nimport "validate/validate.proto";\n'
+                         'message Ron { uint32 a = 1 [(validate.rules).uint32.lte = 9]; }\n')
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
+                             input_dir=unit)
+        self.assertIn('[x] protocolvalid', picker.text)
+        self.assertNotIn('nanopb\n', picker.text.split('Output:')[1].split('\n', 1)[1])
+        picker.buttons['Generate']()
+        self.assertTrue(self.last_window().text.startswith('OK'), self.last_window().text)
+        self.assertEqual(os.listdir(self.out), ['protocolvalid'])
+
+    def test_load_protos_clears_a_stale_saved_port_map(self):
+        config_path = os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')
+        with open(config_path) as handle:
+            text = handle.read()
+        with open(config_path, 'w') as handle:
+            handle.write(text.replace(' }\n', ', port_map = "udp:5000=proto.messages.BaseMessage" }\n'))
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_studio.lua')))
+        self.answer('Load protos directory into Wireshark', FIXTURES)
+        self.mock.menus['nanopb/Load protos directory into Wireshark...']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('Removed from the port map', window.text)
+        with open(config_path) as handle:
+            self.assertIn('port_map = ""', handle.read())
 
     def test_install_dissector_next_to_studio(self):
         # Only the protos directory is asked; every folder is loaded as a protocol.

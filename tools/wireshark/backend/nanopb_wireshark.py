@@ -47,7 +47,7 @@ DEFAULT_INCLUDE = os.path.join(BACKEND_DIR, 'include')
 DEFAULT_NANOPB_ROOT = os.path.dirname(os.path.dirname(TOOL_DIR))
 
 # Files that are only used for generator options and never generated.
-EXCLUDED_PROTOS = ('validate.proto', 'nanopb.proto', 'google/protobuf/descriptor.proto')
+OPTION_PROTOS = ('validate.proto', 'nanopb.proto')
 
 RUNTIME_FILES = ('pb.h', 'pb_common.h', 'pb_common.c', 'pb_encode.h', 'pb_encode.c',
                  'pb_decode.h', 'pb_decode.c')
@@ -83,27 +83,55 @@ def setup_nanopb(nanopb_root):
     return generator_dir
 
 
+def is_option_proto(name):
+    """True for a file that only defines generator options, in any folder."""
+
+    return name == 'google/protobuf/descriptor.proto' or name.rsplit('/', 1)[-1] in OPTION_PROTOS
+
+
 def find_units(protos_root):
+    """Units of a protos directory: its subfolders that hold protos of their own.
+
+    Vendored dependencies (google/, or a folder with only validate.proto or
+    nanopb.proto) are not units. With no unit subfolder, a directory that
+    holds .proto files itself is the one unit, named after the directory.
+    """
+
     if not os.path.isdir(protos_root):
         raise BackendError('protos root %s is not a directory' % protos_root)
     units = []
     for name in sorted(os.listdir(protos_root)):
         path = os.path.join(protos_root, name)
-        if os.path.isdir(path) and unit_protos(path):
+        if name != 'google' and os.path.isdir(path) and unit_protos(path):
             units.append(name)
+    if not units and unit_protos(protos_root):
+        return [os.path.basename(os.path.abspath(protos_root))]
     return units
 
 
 def unit_protos(unit_dir):
     return sorted(f for f in os.listdir(unit_dir)
-                  if f.endswith('.proto') and os.path.isfile(os.path.join(unit_dir, f)))
+                  if f.endswith('.proto') and os.path.isfile(os.path.join(unit_dir, f))
+                  and not is_option_proto(f))
+
+
+def unit_folder(protos_root, name):
+    """The folder of unit ``name``: a subfolder, or the root if it is the unit."""
+
+    path = os.path.join(protos_root, name)
+    return path if os.path.isdir(path) and unit_protos(path) else protos_root
+
+
+def no_units_message(protos_root):
+    return ('no .proto files found in %s or directly in its subfolders; '
+            'enter the folder that holds your .proto files' % protos_root)
 
 
 def select_units(args):
     all_units = find_units(args.protos_root)
     if not args.unit:
         if not all_units:
-            raise BackendError('no subdirectory of %s contains .proto files' % args.protos_root)
+            raise BackendError(no_units_message(args.protos_root))
         return all_units
     wanted = [u.strip() for u in args.unit.split(',') if u.strip()]
     missing = [u for u in wanted if u not in all_units]
@@ -152,13 +180,14 @@ class Unit(object):
 
     def __init__(self, protos_root, name, extra_includes):
         self.name = name
-        self.dir = os.path.join(protos_root, name)
+        self.dir = unit_folder(protos_root, name)
         self.protos = unit_protos(self.dir)
+        parent = os.path.dirname(self.dir)
         candidates = [
             # Imports relative to the unit directory: import "foo.proto";
-            ([self.dir, protos_root], self.protos),
+            ([self.dir, parent], self.protos),
             # Imports relative to the protos root: import "unit/foo.proto";
-            ([protos_root, self.dir], [name + '/' + p for p in self.protos]),
+            ([parent, self.dir], [name + '/' + p for p in self.protos]),
         ]
         errors = []
         for roots, names in candidates:
@@ -177,7 +206,7 @@ class Unit(object):
     def generated_files(self):
         """Descriptor file names to generate, dependencies first."""
 
-        return [f.name for f in self.fds.file if f.name not in EXCLUDED_PROTOS]
+        return [f.name for f in self.fds.file if not is_option_proto(f.name)]
 
     def messages(self):
         result = []
@@ -244,7 +273,9 @@ def unit_entrypoints(unit, port_map):
 def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None):
     protoc = os.path.join(nanopb_root, 'generator', 'protoc')
     common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
-    common += ['-x', 'validate.proto', '-x', 'nanopb.proto']
+    # As imported: validate.proto, or validate/validate.proto in a subfolder.
+    for name in sorted(set(OPTION_PROTOS) | set(f.name for f in unit.fds.file if is_option_proto(f.name))):
+        common += ['-x', name]
     cmd = [sys.executable, protoc] + ['-I' + p for p in unit.includes if os.path.isdir(p)]
     nanopb_opts = common + (['--protoc-insertion-points'] if validate else [])
     cmd += ['--nanopb_opt=' + o for o in nanopb_opts] + ['--nanopb_out=' + outdir]
@@ -450,7 +481,7 @@ def protocol_messages(unit):
             walk(fqn + '.', msg.nested_type)
 
     for fdesc in unit.fds.file:
-        if fdesc.name not in EXCLUDED_PROTOS:
+        if not is_option_proto(fdesc.name):
             walk(fdesc.package + '.' if fdesc.package else '', fdesc.message_type)
     return result
 
@@ -481,7 +512,7 @@ def validation_defines(unit):
             walk(nested)
 
     for fdesc in unit.fds.file:
-        if fdesc.name not in EXCLUDED_PROTOS:
+        if not is_option_proto(fdesc.name):
             for msg in fdesc.message_type:
                 walk(msg)
     index = len('[65535]') if repeated else 0  # pb_size_t is 16 bits without PB_FIELD_32BIT
@@ -1045,7 +1076,7 @@ def build_schema(fds_list, field_infos=None):
     seen = set()
     for fds in fds_list:
         for fdesc in fds.file:
-            if fdesc.name in seen or fdesc.name in EXCLUDED_PROTOS:
+            if fdesc.name in seen or is_option_proto(fdesc.name):
                 continue
             seen.add(fdesc.name)
             prefix = fdesc.package + '.' if fdesc.package else ''
@@ -1110,9 +1141,8 @@ FIELD_KEYS = ('name', 'type', 'label', 'type_name', 'presence', 'oneof', 'storag
               'max_count', 'fixed_length', 'rules')
 
 
-def render_schema_lua(messages, enums, protocols=None):
-    out = ['-- Generated by tools/wireshark/backend/nanopb_wireshark.py; do not edit.\n',
-           'return {\n  messages = {\n']
+def render_messages_lua(messages):
+    out = []
     for name in sorted(messages):
         msg = messages[name]
         rules = msg.get('message_rules')
@@ -1124,30 +1154,81 @@ def render_schema_lua(messages, enums, protocols=None):
             parts = ['%s = %s' % (k, lua_value(f[k])) for k in FIELD_KEYS if f.get(k) is not None]
             out.append('      [%d] = { %s },\n' % (number, ', '.join(parts)))
         out.append('    } },\n')
+    return out
+
+
+def render_enums_lua(enums):
+    out = []
+    for name in sorted(enums):
+        values = ', '.join('[%d] = %s' % (n, lua_str(v)) for n, v in sorted(enums[name].items()))
+        out.append('    [%s] = { %s },\n' % (lua_str(name), values))
+    return out
+
+
+def render_schema_lua(messages, enums, protocols=None, scoped=None):
+    """The schema as Lua. ``scoped``: {protocol: (messages, enums)} that it defines differently."""
+
+    out = ['-- Generated by tools/wireshark/backend/nanopb_wireshark.py; do not edit.\n',
+           'return {\n  messages = {\n']
+    out += render_messages_lua(messages)
     out.append('  },\n  protocols = {\n')
     for name in sorted(protocols or {}):
         out.append('    [%s] = %s,\n' % (lua_str(name), lua_value(protocols[name])))
     out.append('  },\n  enums = {\n')
-    for name in sorted(enums):
-        values = ', '.join('[%d] = %s' % (n, lua_str(v)) for n, v in sorted(enums[name].items()))
-        out.append('    [%s] = { %s },\n' % (lua_str(name), values))
-    out.append('  },\n}\n')
+    out += render_enums_lua(enums)
+    out.append('  },\n')
+    if scoped:
+        out.append('  scoped = {\n')
+        for name in sorted(scoped):
+            own_messages, own_enums = scoped[name]
+            out.append('  [%s] = {\n  messages = {\n' % lua_str(name))
+            out += render_messages_lua(own_messages)
+            out.append('  },\n  enums = {\n')
+            out += render_enums_lua(own_enums)
+            out.append('  },\n  },\n')
+        out.append('  },\n')
+    out.append('}\n')
     return ''.join(out)
 
 
+def merge_unit_schemas(unit_schemas):
+    """Merge [(unit name, messages, enums)] into one view plus each unit's differences.
+
+    Folders are separate protocols, but a name like pkg.Msg can be defined
+    differently in two of them. The first definition goes in the shared view
+    and each unit that differs keeps its own, so Decode As uses the right one.
+    Returns (messages, enums, {unit: (messages, enums)}, sorted conflicting names).
+    """
+
+    messages, enums, scoped, conflicts = {}, {}, {}, set()
+    for unit, own_messages, own_enums in unit_schemas:
+        for shared, own, slot in ((messages, own_messages, 0), (enums, own_enums, 1)):
+            for name, definition in own.items():
+                if shared.setdefault(name, definition) != definition:
+                    scoped.setdefault(unit, ({}, {}))[slot][name] = definition
+                    conflicts.add(name)
+    return messages, enums, scoped, sorted(conflicts)
+
+
 def schema_text(protos_root, extra_includes):
-    """(Lua schema text, messages) for every unit of the protos root."""
+    """(Lua schema text, messages, names defined differently by several units) for every unit."""
 
     units = [Unit(protos_root, name, extra_includes) for name in find_units(protos_root)]
     if not units:
-        raise BackendError('no subdirectory of %s contains .proto files' % protos_root)
+        raise BackendError(no_units_message(protos_root))
     # Always know google.protobuf.Any, even if no unit imports it.
     any_fds = compile_descriptor_set(['google/protobuf/any.proto'], [DEFAULT_INCLUDE])
-    messages, enums = build_schema([u.fds for u in units] + [any_fds], nanopb_field_info(units))
+    messages, enums, scoped, conflicts = merge_unit_schemas(
+        [(u.name,) + build_schema([u.fds], nanopb_field_info([u])) for u in units])
+    any_messages, any_enums = build_schema([any_fds])
+    for name, definition in any_messages.items():
+        messages.setdefault(name, definition)
+    for name, definition in any_enums.items():
+        enums.setdefault(name, definition)
     # Every folder with messages of its own is a protocol in Wireshark (its
     # packets are an Any; the C protocol filter needs the unit to use Any).
     protocols = dict((u.name, m) for u, m in ((u, protocol_messages(u)) for u in units) if m)
-    return render_schema_lua(messages, enums, protocols), messages
+    return render_schema_lua(messages, enums, protocols, scoped), messages, conflicts
 
 
 def write_if_changed(path, text):
@@ -1166,7 +1247,7 @@ def write_if_changed(path, text):
 
 
 def write_schema(protos_root, extra_includes, path):
-    text, messages = schema_text(protos_root, extra_includes)
+    text, messages, _ = schema_text(protos_root, extra_includes)
     write_if_changed(path, text)
     return messages
 
@@ -1189,6 +1270,19 @@ def parse_port_map(text, messages):
             raise BackendError('port map message %s is not in the schema' % msg)
         entries.append((match.group(1).lower(), int(match.group(2)), msg))
     return entries
+
+
+def prune_port_map(text, messages):
+    """Split a saved port map into (entries still in ``messages``, stale entries).
+
+    A saved map outlives the protos it was written for, so an entry for a
+    message that is gone must not stop the protos now selected from loading.
+    """
+
+    kept, stale = [], []
+    for proto, port, msg in parse_port_map(text, None):
+        (kept if msg in messages else stale).append('%s:%d=%s' % (proto, port, msg))
+    return ','.join(kept), stale
 
 
 def protocols_of(schema):
@@ -1222,21 +1316,26 @@ def installed_port_map(ports_path):
                     re.findall(r'\{ transport = "(udp|tcp)", port = (\d+), message = "([^"]+)" \}', text))
 
 
-def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None):
+def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None, drop_stale=False):
     """Install the dissector, its schema and port map into ``plugins``.
 
     ``protocol_ports`` of None keeps the protocol ports already installed.
+    With ``drop_stale``, port map entries for messages not in these protos are
+    removed instead of being an error (see prune_port_map).
     Only files whose content differs are written. Returns (result, changed, messages).
     """
 
     data_dir = os.path.join(plugins, 'nanopb')
     schema_path = os.path.join(data_dir, 'schema.luadata')
-    text, messages = schema_text(protos_root, includes)
+    text, messages, conflicts = schema_text(protos_root, includes)
     changed = write_if_changed(schema_path, text)
     if protocol_ports is None:
         known = set(protocols_of(text))
         protocol_ports = [p for p in installed_protocol_ports(os.path.join(data_dir, 'ports.luadata'))
                           if p[2] in known]
+    stale = []
+    if drop_stale and port_map is not None:
+        port_map, stale = prune_port_map(port_map, messages)
     ports = parse_port_map(port_map, messages)
     files = [schema_path]
     if port_map is not None or protocol_ports:
@@ -1257,15 +1356,30 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None
     result = {'plugins_dir': plugins, 'files': files, 'messages': len(messages),
               'ports': ['%s:%d=%s' % p for p in ports] + ['%s:%d=<protocol %s>' % p for p in protocol_ports],
               'decode_as': [c_identifier(name).upper() for name in sorted(protocols_of(text))]}
+    if conflicts:
+        result['shared_names'] = conflicts
+    if stale:
+        result.update({'ports_pruned': True, 'port_map': port_map, 'stale_ports': stale})
     return result, changed, messages
+
+
+def shared_names_note(names):
+    return ('Defined differently by several protocols: %s. Each protocol uses its own definition; '
+            'choose the protocol with Decode As, because plain NANOPB uses the first one.' % ', '.join(names))
+
+
+def stale_ports_note(stale):
+    return 'Removed from the port map, not in these protos: ' + ', '.join(stale)
 
 
 def cmd_install_dissector(args):
     plugins = args.plugins_dir or default_plugins_dir()
     port_map = args.port_map
-    if port_map is None:
+    saved = port_map is None
+    if saved:
         port_map = installed_port_map(os.path.join(plugins, 'nanopb', 'ports.luadata'))
-    result, changed, _ = install_schema(args.protos_root, args.include, plugins, port_map)
+    result, changed, _ = install_schema(args.protos_root, args.include, plugins, port_map,
+                                        drop_stale=saved or args.drop_stale_ports)
     result['changed'] = changed
     names = result['decode_as']
     lines = ['Loaded %d protocol(s) from %s:' % (len(names), args.protos_root)]
@@ -1274,6 +1388,10 @@ def cmd_install_dissector(args):
               '  for all NANOPB traffic: Edit > Preferences > Protocols > NANOPB > Protocol',
               '  per port: Analyze > Decode As > UDP port (or TCP port) > ' + (names[0] if names else '<FOLDER>'),
               '', '%d messages; ports: %s' % (result['messages'], ', '.join(result['ports']) or '(none)')]
+    if result.get('stale_ports'):
+        lines.append(stale_ports_note(result['stale_ports']))
+    if result.get('shared_names'):
+        lines.append(shared_names_note(result['shared_names']))
     result['summary'] = '\n'.join(lines)
     return result
 
@@ -1401,12 +1519,17 @@ def cmd_gen_packets(args):
         port_map = ','.join(p for p in (port_map, 'udp:%d=%s' % (args.any_port, ANY_MESSAGE)) if p)
 
     if args.no_install:
-        _, messages = schema_text(args.protos_root, args.include)
+        _, messages, _ = schema_text(args.protos_root, args.include)
         installed, changed = None, False
+        stale_ports = []
+        if args.drop_stale_ports:
+            port_map, stale_ports = prune_port_map(port_map, messages)
     else:
         plugins = args.plugins_dir or default_plugins_dir()
         installed, changed, messages = install_schema(args.protos_root, args.include, plugins, port_map,
-                                                      protocol_ports)
+                                                      protocol_ports, drop_stale=args.drop_stale_ports)
+        stale_ports = installed.get('stale_ports', [])
+        port_map = installed.get('port_map', port_map)
     roots = dict((msg, (proto, port)) for proto, port, msg in parse_port_map(port_map, messages)
                  if msg != ANY_MESSAGE)
     any_value = field_by_name(messages, ANY_MESSAGE, 'value') or {}
@@ -1526,6 +1649,8 @@ def cmd_gen_packets(args):
     summary = '\n'.join(lines[:4 + len(ports)])
     if skipped:
         summary += '\n%d rule(s) not generated, see %s.txt' % (len(skipped), base)
+    if stale_ports:
+        summary += '\n' + stale_ports_note(stale_ports)
     result = {'pcap': capture, 'manifest': base + '.json', 'summary_file': base + '.txt',
               'packet_dirs': sorted(packet_files), 'mode': args.mode,
               'protocol_ports': ['%s:%d=%s' % p for p in protocol_ports],
@@ -1533,6 +1658,8 @@ def cmd_gen_packets(args):
               'skipped': skipped, 'errors': errors, 'schema_changed': changed, 'summary': summary}
     if installed:
         result['installed'] = installed
+    if stale_ports:
+        result['ports_pruned'] = True
     return result
 
 
@@ -1633,6 +1760,7 @@ def cmd_install_studio(args):
         os.makedirs(data_dir)
     copy_project(args.nanopb_root, project)
     files = []
+    protos_root = os.path.abspath(args.protos_root) if args.protos_root else None
     for name in ('nanopb_studio.lua', 'nanopb_any_dissector.lua'):
         target = os.path.join(plugins, name)
         shutil.copy(tool_file(name), target)
@@ -1651,6 +1779,12 @@ def cmd_install_studio(args):
     config['python'] = sys.executable
     config['project'] = project
     config['nanopb_root'] = os.path.abspath(args.nanopb_root) if args.dev else ''
+    loaded = None
+    if protos_root:
+        # One step: every menu starts from this directory, and Decode As already lists its protocols.
+        loaded, _, _ = install_schema(protos_root, [], plugins, config.get('port_map', ''), drop_stale=True)
+        config['protos_root'] = protos_root
+        config['port_map'] = loaded.get('port_map', config.get('port_map', ''))
     keys = ['python', 'project', 'nanopb_root', 'protos_root', 'output_dir', 'extra_includes', 'port_map']
     keys += sorted(k for k in config if k not in keys)
     with open(config_path, 'w', newline='\n') as handle:
@@ -1660,8 +1794,11 @@ def cmd_install_studio(args):
             handle.write('  %s = %s,\n' % (key, lua_str(config.get(key, ''))))
         handle.write('}\n')
     files += [project, config_path]
-    return {'plugins_dir': plugins, 'project': project, 'files': files, 'warnings': warnings,
-            'mode': 'dev (uses %s)' % config['nanopb_root'] if args.dev else 'self-contained'}
+    result = {'plugins_dir': plugins, 'project': project, 'files': files, 'warnings': warnings,
+              'mode': 'dev (uses %s)' % config['nanopb_root'] if args.dev else 'self-contained'}
+    if loaded:
+        result.update({'protos_root': protos_root, 'protocols': loaded['decode_as']})
+    return result
 
 
 IMPORT_RE = re.compile(r'^\s*import\s+(?:public\s+|weak\s+)?"([^"]+)"', re.M)
@@ -1675,9 +1812,9 @@ def merged_into(protos_root, units):
 
     result = {}
     for name in units:
-        unit_dir = os.path.join(protos_root, name)
-        for proto in unit_protos(unit_dir):
-            with open(os.path.join(unit_dir, proto), encoding='utf-8', errors='replace') as handle:
+        folder = unit_folder(protos_root, name)
+        for proto in unit_protos(folder):
+            with open(os.path.join(folder, proto), encoding='utf-8', errors='replace') as handle:
                 for path in IMPORT_RE.findall(handle.read()):
                     other = path.split('/', 1)[0]
                     if '/' in path and other != name and other in units and name not in result.get(other, []):
@@ -1710,7 +1847,8 @@ def build_parser():
     sub.required = True
 
     def protos_args(p, unit=False):
-        p.add_argument('--protos-root', required=True, help='directory whose subdirectories are units')
+        p.add_argument('--protos-root', required=True,
+                       help='directory whose subdirectories are units, or the one unit folder itself')
         p.add_argument('-I', '--include', action='append', default=[],
                        help='extra proto include path (repeatable)')
         if unit:
@@ -1756,6 +1894,8 @@ def build_parser():
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')
     p.add_argument('--port-map', default=None,
                    help='e.g. "udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd" (default: keep the installed one)')
+    p.add_argument('--drop-stale-ports', action='store_true',
+                   help='remove port map entries for messages not in these protos instead of failing')
     p.set_defaults(func=cmd_install_dissector)
 
     p = sub.add_parser('gen-packets', help='one capture with valid (PASSED) and invalid (DROPPED) packets')
@@ -1764,6 +1904,8 @@ def build_parser():
     p.add_argument('--port-map', default='',
                    help='root messages sent on their own port (default: one UDP port per unit root, from %d)'
                    % AUTO_PORT_BASE)
+    p.add_argument('--drop-stale-ports', action='store_true',
+                   help='remove port map entries for messages not in these protos instead of failing')
     p.add_argument('--mode', choices=('ports', 'protocol'), default='ports',
                    help='ports: roots on their own port, others as Any on --any-port; protocol: every message '
                         'of each protocol (unit) wrapped in an Any on that protocol\'s port (--protocol-port)')
@@ -1784,6 +1926,8 @@ def build_parser():
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')
     p.add_argument('--dev', action='store_true',
                    help='run this checkout instead of the copy (edits take effect without reinstalling)')
+    p.add_argument('--protos-root', default=None,
+                   help='directory with one subfolder per protocol: saved for every menu and loaded now')
     p.set_defaults(func=cmd_install_studio)
     return parser
 
@@ -1794,7 +1938,7 @@ def main(argv=None):
     try:
         args.nanopb_root = os.path.abspath(args.nanopb_root)
         setup_nanopb(args.nanopb_root)
-        if hasattr(args, 'protos_root'):
+        if hasattr(args, 'include'):
             args.protos_root = os.path.abspath(args.protos_root)
             args.include = [os.path.abspath(p) for p in args.include]
         if getattr(args, 'count', 1) < 1:

@@ -244,7 +244,7 @@ end
 -- An empty input keeps the last one used. Values of `extra` fields are passed
 -- to `action`.
 local function ask_dirs(title, with_output, extra, action)
-    local fields = { { "Input: protos directory (one subdirectory per unit)", config.protos_root } }
+    local fields = { { "Input: protos directory (a folder of units, or one unit's folder)", config.protos_root } }
     if with_output then
         fields[#fields + 1] = { "Output directory (empty = <input>/../nanopb_out)", config.output_dir }
     end
@@ -287,17 +287,28 @@ end
 -- Units of the protos directory and which ones other units import, read
 -- directly with Wireshark's Dir API: listing them needs no Python process.
 -- Returns nil where Dir is not available (very old Wireshark).
+local function has_own_protos(path)
+    for file in Dir.open(path, ".proto") do
+        if file ~= "validate.proto" and file ~= "nanopb.proto" then return true end
+    end
+    return false
+end
+
 local function scan_units(root)
     if not (Dir and Dir.open and Dir.exists) then return nil end
     if not Dir.exists(root) then return nil, root .. " is not a directory" end
     local names = {}
     for entry in Dir.open(root) do
         local path = join(root, entry)
-        if entry ~= "." and entry ~= ".." and Dir.exists(path) then
-            local has_proto = false
-            for _ in Dir.open(path, ".proto") do has_proto = true break end
-            if has_proto then names[#names + 1] = entry end
+        -- google/ and folders with only validate.proto or nanopb.proto are dependencies.
+        if entry ~= "." and entry ~= ".." and entry ~= "google" and Dir.exists(path)
+            and has_own_protos(path) then
+            names[#names + 1] = entry
         end
+    end
+    -- The folder that holds the .proto files can be entered directly.
+    if #names == 0 and has_own_protos(root) then
+        return { root:gsub("[/\\]+$", ""):match("([^/\\]+)$") }, {}
     end
     table.sort(names)
     local is_unit, merged = {}, {}
@@ -340,7 +351,8 @@ local function pick_units(title, generate)
         names, merged = parse_unit_names(text)
     end
     if #names == 0 then
-        show(title, false, "No subdirectory of " .. config.protos_root .. " contains .proto files.")
+        show(title, false, "No .proto files found in " .. config.protos_root
+            .. " or directly in its subfolders.\nEnter the folder that holds your .proto files.")
         return
     end
     -- A unit imported by another is already merged into that one's .c/.h;
@@ -434,7 +446,7 @@ local function gen_packets()
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
             local args = add_common({ "gen-packets", "--mode", "protocol", "--out", output_dir(),
-                "--unit", units, "--plugins-dir", PLUGINS_DIR })
+                "--unit", units, "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -444,7 +456,7 @@ local function gen_packets()
             local pcap = json_string(text, "pcap") or ""
             local summary = json_string(text, "summary") or text
             local picked = json_string(text, "port_map") or ""
-            if config.port_map == "" and picked ~= "" then
+            if (config.port_map == "" and picked ~= "") or json_bool(text, "ports_pruned") then
                 -- Keep the ports gen-packets picked, so the dissector and Generate C agree.
                 config.port_map = picked
                 save_config()
@@ -488,13 +500,17 @@ end
 local function load_protos()
     local title = "Load protos directory into Wireshark"
     ask_dirs(title, false, nil, function()
-        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR })
+        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
         if config.port_map ~= "" then
             args[#args + 1] = "--port-map"
             args[#args + 1] = config.port_map
         end
         local ok, text = run_backend(args)
         if ok then
+            if json_bool(text, "ports_pruned") then
+                config.port_map = json_string(text, "port_map") or ""
+                save_config()
+            end
             text = json_string(text, "summary") or text
             if reload_lua_plugins then
                 show(title, ok, text .. "\n\nReloading Lua plugins...")
