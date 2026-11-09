@@ -174,8 +174,8 @@ entry is called `NANOPB_IP` instead.
 
 ### Step 3: generate test packets
 
-With more than 6 protocols, the list is numbered and scrolls: press
-**Choose...** and enter numbers or names, e.g. `1,3,5-8` or `gps,motor`.
+The protocol list is numbered and scrolls: press **Choose...** and enter
+numbers or names, e.g. `1,3,5-8` or `gps,motor`.
 
 1. **Tools > nanopb > Generate test packets (passed + dropped)**.
 2. Enter the input directory and an output directory (empty means

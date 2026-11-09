@@ -343,9 +343,8 @@ local function scan_units(root)
     return names, merged
 end
 
--- Wireshark's window has one row of buttons and no checkboxes, so above this
--- many units the list is numbered (it scrolls) and chosen with one dialog.
-local MAX_UNIT_BUTTONS = 6
+-- Wireshark's window has one row of buttons and no checkboxes, so the list is
+-- numbered (it scrolls) and chosen with one dialog.
 
 -- "1,3,5-8" or "gps motor" -> { [index] = true }, or nil and the unknown item.
 local function parse_selection(text, names)
@@ -389,12 +388,10 @@ local function pick_units(title, generate)
     local selected = {}
     for _, name in ipairs(names) do selected[name] = merged[name] == nil end
 
-    local many = #names > MAX_UNIT_BUTTONS
     local win = TextWindow.new(title .. ": choose units")
     local function render(note)
         local lines = {
-            many and "Press Choose... and enter the numbers or names to select, then press Generate."
-                or "Click a unit to select or deselect it, then press Generate.",
+            "Press Choose... and enter the numbers or names to select, then press Generate.",
             "Wireshark does not respond for a few seconds while it generates.",
             "",
             "Input:  " .. config.protos_root,
@@ -403,7 +400,7 @@ local function pick_units(title, generate)
         }
         for i, name in ipairs(names) do
             local note = merged[name] and ("   (already merged into " .. merged[name] .. ")") or ""
-            lines[#lines + 1] = (many and string.format("%4d", i) or "") .. (selected[name] and "  [x] " or "  [ ] ")
+            lines[#lines + 1] = string.format("%4d", i) .. (selected[name] and "  [x] " or "  [ ] ")
                 .. name .. note
         end
         if note then
@@ -416,26 +413,17 @@ local function pick_units(title, generate)
         for _, name in ipairs(names) do selected[name] = value end
         render()
     end
-    if many then
-        win:add_button("Choose...", function()
-            dialog(title .. ": choose", { "Numbers or names to select, e.g. 1,3,5-8 or gps,motor" }, function(text)
-                local picked, unknown = parse_selection(text, names)
-                if not picked then
-                    render("Not in the list: " .. unknown)
-                    return
-                end
-                for i, name in ipairs(names) do selected[name] = picked[i] == true end
-                render()
-            end)
+    win:add_button("Choose...", function()
+        dialog(title .. ": choose", { "Numbers or names to select, e.g. 1,3,5-8 or gps,motor" }, function(text)
+            local picked, unknown = parse_selection(text, names)
+            if not picked then
+                render("Not in the list: " .. unknown)
+                return
+            end
+            for i, name in ipairs(names) do selected[name] = picked[i] == true end
+            render()
         end)
-    else
-        for _, name in ipairs(names) do
-            win:add_button(name, function()
-                selected[name] = not selected[name]
-                render()
-            end)
-        end
-    end
+    end)
     win:add_button("Select all", function() select_all(true) end)
     win:add_button("Select none", function() select_all(false) end)
     win:add_button("Generate", function()
@@ -510,14 +498,15 @@ local function gen_packets()
             local reload = json_bool(text, "schema_changed") and reload_lua_plugins
             local notes = { summary, "" }
             if open_capture_file then
-                notes[#notes + 1] = "Opening the capture. Each packet shows Validation: PASSED or DROPPED."
+                notes[#notes + 1] = (reload and "Press Open capture to see it." or "Opening the capture.")
+                    .. " Each packet shows Validation: PASSED or DROPPED."
                 notes[#notes + 1] = "Other ports: Analyze > Decode As > UDP/TCP port > FLEET (your folder name), or set it for all NANOPB"
                     .. "\ntraffic: Edit > Preferences > Protocols > NANOPB > Protocol."
             else
                 notes[#notes + 1] = "Open the capture with File > Open: " .. pcap
             end
             if json_bool(text, "schema_changed") then
-                notes[#notes + 1] = reload_lua_plugins and "The dissector schema changed; reloading Lua plugins."
+                notes[#notes + 1] = reload_lua_plugins and "The protocols changed; Open capture also reloads Lua plugins, which closes this window."
                     or "The dissector schema changed; reload Lua plugins (Ctrl+Shift+L)."
             end
             local buttons = {}
@@ -531,12 +520,17 @@ local function gen_packets()
                     apply_filter()
                 end }
             end
-            local function after()
+            local function open_capture()
                 if open_capture_file and pcap ~= "" then open_capture_file(pcap, "") end
                 -- Last: reloading re-runs the plugins and re-dissects the open capture.
                 if reload then reload_lua_plugins() end
             end
-            return true, table.concat(notes, "\n"), buttons, after
+            -- Reloading closes every plugin window, so it waits until this one has been read.
+            if reload then
+                table.insert(buttons, 1, { "Open capture", open_capture })
+                return true, table.concat(notes, "\n"), buttons
+            end
+            return true, table.concat(notes, "\n"), buttons, open_capture
         end)
     end)
 end
@@ -557,8 +551,9 @@ local function load_now(title, note)
         end
         text = (json_string(text, "summary") or text) .. (note or "")
         if reload_lua_plugins then
-            show(title, ok, text .. "\n\nReloading Lua plugins...")
-            reload_lua_plugins()
+            -- Reloading closes every plugin window, so it waits until this one has been read.
+            show(title, ok, text .. "\n\nPress Activate to reload Lua plugins and use these protocols.",
+                nil, { { "Activate", reload_lua_plugins } })
             return
         end
         text = text .. "\n\nReload Lua plugins (Analyze > Reload Lua Plugins, Ctrl+Shift+L) to activate."

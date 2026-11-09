@@ -568,7 +568,8 @@ class StudioTests(LuaTestCase):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
         self.assertIn('[x] envelope', picker.text)
         self.assertIn('[x] telemetry', picker.text)
-        picker.buttons['telemetry']()
+        self.answer('Generate C (merged + validation): choose', 'envelope')
+        picker.buttons['Choose...']()
         self.assertIn('[ ] telemetry', picker.text)
         picker.buttons['Generate']()
         window = self.last_window()
@@ -635,6 +636,10 @@ class StudioTests(LuaTestCase):
         # The dissector and schema are refreshed next to the studio, the capture
         # is opened, then (schema changed) the plugins are reloaded.
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb', 'schema.luadata')))
+        # Reloading closes the summary window, so it waits for the button.
+        self.assertEqual(len(calls), 0)
+        self.assertIn('Press Open capture', window.text)
+        window.buttons['Open capture']()
         self.assertEqual([calls[i] for i in range(1, len(calls) + 1)], ['open|%s|' % pcap, 'reload'])
         window.buttons['Show dropped only']()
         self.assertEqual(calls[len(calls)], 'apply')  # Lua tables are 1-based
