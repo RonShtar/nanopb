@@ -46,7 +46,8 @@ end
 -- Stored state
 -- ---------------------------------------------------------------------------
 
-local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map" }
+local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map",
+    "protos_root_fixed" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
@@ -56,6 +57,7 @@ local config = {
     output_dir = "",
     extra_includes = "",
     port_map = "",
+    protos_root_fixed = "",
 }
 
 local function load_config()
@@ -244,6 +246,11 @@ end
 -- An empty input keeps the last one used. Values of `extra` fields are passed
 -- to `action`.
 local function ask_dirs(title, with_output, extra, action)
+    -- Set once with "Set protos directory (once)": nothing to ask.
+    if config.protos_root_fixed == "1" and config.protos_root ~= "" then
+        action()
+        return
+    end
     local fields = { { "Input: protos directory (a folder of units, or one unit's folder)", config.protos_root } }
     if with_output then
         fields[#fields + 1] = { "Output directory (empty = <input>/../nanopb_out)", config.output_dir }
@@ -336,6 +343,28 @@ local function scan_units(root)
     return names, merged
 end
 
+-- Wireshark's window has one row of buttons and no checkboxes, so above this
+-- many units the list is numbered (it scrolls) and chosen with one dialog.
+local MAX_UNIT_BUTTONS = 6
+
+-- "1,3,5-8" or "gps motor" -> { [index] = true }, or nil and the unknown item.
+local function parse_selection(text, names)
+    local index_of, picked = {}, {}
+    for i, name in ipairs(names) do index_of[name] = i end
+    for item in string.gmatch(text or "", "[^,;%s]+") do
+        local first, last = item:match("^(%d+)-(%d+)$")
+        if not first then first = item:match("^(%d+)$"); last = first end
+        if index_of[item] then
+            picked[index_of[item]] = true
+        elseif first and tonumber(first) >= 1 and tonumber(last) <= #names and tonumber(first) <= tonumber(last) then
+            for i = tonumber(first), tonumber(last) do picked[i] = true end
+        else
+            return nil, item
+        end
+    end
+    return picked
+end
+
 local function pick_units(title, generate)
     local names, merged = scan_units(config.protos_root)
     if names == nil and merged then
@@ -360,19 +389,22 @@ local function pick_units(title, generate)
     local selected = {}
     for _, name in ipairs(names) do selected[name] = merged[name] == nil end
 
+    local many = #names > MAX_UNIT_BUTTONS
     local win = TextWindow.new(title .. ": choose units")
     local function render(note)
         local lines = {
-            "Click a unit to select or deselect it, then press Generate.",
+            many and "Press Choose... and enter the numbers or names to select, then press Generate."
+                or "Click a unit to select or deselect it, then press Generate.",
             "Wireshark does not respond for a few seconds while it generates.",
             "",
             "Input:  " .. config.protos_root,
             "Output: " .. output_dir(),
             "",
         }
-        for _, name in ipairs(names) do
+        for i, name in ipairs(names) do
             local note = merged[name] and ("   (already merged into " .. merged[name] .. ")") or ""
-            lines[#lines + 1] = (selected[name] and "  [x] " or "  [ ] ") .. name .. note
+            lines[#lines + 1] = (many and string.format("%4d", i) or "") .. (selected[name] and "  [x] " or "  [ ] ")
+                .. name .. note
         end
         if note then
             lines[#lines + 1] = ""
@@ -384,11 +416,25 @@ local function pick_units(title, generate)
         for _, name in ipairs(names) do selected[name] = value end
         render()
     end
-    for _, name in ipairs(names) do
-        win:add_button(name, function()
-            selected[name] = not selected[name]
-            render()
+    if many then
+        win:add_button("Choose...", function()
+            dialog(title .. ": choose", { "Numbers or names to select, e.g. 1,3,5-8 or gps,motor" }, function(text)
+                local picked, unknown = parse_selection(text, names)
+                if not picked then
+                    render("Not in the list: " .. unknown)
+                    return
+                end
+                for i, name in ipairs(names) do selected[name] = picked[i] == true end
+                render()
+            end)
         end)
+    else
+        for _, name in ipairs(names) do
+            win:add_button(name, function()
+                selected[name] = not selected[name]
+                render()
+            end)
+        end
     end
     win:add_button("Select all", function() select_all(true) end)
     win:add_button("Select none", function() select_all(false) end)
@@ -497,29 +543,53 @@ end
 
 -- Only the protos directory: every subdirectory with .proto files becomes a
 -- protocol (FLEET, SHARED, ...) of the dissector; the port map is kept.
+local function load_now(title, note)
+    local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
+    if config.port_map ~= "" then
+        args[#args + 1] = "--port-map"
+        args[#args + 1] = config.port_map
+    end
+    local ok, text = run_backend(args)
+    if ok then
+        if json_bool(text, "ports_pruned") then
+            config.port_map = json_string(text, "port_map") or ""
+            save_config()
+        end
+        text = (json_string(text, "summary") or text) .. (note or "")
+        if reload_lua_plugins then
+            show(title, ok, text .. "\n\nReloading Lua plugins...")
+            reload_lua_plugins()
+            return
+        end
+        text = text .. "\n\nReload Lua plugins (Analyze > Reload Lua Plugins, Ctrl+Shift+L) to activate."
+    end
+    show(title, ok, text)
+end
+
 local function load_protos()
     local title = "Load protos directory into Wireshark"
-    ask_dirs(title, false, nil, function()
-        local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
-        if config.port_map ~= "" then
-            args[#args + 1] = "--port-map"
-            args[#args + 1] = config.port_map
+    ask_dirs(title, false, nil, function() load_now(title) end)
+end
+
+-- Enter the directory one time: it is loaded now, and the other menu items
+-- use it without asking until it is set again here.
+local function set_directory()
+    local title = "Set protos directory"
+    dialog(title, {
+        { "Protos directory (the folder with one subfolder per protocol)", config.protos_root },
+        { "Output directory (empty = <protos directory>/../nanopb_out)", config.output_dir },
+    }, function(input, output)
+        input = trim(input)
+        if input == "" then
+            show(title, false, "Enter the protos directory.")
+            return
         end
-        local ok, text = run_backend(args)
-        if ok then
-            if json_bool(text, "ports_pruned") then
-                config.port_map = json_string(text, "port_map") or ""
-                save_config()
-            end
-            text = json_string(text, "summary") or text
-            if reload_lua_plugins then
-                show(title, ok, text .. "\n\nReloading Lua plugins...")
-                reload_lua_plugins()
-                return
-            end
-            text = text .. "\n\nReload Lua plugins (Analyze > Reload Lua Plugins, Ctrl+Shift+L) to activate."
-        end
-        show(title, ok, text)
+        config.protos_root = input
+        config.output_dir = trim(output)
+        config.protos_root_fixed = "1"
+        save_config()
+        load_now(title, "\n\nEvery Tools > nanopb item now uses this directory without asking."
+            .. "\nTo change it, run Set protos directory (once) again.")
     end)
 end
 
@@ -528,7 +598,8 @@ local function about()
         "Plugins folder: " .. PLUGINS_DIR,
         "State file: " .. CONFIG_PATH,
         "nanopb project: " .. project_root() .. (config.nanopb_root ~= "" and " (dev checkout)" or ""),
-        "Last input directory: " .. (config.protos_root ~= "" and config.protos_root or "(none)"),
+        (config.protos_root_fixed == "1" and "Protos directory (set once): " or "Last input directory: ")
+            .. (config.protos_root ~= "" and config.protos_root or "(none)"),
         "Last output directory: " .. (output_dir() ~= "" and output_dir() or "(none)"),
         "Port map: " .. (config.port_map ~= "" and config.port_map or "(none yet)"),
         "Python: " .. config.python,
@@ -537,6 +608,46 @@ local function about()
     }, "\n"), nil, { { "Open plugins folder", function() open_folder(PLUGINS_DIR) end } })
 end
 
+-- ---------------------------------------------------------------------------
+-- Coloring rule and filter buttons (added once to the personal configuration)
+-- ---------------------------------------------------------------------------
+
+local function read_file(path)
+    local f = path and io.open(path, "r")
+    if not f then return nil end
+    local text = f:read("*a")
+    f:close()
+    return text
+end
+
+local function write_file(path, text)
+    local f = io.open(path, "w")
+    if not f then return end
+    f:write(text)
+    f:close()
+end
+
+local function install_highlights()
+    if not (Dir and Dir.personal_config_path and Dir.global_config_path) then return end
+    local colors_path = Dir.personal_config_path("colorfilters")
+    local colors = read_file(colors_path)
+    if not (colors and colors:find("@nanopb dropped@", 1, true)) then
+        -- A personal file replaces the default rules, so it must start from them.
+        write_file(colors_path, '@nanopb dropped@nanopb.validation == "dropped"@[65535,65535,0][0,0,0]\n'
+            .. (colors or read_file(Dir.global_config_path("colorfilters")) or ""))
+    end
+    local buttons_path = Dir.personal_config_path("dfilter_buttons")
+    local buttons = read_file(buttons_path)
+    if not (buttons and buttons:find('"nanopb Dropped"', 1, true)) then
+        write_file(buttons_path, (buttons or "# This file is automatically generated, DO NOT MODIFY.\n")
+            .. '"TRUE","nanopb Dropped","nanopb.validation == \\x22dropped\\x22",""\n'
+            .. '"TRUE","nanopb Warnings","nanopb.message && _ws.expert.severity == \\x22Warning\\x22",""\n')
+    end
+end
+
+pcall(install_highlights)
+
+register_menu("nanopb/Set protos directory (once)...", set_directory, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate C (merged + validation)...", gen_c, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate test packets (passed + dropped)...", gen_packets, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Load protos directory into Wireshark...", load_protos, MENU_TOOLS_UNSORTED)

@@ -90,8 +90,10 @@ subfolder per protocol:
 
     python tools/wireshark/backend/nanopb_wireshark.py install-studio --protos-root <directory>
 
-The next time Wireshark starts, Decode As lists your protocols and every
-Tools > nanopb dialog already shows that directory, so you only press OK.
+The next time Wireshark starts, Decode As lists your protocols and no
+Tools > nanopb item asks for the directory. Inside Wireshark, **Tools > nanopb
+> Set protos directory (once)** does the same; run it again to change the
+directory. Edit > Preferences > Protocols > NANOPB shows the current one.
 
 The copy records the Python that ran `install-studio`. To use a different
 folder, add `--plugins-dir <folder>`. For tool development, `--dev` runs this
@@ -102,7 +104,7 @@ checkout directly instead of a copy.
 Restart Wireshark, or press **Ctrl+Shift+L** (Analyze > Reload Lua Plugins).
 To check that it worked:
 
-- **Tools > nanopb** shows four items: Generate C, Generate test packets,
+- **Tools > nanopb** shows five items: Set protos directory, Generate C, Generate test packets,
   Load protos directory into Wireshark, and About;
 - **Tools > nanopb > About** shows the plugins folder, the Python and the
   project copy;
@@ -148,9 +150,18 @@ A decoded packet shows:
 
 - in the Protocol column, `FLEET`;
 - in the Info column, the message the `type_url` selected and the verdict,
-  e.g. `nanopb fleet fleet.envelope.Envelope (120 bytes) [PASSED]`;
+  e.g. `fleet fleet.envelope.Envelope (120 bytes) [PASSED]`;
 - in the tree, the decoded fields and a **Validation** subtree listing every
   rule that failed, with its field path.
+
+Packets detected automatically also show their real protocol, found from the
+`type_url`. `NANOPB` appears only when the protocol can't be told, for example
+when two protocols define that message name differently; use Decode As there.
+
+Dropped packets are yellow (View > Coloring Rules, `nanopb dropped`), and the
+filter bar has **nanopb Dropped** and **nanopb Warnings** buttons. Both are added
+to your personal configuration the first time the plugin runs, and take effect
+the next time Wireshark starts.
 
 When a packet is decoded as a protocol:
 - a `type_url` naming a message of another protocol gives `filter.unknown_type`;
@@ -162,6 +173,9 @@ If the folder name is already a Wireshark protocol, for example `ip`, the
 entry is called `NANOPB_IP` instead.
 
 ### Step 3: generate test packets
+
+With more than 6 protocols, the list is numbered and scrolls: press
+**Choose...** and enter numbers or names, e.g. `1,3,5-8` or `gps,motor`.
 
 1. **Tools > nanopb > Generate test packets (passed + dropped)**.
 2. Enter the input directory and an output directory (empty means

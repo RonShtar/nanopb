@@ -199,6 +199,10 @@ local function default_port_map_string()
     return table.concat(parts, ",")
 end
 
+local studio_config = load_data(DATA_DIR .. SEP .. "studio_config.luadata") or {}
+nanopb.prefs.protos_directory = Pref.statictext("Protos directory: "
+    .. ((studio_config.protos_root or "") ~= "" and studio_config.protos_root or "(not set)")
+    .. "   (change it with Tools > nanopb > Set protos directory)", "")
 nanopb.prefs.port_map = Pref.string("Port map", default_port_map_string(),
     "Comma-separated transport:port=message entries, e.g. udp:5000=pkg.Envelope,tcp:7000=pkg.Cmd")
 nanopb.prefs.default_message = Pref.string("Default message", "",
@@ -1363,17 +1367,29 @@ local function root_message(pinfo, tvb)
     return nil, stale
 end
 
+-- [message] = the protocol it belongs to, or false if protocols define that
+-- name differently and the packet alone cannot tell which one it is.
+local owner_of = {}
+
+local function packet_owner(tvb, length)
+    local _, type_name = parse_any(tvb, 0, length)
+    return type_name and owner_of[type_name] or nil
+end
+
 local function dissect(tvb, pinfo, tree, forced_root, protocol)
     local length = tvb:len()
     if length == 0 then return 0 end
     set_packet(tvb)
     local msg_name, stale = forced_root, nil
     if not msg_name then msg_name, stale = root_message(pinfo, tvb) end
-    if not protocol and msg_name == ANY then protocol = primary_protocol() end
+    if not protocol and msg_name == ANY then protocol = primary_protocol() or packet_owner(tvb, length) end
     use_view(protocol and protocol.view or shared_view)
-    pinfo.cols.protocol = protocol and protocol.column or "NANOPB"
-    local root = tree:add(protocol and protocol.proto or nanopb, tvb(),
-        protocol and ("nanopb " .. protocol.name) or "nanopb Protobuf")
+    -- A message on a port map entry is decoded as itself, but is still shown
+    -- under the protocol it belongs to.
+    local shown_protocol = protocol or (msg_name and owner_of[msg_name]) or nil
+    pinfo.cols.protocol = shown_protocol and shown_protocol.column or "NANOPB"
+    local root = tree:add(shown_protocol and shown_protocol.proto or nanopb, tvb(),
+        shown_protocol and shown_protocol.column or "nanopb Protobuf")
     if not schema_ok then root:add_proto_expert_info(e_no_schema) end
     if stale then
         root:add_proto_expert_info(e_unknown_type, "Root message not in schema: " .. stale
@@ -1398,7 +1414,8 @@ local function dissect(tvb, pinfo, tree, forced_root, protocol)
         local _, type_name = parse_any(tvb, 0, length)
         shown = protocol.name .. " " .. (type_name or "?")
     end
-    pinfo.cols.info:set(string.format("nanopb %s (%d bytes)%s", shown, length, suffix))
+    pinfo.cols.info:set(string.format(shown_protocol and "%s (%d bytes)%s" or "nanopb %s (%d bytes)%s",
+        shown, length, suffix))
     return length
 end
 
@@ -1417,8 +1434,11 @@ local function heuristic(tvb, pinfo, tree)
     return true
 end
 
-DissectorTable.get("udp.port"):add_for_decode_as(nanopb)
-DissectorTable.get("tcp.port"):add_for_decode_as(nanopb)
+-- With protocols loaded, Decode As lists them by name instead of NANOPB.
+if #protocol_names == 0 then
+    DissectorTable.get("udp.port"):add_for_decode_as(nanopb)
+    DissectorTable.get("tcp.port"):add_for_decode_as(nanopb)
+end
 
 -- Each protocol is also a Wireshark protocol named after its folder: choose
 -- it with Analyze > Decode As > UDP/TCP port > FLEET (or set it as the NANOPB
@@ -1444,6 +1464,20 @@ for _, name in ipairs(protocol_names) do
     DissectorTable.get("udp.port"):add_for_decode_as(proto)
     DissectorTable.get("tcp.port"):add_for_decode_as(proto)
     protocols[name] = protocol
+end
+
+for _, name in ipairs(protocol_names) do
+    for _, msg in ipairs(schema.protocols[name]) do
+        local differs = false
+        for _, own in pairs(schema.scoped or {}) do
+            differs = differs or (own.messages or {})[msg] ~= nil
+        end
+        if differs then
+            owner_of[msg] = false
+        elseif owner_of[msg] == nil then
+            owner_of[msg] = protocols[name]
+        end
+    end
 end
 
 -- Ports mapped to a protocol (written by Generate test packets), like a Decode As.

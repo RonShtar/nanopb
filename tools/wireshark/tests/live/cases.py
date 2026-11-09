@@ -66,7 +66,7 @@ def _telemetry():
 
 CASES = [
     Case('Envelope with Any -> Command', 'udp', 5000, _envelope_command(),
-         ['nanopb Protobuf: demo.envelope.Envelope', 'version: 3',
+         ['ENVELOPE: demo.envelope.Envelope', 'version: 3',
           'body (2): google.protobuf.Any -> demo.payloads.Command',
           'Any type_url: type.googleapis.com/demo.payloads.Command',
           'value: Any -> demo.payloads.Command', 'name: go', 'arg: -5',
@@ -77,13 +77,13 @@ CASES = [
          experts=['body: any.in - must be type_url in'], filter='nanopb.demo.payloads.Ping.id == 42',
          verdict='dropped', note='body only allows Ping and Command (any.in), not an Envelope.'),
     Case('Telemetry, every scalar kind (TCP)', 'tcp', 7000, _telemetry(),
-         ['nanopb Protobuf: demo.telemetry.Telemetry', 'seq: 1', 'timestamp_us: 1234567890123',
+         ['TELEMETRY: demo.telemetry.Telemetry', 'seq: 1', 'timestamp_us: 1234567890123',
           'source: s1', 'device_name: dev', 'unit: UNIT_CELSIUS (1)', 'value: 21.5', 'offset: -3',
           'raw (4): packed [2]', 'raw: -1', 'raw: 300', 'blob: 0102', 'ratio: 0.25', 'healthy: true'],
          filter='nanopb.demo.telemetry.Telemetry.device_name == "dev" && nanopb.demo.telemetry.Reading.offset == -3'),
     Case('Bare Any on an unmapped port (heuristic)', 'udp', 6000,
          any_of('demo.payloads.Ping', f_varint(1, 99)),
-         ['nanopb Protobuf: google.protobuf.Any', 'value: Any -> demo.payloads.Ping', 'id: 99'],
+         ['ENVELOPE: google.protobuf.Any', 'value: Any -> demo.payloads.Ping', 'id: 99'],
          filter='nanopb.demo.payloads.Ping.id == 99', how='heuristic',
          note='Found by "Detect Any on any port (heuristic)"; disable that pref and it shows as plain UDP data.'),
     Case('Any with a type that is not in the schema', 'udp', 5000,
@@ -92,11 +92,11 @@ CASES = [
          experts=['Any type not in schema: other.Thing', 'body: any.in - must be type_url in'],
          filter='nanopb.any.unknown_type', verdict='dropped'),
     Case('Malformed: length runs past the end', 'udp', 5000, f_varint(1, 1) + b'\x12\x10\x01',
-         ['nanopb Protobuf: demo.envelope.Envelope', 'version: 1'],
+         ['ENVELOPE: demo.envelope.Envelope', 'version: 1'],
          experts=['Length exceeds message', 'decode.malformed - length exceeds message'],
          filter='nanopb.malformed', verdict='dropped'),
     Case('Plain Ping on port %d (Decode As)' % DECODE_AS_PORT, 'udp', DECODE_AS_PORT, f_varint(1, 5),
-         ['nanopb Protobuf: demo.payloads.Ping', 'id: 5'],
+         ['ENVELOPE: demo.payloads.Ping', 'id: 5'],
          filter='nanopb.demo.payloads.Ping.id == 5', how='decode_as',
          note='Not decoded by default. Analyze > Decode As: UDP port %d -> NANOPB, and set '
               'Preferences > Protocols > NANOPB > Default message = %s.' % (DECODE_AS_PORT, DECODE_AS_MESSAGE)),
@@ -119,7 +119,7 @@ def generated_cases(count=5, seed=1):
             with open(os.path.join(tmp, 'envelope', 'data', name), 'rb') as handle:
                 payload = handle.read()
             cases.append(Case('Generated Envelope #%d (gen-data --seed %d)' % (i, seed), 'udp', 5000, payload,
-                              ['nanopb Protobuf: demo.envelope.Envelope',
+                              ['ENVELOPE: demo.envelope.Envelope',
                                'Any type_url: type.googleapis.com/demo.payloads.'],
                               filter='nanopb.message == "demo.envelope.Envelope"'))
         return cases

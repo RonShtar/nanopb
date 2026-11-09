@@ -309,7 +309,7 @@ class ValidationTests(LuaTestCase):
 
     def test_info_column_and_fields(self):
         verdict, _, text, info = self.verdict(envelope(body=f_varint(6, 4)))
-        self.assertEqual(info, 'nanopb rules.Envelope (%d bytes) [DROPPED uint32.lte small]'
+        self.assertEqual(info, 'rules.Envelope (%d bytes) [DROPPED uint32.lte small]'
                          % len(envelope(body=f_varint(6, 4))))
         self.assertIn('!nanopb.validation.violation: small: uint32.lte - must be <= 3 (got 4)', text)
         self.assertIn('Field: small', text)
@@ -417,11 +417,11 @@ class ProtocolDecodeTests(LuaTestCase):
         self.install(FIXTURES)
         nanopb = self.mock.protos['nanopb']
         other = any_of('demo.telemetry.Telemetry', b'')
-        # Not set: the plain NANOPB dissector accepts any schema message in an Any.
+        # Not set: an auto-detected Any shows the protocol that owns its message.
         tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
         nanopb.dissector(self.mock.tvb(other), pinfo, tree)
         self.assertNotIn('filter.unknown_type', self.mock.render(tree))
-        self.assertEqual(pinfo.cols.protocol, 'NANOPB')
+        self.assertEqual(pinfo.cols.protocol, 'TELEMETRY')
         # Protocol = envelope: NANOPB packets are envelope packets.
         nanopb.pref_values['protocol'] = 1
         tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
@@ -559,7 +559,8 @@ class StudioTests(LuaTestCase):
 
     def test_menus_registered(self):
         names = set(self.mock.menus.keys())
-        self.assertEqual(names, {'nanopb/Generate C (merged + validation)...',
+        self.assertEqual(names, {'nanopb/Set protos directory (once)...',
+                                 'nanopb/Generate C (merged + validation)...',
                                  'nanopb/Generate test packets (passed + dropped)...',
                                  'nanopb/Load protos directory into Wireshark...', 'nanopb/About'})
 
@@ -653,6 +654,63 @@ class StudioTests(LuaTestCase):
         before = len(calls)
         picker.buttons['Generate']()
         self.assertEqual([calls[i] for i in range(before + 1, len(calls) + 1)], ['open|%s|' % pcap])
+
+    def test_many_units_are_chosen_by_number(self):
+        root = os.path.join(self.tmp, 'many')
+        names = ['p%d' % i for i in range(1, 10)]
+        for name in names:
+            os.makedirs(os.path.join(root, name))
+            with open(os.path.join(root, name, name + '.proto'), 'w') as handle:
+                handle.write('syntax = "proto3";\npackage %s;\nmessage M { uint32 a = 1; }\n' % name)
+        title = 'Generate C (merged + validation)'
+        picker = self.picker('nanopb/' + title + '...', title, input_dir=root)
+        self.assertIsNone(picker.buttons['p1'])
+        self.assertIn('[x] p9', picker.text)
+        self.answer(title + ': choose', '1,3-4,p9')
+        picker.buttons['Choose...']()
+        self.assertIn('   1  [x] p1', picker.text)
+        self.assertIn('   2  [ ] p2', picker.text)
+        self.assertIn('   4  [x] p4', picker.text)
+        self.assertIn('   9  [x] p9', picker.text)
+        self.answer(title + ': choose', 'nope')
+        picker.buttons['Choose...']()
+        self.assertIn('Not in the list: nope', picker.text)
+        self.assertIn('   2  [ ] p2', picker.text)
+
+    def test_highlights_added_once_and_keep_default_rules(self):
+        config = os.path.join(self.tmp, 'config')
+        os.makedirs(config)
+        with open(os.path.join(self.tmp, 'global_colorfilters'), 'w') as handle:
+            handle.write('@Bad TCP@tcp.analysis.flags@[1,2,3][4,5,6]\n')
+        self.lua.execute('Dir.personal_config_path = function(n) return "%s/" .. n end;'
+                         'Dir.global_config_path = function(n) return "%s/global_" .. n end'
+                         % (lua_path(config), lua_path(self.tmp)))
+        for _ in range(2):
+            self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_studio.lua')))
+        with open(os.path.join(config, 'colorfilters')) as handle:
+            colors = handle.read()
+        self.assertTrue(colors.startswith('@nanopb dropped@nanopb.validation == "dropped"@[65535,65535,0][0,0,0]'))
+        self.assertIn('@Bad TCP@', colors)
+        self.assertEqual(colors.count('@nanopb dropped@'), 1)
+        with open(os.path.join(config, 'dfilter_buttons')) as handle:
+            buttons = handle.read()
+        self.assertEqual(buttons.count('"nanopb Dropped"'), 1)
+        self.assertIn('\\x22Warning\\x22', buttons)
+
+    def test_set_directory_once(self):
+        stress = os.path.join(TOOL_DIR, 'examples', 'stress', 'protos')
+        self.answer('Set protos directory', stress, self.out)
+        self.mock.menus['nanopb/Set protos directory (once)...']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('without asking', window.text)
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            self.assertIn('protos_root_fixed = "1"', handle.read())
+        # No answer is given for this dialog: it must not be asked.
+        self.mock.menus['nanopb/Generate C (merged + validation)...']()
+        window = self.last_window()
+        self.assertEqual(window.title, 'Generate C (merged + validation): choose units')
+        self.assertIn('[x] fleet', window.text)
 
     def test_unit_folder_with_vendored_imports_as_input(self):
         unit = os.path.join(self.tmp, 'protos', 'protocolvalid')

@@ -150,6 +150,7 @@ Pref = {}
 for _, kind in ipairs({ "string", "bool", "uint" }) do
     Pref[kind] = function(label, default) return { label = label, default = default } end
 end
+function Pref.statictext(label) return { label = label } end
 function Pref.enum(label, default, _, choices)
     return { label = label, default = default, choices = choices }
 end

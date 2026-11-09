@@ -17,7 +17,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `version: 3`
   - [ ] `body (2): google.protobuf.Any -> demo.payloads.Command`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.Command`
@@ -48,7 +48,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: TCP port 7000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.telemetry.Telemetry`
+  - [ ] `TELEMETRY: demo.telemetry.Telemetry`
   - [ ] `seq: 1`
   - [ ] `timestamp_us: 1234567890123`
   - [ ] `source: s1`
@@ -71,7 +71,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - Transport: UDP port 6000 (heuristic)
 - Note: Found by "Detect Any on any port (heuristic)"; disable that pref and it shows as plain UDP data.
 - The tree contains:
-  - [ ] `nanopb Protobuf: google.protobuf.Any`
+  - [ ] `ENVELOPE: google.protobuf.Any`
   - [ ] `value: Any -> demo.payloads.Ping`
   - [ ] `id: 99`
   - [ ] `Validation: PASSED`
@@ -93,7 +93,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `version: 1`
   - [ ] `Validation: DROPPED`
   - [ ] expert info `Length exceeds message`
@@ -105,7 +105,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 - Transport: UDP port 6001 (Decode As)
 - Note: Not decoded by default. Analyze > Decode As: UDP port 6001 -> NANOPB, and set Preferences > Protocols > NANOPB > Default message = demo.payloads.Ping.
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.payloads.Ping`
+  - [ ] `ENVELOPE: demo.payloads.Ping`
   - [ ] `id: 5`
   - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
@@ -115,7 +115,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
   - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
@@ -125,7 +125,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
   - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
@@ -135,7 +135,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
   - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
@@ -145,7 +145,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
   - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb
@@ -155,7 +155,7 @@ Open `nanopb_live_test.pcap` (`live_test.py pcap`), or capture on loopback (Wind
 
 - Transport: UDP port 5000 (port map)
 - The tree contains:
-  - [ ] `nanopb Protobuf: demo.envelope.Envelope`
+  - [ ] `ENVELOPE: demo.envelope.Envelope`
   - [ ] `Any type_url: type.googleapis.com/demo.payloads.`
   - [ ] `Validation: PASSED`
   - [ ] no expert info from nanopb

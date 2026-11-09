@@ -1784,6 +1784,7 @@ def cmd_install_studio(args):
         # One step: every menu starts from this directory, and Decode As already lists its protocols.
         loaded, _, _ = install_schema(protos_root, [], plugins, config.get('port_map', ''), drop_stale=True)
         config['protos_root'] = protos_root
+        config['protos_root_fixed'] = '1'
         config['port_map'] = loaded.get('port_map', config.get('port_map', ''))
     keys = ['python', 'project', 'nanopb_root', 'protos_root', 'output_dir', 'extra_includes', 'port_map']
     keys += sorted(k for k in config if k not in keys)

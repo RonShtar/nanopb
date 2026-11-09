@@ -396,8 +396,9 @@ def verify(pcap, cases, isolated=False, frames=None, port_map=PORT_MAP, protos_r
     workdir = tempfile.mkdtemp(prefix='nanopb_ws_verify_')
     try:
         base, env = tshark_base(tshark, isolated, workdir, port_map, protos_root)
-        decode_as = ['-d', 'udp.port==%d,nanopb' % decode_as_port,
-                     '-o', 'nanopb.default_message:' + decode_as_message]
+        # NANOPB is not in Decode As once protocols are loaded: map the port to the message.
+        mapped = 'udp:%d=%s' % (decode_as_port, decode_as_message)
+        decode_as = ['-o', 'nanopb.port_map:' + (port_map + ',' + mapped if port_map else mapped)]
         views = {}
         for key, extra in (('normal', []), ('decode_as', decode_as)):
             status, out = run(base + extra + ['-r', pcap, '-V'], env)

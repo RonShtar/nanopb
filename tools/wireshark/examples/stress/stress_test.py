@@ -270,7 +270,7 @@ def showcase_cases(out):
     return [
         Case('Envelope.frame: Frame with 3 Any readings, map, Timestamp, nested enums', udp[0], udp[1],
              env_frame.SerializeToString(),
-             ['nanopb Protobuf: fleet.envelope.Envelope', 'major: 2', 'minor: 7',
+             ['FLEET: fleet.envelope.Envelope', 'major: 2', 'minor: 7',
               'frame (2): fleet.telemetry.Frame', 'name: dev-alpha', 'hi: 72623859790382856', 'lo: 42',
               'ts (3): google.protobuf.Timestamp', 'seconds: 1700000000', 'nanos: 5',
               'readings (4): google.protobuf.Any -> fleet.sensors.Imu',
@@ -306,22 +306,22 @@ def showcase_cases(out):
              filter='nanopb.type_url == "type.googleapis.com/fleet.cmd.SetMode"'),
         Case('Frame directly on TCP', ROOTS['fleet.telemetry.Frame'][0], ROOTS['fleet.telemetry.Frame'][1],
              frame.SerializeToString(),
-             ['nanopb Protobuf: fleet.telemetry.Frame', 'name: dev-alpha', 'value: Any -> fleet.sensors.Battery'],
+             ['FLEET: fleet.telemetry.Frame', 'name: dev-alpha', 'value: Any -> fleet.sensors.Battery'],
              filter='nanopb.fleet.telemetry.Frame.seq == 7'),
         Case('Status directly (proto2 default text not on the wire)', ROOTS['fleet.status.Status'][0],
              ROOTS['fleet.status.Status'][1], status.SerializeToString(),
-             ['nanopb Protobuf: fleet.status.Status', 'code: CODE_BUSY (1)'],
+             ['FLEET: fleet.status.Status', 'code: CODE_BUSY (1)'],
              filter='nanopb.fleet.status.Status.uptime_s == 3600'),
         Case('Bare Any(Battery) on an unmapped port (heuristic)', 'udp', HEURISTIC_PORT,
              wrap(battery).SerializeToString(),
-             ['nanopb Protobuf: google.protobuf.Any', 'value: Any -> fleet.sensors.Battery', 'soc: 87.5'],
+             ['FLEET: google.protobuf.Any', 'value: Any -> fleet.sensors.Battery', 'soc: 87.5'],
              filter='nanopb.fleet.sensors.Battery.millivolts == 3700', how='heuristic'),
         Case('Plain Command on port %d (Decode As)' % DECODE_AS_PORT, 'udp', DECODE_AS_PORT,
              plain_cmd.SerializeToString(),
-             ['nanopb Protobuf: fleet.cmd.Command', 'id: 77', 'raw: 000102', 'priority: SEV_FATAL (3)'],
+             ['FLEET: fleet.cmd.Command', 'id: 77', 'raw: 000102', 'priority: SEV_FATAL (3)'],
              filter='nanopb.fleet.cmd.Command.id == 77', how='decode_as'),
         Case('Malformed Envelope (truncated nested Frame)', udp[0], udp[1], env_frame.SerializeToString()[:40],
-             ['nanopb Protobuf: fleet.envelope.Envelope'], experts=['Length exceeds message'],
+             ['FLEET: fleet.envelope.Envelope'], experts=['Length exceeds message'],
              filter='nanopb.malformed', verdict='dropped'),
     ]
 
@@ -334,7 +334,7 @@ def sample_cases(samples):
         if msg in ROOTS:
             transport, port = ROOTS[msg]
             cases.append(Case('sample %s' % ident, transport, port, data,
-                              ['nanopb Protobuf: %s' % msg], filter='nanopb.message == "%s"' % msg))
+                              ['FLEET: %s' % msg], filter='nanopb.message == "%s"' % msg))
         else:
             url = (URL + msg).encode()
             payload = b'\x0a' + varint(len(url)) + url + b'\x12' + varint(len(data)) + data
