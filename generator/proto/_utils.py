@@ -1,5 +1,6 @@
 import sys
 import subprocess
+import os
 import os.path
 
 import traceback
@@ -89,7 +90,16 @@ def print_versions():
         else:
             sys.stderr.write("Using protoc from system path\n")
 
-        invoke_protoc(['protoc', '--version'])
+        # protoc prints this to stdout, which carries the reply when the
+        # generator runs as a protoc plugin.
+        sys.stdout.flush()
+        saved_stdout = os.dup(1)
+        os.dup2(2, 1)
+        try:
+            invoke_protoc(['protoc', '--version'])
+        finally:
+            os.dup2(saved_stdout, 1)
+            os.close(saved_stdout)
     except Exception as e:
         sys.stderr.write("Failed to determine protoc version: " + str(e) + "\n")
 
