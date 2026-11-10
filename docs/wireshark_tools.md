@@ -92,6 +92,14 @@ About Wireshark > Folders): `%APPDATA%\Wireshark\plugins` on Windows,
 | `nanopb/project/` | a private copy of the generator, the runtime and the backend, so the plugins never depend on where this checkout is |
 | `nanopb/studio_config.luadata` | the Python to use, and your last directories and port map |
 
+**Why Load protos exists.** Wireshark's Lua cannot read `.proto` files, so
+the dissector reads a precompiled `nanopb/schema.luadata` that the Python
+backend builds from your protos. When Wireshark starts, the dissector checks
+whether any `.proto` or `.options` file changed since then and rebuilds the
+schema if so (it takes no time when nothing changed). **Load protos directory
+into Wireshark** does the same on demand, without restarting; it is only
+needed to use edited protos in the running Wireshark.
+
 **To set up everything in one step**, also give the directory that has one
 subfolder per protocol:
 
@@ -295,8 +303,8 @@ smaller `max_size` / `max_count` in the `.options` file.
 
 | I want to... | Do this |
 |--------------|---------|
-| add a protocol | add a folder with its `.proto` files, then **Load protos directory into Wireshark** |
-| change a message | edit the `.proto`, then **Load protos directory** (dissector) and **Generate C** (firmware) |
+| add a protocol | add a folder with its `.proto` files, then restart Wireshark (or **Load protos directory into Wireshark** to load it now) |
+| change a message | edit the `.proto`; Wireshark picks it up at its next start. **Generate C** for the firmware |
 | decode a port as a protocol | Decode As > UDP/TCP port > `<PROTOCOL>` |
 | decode a port as one specific message | Edit > Preferences > Protocols > NANOPB > Port map, e.g. `udp:5000=fleet.envelope.Envelope` |
 | see only invalid packets | display filter `nanopb.validation == "dropped"` |
@@ -339,7 +347,7 @@ right away.
 | `Root message not in schema: some.Message` | Edit > Preferences > Protocols > NANOPB > Port map or Default message still names a message of protos you no longer load. Clear it there. The packet still decodes with your Protocol preference or as an Any. |
 | Two protocols define the same `package.Message` differently | Each protocol keeps its own definition when you choose it with Decode As or the Protocol preference. Plain NANOPB (auto-detected packets and the port map) uses the first one. Generate C keeps them in separate files, but linking two of them into one program clashes. |
 | `protoc failed` | Run the same backend subcommand in a terminal to see the whole error; check that `protobuf` and `grpcio-tools` are installed for that Python. |
-| My protocol isn't in Decode As | Run **Load protos directory into Wireshark** again, then press Ctrl+Shift+L. The folder must contain at least one message of its own. |
+| My protocol isn't in Decode As | Restart Wireshark, or run **Load protos directory into Wireshark** and press Ctrl+Shift+L. The folder must contain at least one message of its own. |
 | A packet has no Validation subtree | It wasn't decoded as nanopb: another dissector claimed it, or nothing maps its port. Use Decode As, the Protocol preference or the port map. |
 | A packet is claimed by another protocol (e.g. KNXnet/IP) | The heuristics of other dissectors run on unmapped ports. Map the port with Decode As. |
 | `pb_callback_t` in the generated header | A string, bytes or repeated field has no `max_size` / `max_count` in its `.options` file. |

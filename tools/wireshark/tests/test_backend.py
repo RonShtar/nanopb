@@ -776,6 +776,26 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(run.stdout.count(': drop: '), 2, run.stdout)
         self.assertIn('name=net_envelope udp=-1 tcp=-1', run.stdout)
 
+    def test_refresh_schema_after_proto_edit(self):
+        root = os.path.join(self.tmp, 'protos')
+        shutil.copytree(FIXTURES, root)
+        plugins = os.path.join(self.tmp, 'plugins')
+        status, _, err = run_backend('install-studio', '--plugins-dir', plugins, '--protos-root', root)
+        self.assertEqual(status, 0, err)
+        status, result, err = run_backend('refresh-schema', '--plugins-dir', plugins)
+        self.assertEqual(status, 0, err)
+        self.assertFalse(result['changed'])
+
+        with open(os.path.join(root, 'telemetry', 'common.proto'), 'a') as handle:
+            handle.write('\nmessage AddedLater { uint32 x = 1; }\n')
+        status, result, err = run_backend('refresh-schema', '--plugins-dir', plugins)
+        self.assertEqual(status, 0, err)
+        self.assertTrue(result['changed'])
+        with open(os.path.join(plugins, 'nanopb', 'schema.luadata')) as handle:
+            self.assertIn('demo.common.AddedLater', handle.read())
+        status, result, err = run_backend('refresh-schema', '--plugins-dir', plugins)
+        self.assertFalse(result['changed'])
+
     def big_message_layout(self):
         root = os.path.join(self.tmp, 'protos')
         self.write_tree(root, {'big/big.proto':

@@ -84,7 +84,7 @@ selected), or use **Select all** / **Select none**, then press **Generate**.
 |------|--------|
 | Generate C (merged + validation) | `<output>/<unit>/<unit>.pb.c/.h` and `<unit>_validate.c/.h` |
 | Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark, plus every packet as a C array and hex in `<output>/<unit>/packets/` |
-| Load protos directory into Wireshark | the dissector, with every folder of the protos directory as a protocol you can choose (Decode As or the NANOPB **Protocol** preference), for real traffic |
+| Load protos directory into Wireshark | the dissector, with every folder of the protos directory as a protocol you can choose (Decode As or the NANOPB **Protocol** preference), for real traffic. Also automatic at Wireshark start when a `.proto` changed |
 | About | paths, Python, port map |
 
 ### Generating C code

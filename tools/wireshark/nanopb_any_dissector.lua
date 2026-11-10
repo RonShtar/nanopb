@@ -50,6 +50,40 @@ local function load_data(path)
     return nil
 end
 
+local studio_config = load_data(DATA_DIR .. SEP .. "studio_config.luadata") or {}
+
+-- When Wireshark starts, rebuild the schema if a .proto file changed since it
+-- was built (the backend compares a fingerprint and returns at once when
+-- nothing changed), so editing protos needs no Load protos step. Skipped for
+-- an explicit NANOPB_WS_SCHEMA, with NANOPB_WS_NO_REFRESH, or before
+-- install-studio has saved a protos directory.
+local function refresh_schema()
+    if os.getenv("NANOPB_WS_SCHEMA") or os.getenv("NANOPB_WS_NO_REFRESH") then return end
+    local python = studio_config.python or ""
+    if python == "" or (studio_config.protos_root or "") == "" then return end
+    local root = studio_config.nanopb_root or ""
+    if root == "" then root = studio_config.project or "" end
+    if root == "" then root = DATA_DIR .. SEP .. "project" end
+    local backend = table.concat({ root, "tools", "wireshark", "backend", "nanopb_wireshark.py" }, SEP)
+    local f = io.open(backend, "r")
+    if not f then return end
+    f:close()
+    local plugins = script_dir()
+    local function quote(arg)
+        if SEP == "\\" then return '"' .. arg:gsub('(\\*)"', '%1%1\\"'):gsub("(\\+)$", "%1%1") .. '"' end
+        return "'" .. arg:gsub("'", "'\\''") .. "'"
+    end
+    local cmd = table.concat({ quote(python), quote(backend), "--nanopb-root", quote(root),
+        "refresh-schema", "--plugins-dir", quote(plugins) }, " ") .. " 2>&1"
+    if SEP == "\\" then cmd = '"' .. cmd .. '"' end
+    local ok, pipe = pcall(io.popen, cmd, "r")
+    if ok and pipe then
+        pipe:read("*a")
+        pipe:close()
+    end
+end
+refresh_schema()
+
 local schema_path = os.getenv("NANOPB_WS_SCHEMA") or (DATA_DIR .. SEP .. "schema.luadata")
 local schema = load_data(schema_path)
 local schema_ok = schema ~= nil
@@ -199,7 +233,6 @@ local function default_port_map_string()
     return table.concat(parts, ",")
 end
 
-local studio_config = load_data(DATA_DIR .. SEP .. "studio_config.luadata") or {}
 nanopb.prefs.protos_directory = Pref.statictext("Protos directory: "
     .. ((studio_config.protos_root or "") ~= "" and studio_config.protos_root or "(not set)")
     .. "   (change it with Tools > nanopb > Set protos directory)", "")

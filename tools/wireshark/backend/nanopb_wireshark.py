@@ -1497,6 +1497,27 @@ def installed_port_map(ports_path):
                     re.findall(r'\{ transport = "(udp|tcp)", port = (\d+), message = "([^"]+)" \}', text))
 
 
+def protos_fingerprint(protos_root, includes):
+    """Cheap fingerprint of the protos: every .proto/.options path, size and
+    mtime, plus this backend's own mtime (a tool update rebuilds the schema)."""
+
+    import hashlib
+    digest = hashlib.sha1()
+    digest.update(str(int(os.stat(os.path.abspath(__file__)).st_mtime)).encode())
+    for root in [protos_root] + list(includes or []):
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirs, files in os.walk(root):
+            dirs.sort()
+            for name in sorted(files):
+                if name.endswith(('.proto', '.options')):
+                    path = os.path.join(dirpath, name)
+                    st = os.stat(path)
+                    digest.update(('%s|%d|%d\n' % (os.path.relpath(path, root), st.st_size,
+                                                    int(st.st_mtime))).encode('utf-8'))
+    return digest.hexdigest()
+
+
 def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None, drop_stale=False):
     """Install the dissector, its schema and port map into ``plugins``.
 
@@ -1508,8 +1529,11 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None
 
     data_dir = os.path.join(plugins, 'nanopb')
     schema_path = os.path.join(data_dir, 'schema.luadata')
+    fingerprint = protos_fingerprint(protos_root, includes)
     text, messages, conflicts = schema_text(protos_root, includes)
     changed = write_if_changed(schema_path, text)
+    # refresh-schema compares against this to skip work when nothing changed.
+    write_if_changed(os.path.join(data_dir, 'schema.fingerprint'), fingerprint + '\n')
     if protocol_ports is None:
         known = set(protocols_of(text))
         protocol_ports = [p for p in installed_protocol_ports(os.path.join(data_dir, 'ports.luadata'))
@@ -1551,6 +1575,37 @@ def shared_names_note(names):
 
 def stale_ports_note(stale):
     return 'Removed from the port map, not in these protos: ' + ', '.join(stale)
+
+
+def cmd_refresh_schema(args):
+    """Rebuild the dissector schema if the protos changed since the last build.
+
+    Run by nanopb_any_dissector.lua when Wireshark starts, with the protos
+    directory saved in studio_config.luadata, so editing a .proto file needs
+    no Load protos step. Exits quickly when nothing changed.
+    """
+
+    plugins = args.plugins_dir or default_plugins_dir()
+    data_dir = os.path.join(plugins, 'nanopb')
+    config = read_lua_config(os.path.join(data_dir, 'studio_config.luadata')) or {}
+    protos_root = config.get('protos_root') or ''
+    if not protos_root or not os.path.isdir(protos_root):
+        return {'changed': False, 'skipped': 'no protos directory set',
+                'summary': 'No protos directory set; nothing to refresh.'}
+    includes = [i.strip() for i in (config.get('extra_includes') or '').split(';') if i.strip()]
+    stored = ''
+    try:
+        with open(os.path.join(data_dir, 'schema.fingerprint')) as handle:
+            stored = handle.read().strip()
+    except (IOError, OSError):
+        pass
+    if stored == protos_fingerprint(protos_root, includes):
+        return {'changed': False, 'summary': 'Schema is up to date with %s.' % protos_root}
+    port_map = installed_port_map(os.path.join(data_dir, 'ports.luadata'))
+    result, changed, _ = install_schema(protos_root, includes, plugins, port_map, drop_stale=True)
+    result['changed'] = changed
+    result['summary'] = 'Schema rebuilt from %s (%d messages).' % (protos_root, result['messages'])
+    return result
 
 
 def cmd_install_dissector(args):
@@ -2130,6 +2185,11 @@ def build_parser():
     protos_args(p)
     p.add_argument('--out', required=True, help='schema file to write (.luadata)')
     p.set_defaults(func=cmd_schema)
+
+    p = sub.add_parser('refresh-schema', help='rebuild the dissector schema if the protos changed '
+                                               '(run by the dissector at Wireshark start)')
+    p.add_argument('--plugins-dir', default=None, help='Wireshark personal Lua plugins folder')
+    p.set_defaults(func=cmd_refresh_schema)
 
     p = sub.add_parser('install-dissector', help='install dissector + schema into a plugins dir')
     protos_args(p)
