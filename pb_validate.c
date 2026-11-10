@@ -212,7 +212,8 @@ void pb_violations_record_numeric(pb_validate_context_t *ctx, const char *constr
 static bool value_in_list(const void *value, const void *list, pb_size_t count, size_t elem_size)
 {
     const uint8_t *list_bytes = (const uint8_t *)list;
-    for (pb_size_t i = 0; i < count; i++)
+    pb_size_t i;
+    for (i = 0; i < count; i++)
     {
         if (memcmp(value, list_bytes + i * elem_size, elem_size) == 0)
             return true;
@@ -394,7 +395,8 @@ bool pb_validate_float(float value, const void *rule_data, pb_validate_rule_type
             const float *values;
             pb_size_t count;
         } *in_data = rule_data;
-        for (pb_size_t i = 0; i < in_data->count; i++)
+        pb_size_t i;
+        for (i = 0; i < in_data->count; i++)
         {
             if (value == in_data->values[i])
                 return true;
@@ -408,7 +410,8 @@ bool pb_validate_float(float value, const void *rule_data, pb_validate_rule_type
             const float *values;
             pb_size_t count;
         } *not_in_data = rule_data;
-        for (pb_size_t i = 0; i < not_in_data->count; i++)
+        pb_size_t i;
+        for (i = 0; i < not_in_data->count; i++)
         {
             if (value == not_in_data->values[i])
                 return false;
@@ -442,7 +445,8 @@ bool pb_validate_double(double value, const void *rule_data, pb_validate_rule_ty
             const double *values;
             pb_size_t count;
         } *in_data = rule_data;
-        for (pb_size_t i = 0; i < in_data->count; i++)
+        pb_size_t i;
+        for (i = 0; i < in_data->count; i++)
         {
             if (value == in_data->values[i])
                 return true;
@@ -456,7 +460,8 @@ bool pb_validate_double(double value, const void *rule_data, pb_validate_rule_ty
             const double *values;
             pb_size_t count;
         } *not_in_data = rule_data;
-        for (pb_size_t i = 0; i < not_in_data->count; i++)
+        pb_size_t i;
+        for (i = 0; i < not_in_data->count; i++)
         {
             if (value == not_in_data->values[i])
                 return false;
@@ -516,7 +521,8 @@ bool pb_validate_string(const char *value, pb_size_t length, const void *rule_da
     }
     case PB_VALIDATE_RULE_ASCII:
     {
-        for (pb_size_t i = 0; i < length; i++)
+        pb_size_t i;
+        for (i = 0; i < length; i++)
         {
             if ((unsigned char)value[i] > 127)
                 return false;
@@ -540,7 +546,8 @@ bool pb_validate_string(const char *value, pb_size_t length, const void *rule_da
             const char *const *values;
             pb_size_t count;
         } *in_data = rule_data;
-        for (pb_size_t i = 0; i < in_data->count; i++)
+        pb_size_t i;
+        for (i = 0; i < in_data->count; i++)
         {
             if (strcmp(value, in_data->values[i]) == 0)
                 return true;
@@ -554,7 +561,8 @@ bool pb_validate_string(const char *value, pb_size_t length, const void *rule_da
             const char *const *values;
             pb_size_t count;
         } *not_in_data = rule_data;
-        for (pb_size_t i = 0; i < not_in_data->count; i++)
+        pb_size_t i;
+        for (i = 0; i < not_in_data->count; i++)
         {
             if (strcmp(value, not_in_data->values[i]) == 0)
                 return false;
@@ -599,10 +607,11 @@ bool pb_validate_bytes(const pb_bytes_array_t *value, const void *rule_data, pb_
     case PB_VALIDATE_RULE_CONTAINS:
     {
         const pb_bytes_array_t *pattern = (const pb_bytes_array_t *)rule_data;
+        pb_size_t i;
         if (pattern->size > value->size)
             return false;
 
-        for (pb_size_t i = 0; i <= value->size - pattern->size; i++)
+        for (i = 0; i <= value->size - pattern->size; i++)
         {
             if (memcmp(value->bytes + i, pattern->bytes, pattern->size) == 0)
                 return true;
@@ -743,15 +752,16 @@ bool pb_validate_bytes_length(pb_size_t length, pb_size_t min_len, pb_size_t max
  */
 bool pb_read_callback_string(const struct pb_callback_s *callback, const char **out_str, pb_size_t *out_len)
 {
+    const char *p;
+    size_t len = 0;
     if (!callback || !out_str || !out_len)
         return false;
     /* pb_callback_t defined in pb.h as struct pb_callback_s { bool (*func)(pb_istream_t*, pb_ostream_t*, const pb_field_t*, void**); void *arg; } (typical).
        We rely only on arg. */
-    const char *p = (const char *)callback->arg;
+    p = (const char *)callback->arg;
     if (!p)
         return false;
     /* Ensure NUL-termination within reasonable bounds: scan up to PB_VALIDATE_MAX_MESSAGE_LENGTH */
-    size_t len = 0;
     while (p[len] != '\0')
     {
         if (len >= PB_VALIDATE_MAX_MESSAGE_LENGTH)
@@ -770,12 +780,13 @@ bool pb_read_callback_string(const struct pb_callback_s *callback, const char **
 
 static bool is_valid_hostname_label(const char *s, size_t len)
 {
+    size_t i;
     if (len == 0 || len > 63)
         return false;
     /* First and last cannot be '-' */
     if (s[0] == '-' || s[len - 1] == '-')
         return false;
-    for (size_t i = 0; i < len; i++)
+    for (i = 0; i < len; i++)
     {
         unsigned char c = (unsigned char)s[i];
         if (c > 127)
@@ -788,13 +799,14 @@ static bool is_valid_hostname_label(const char *s, size_t len)
 
 static bool is_valid_hostname(const char *s, size_t len)
 {
+    size_t start = 0;
+    size_t i;
     if (!s || len == 0 || len > 253)
         return false;
     /* Cannot start or end with '.' and no consecutive dots */
     if (s[0] == '.' || s[len - 1] == '.')
         return false;
-    size_t start = 0;
-    for (size_t i = 0; i <= len; i++)
+    for (i = 0; i <= len; i++)
     {
         if (i == len || s[i] == '.')
         {
@@ -814,11 +826,13 @@ static bool is_valid_hostname(const char *s, size_t len)
 
 static bool is_valid_email(const char *s, size_t len)
 {
+    size_t at_pos = (size_t)-1;
+    size_t lstart = 0, lend;
+    size_t i;
     if (!s || len < 3) /* a@b minimal */
         return false;
     /* Basic checks: single '@', non-empty local & domain, no spaces */
-    size_t at_pos = (size_t)-1;
-    for (size_t i = 0; i < len; i++)
+    for (i = 0; i < len; i++)
     {
         unsigned char c = (unsigned char)s[i];
         if (c <= 32 || c == 127)
@@ -833,10 +847,10 @@ static bool is_valid_email(const char *s, size_t len)
     if (at_pos == (size_t)-1 || at_pos == 0 || at_pos == len - 1)
         return false;
     /* Local part basic validity: cannot start/end with '.', no consecutive '..' */
-    size_t lstart = 0, lend = at_pos;
+    lend = at_pos;
     if (s[lstart] == '.' || s[lend - 1] == '.')
         return false;
-    for (size_t i = lstart + 1; i < lend; i++)
+    for (i = lstart + 1; i < lend; i++)
     {
         if (s[i] == '.' && s[i - 1] == '.')
             return false;
@@ -847,10 +861,11 @@ static bool is_valid_email(const char *s, size_t len)
 
 static bool parse_uint_dotted_segment(const char *s, size_t len, int *out)
 {
+    int value = 0;
+    size_t i;
     if (len == 0)
         return false;
-    int value = 0;
-    for (size_t i = 0; i < len; i++)
+    for (i = 0; i < len; i++)
     {
         if (!isdigit((unsigned char)s[i]))
             return false;
@@ -864,19 +879,20 @@ static bool parse_uint_dotted_segment(const char *s, size_t len, int *out)
 
 static bool is_valid_ipv4(const char *s, size_t len)
 {
-    if (!s || len < 7 || len > 15)
-        return false;
     size_t start = 0;
     int parts = 0;
-    for (size_t i = 0; i <= len; i++)
+    size_t i;
+    if (!s || len < 7 || len > 15)
+        return false;
+    for (i = 0; i <= len; i++)
     {
         if (i == len || s[i] == '.')
         {
+            int v;
             if (parts > 3)
                 return false;
             if (i == start)
                 return false; /* empty */
-            int v;
             if (!parse_uint_dotted_segment(&s[start], i - start, &v))
                 return false;
             parts++;
@@ -897,12 +913,12 @@ static bool is_hex_digit(char c)
 
 static bool is_valid_ipv6(const char *s, size_t len)
 {
-    if (!s || len < 2)
-        return false;
     size_t i = 0, start = 0;
     int hextets = 0;
     bool compress = false;
     bool after_compress = false; /* the previous token was a "::" */
+    if (!s || len < 2)
+        return false;
 
     if (s[i] == ':')
     {
@@ -920,6 +936,9 @@ static bool is_valid_ipv6(const char *s, size_t len)
     {
         if (i == len || s[i] == ':')
         {
+            bool has_dot = false;
+            size_t seglen;
+            size_t k;
             if (i == start)
             {
                 if (i == len)
@@ -943,8 +962,7 @@ static bool is_valid_ipv6(const char *s, size_t len)
             after_compress = false;
 
             /* Check if this segment is IPv4 tail */
-            bool has_dot = false;
-            for (size_t k = start; k < i; k++)
+            for (k = start; k < i; k++)
             {
                 if (s[k] == '.')
                 {
@@ -961,10 +979,10 @@ static bool is_valid_ipv6(const char *s, size_t len)
                 break; /* IPv4 must be the last part */
             }
 
-            size_t seglen = i - start;
+            seglen = i - start;
             if (seglen == 0 || seglen > 4)
                 return false;
-            for (size_t k = start; k < i; k++)
+            for (k = start; k < i; k++)
             {
                 if (!is_hex_digit(s[k]))
                     return false;

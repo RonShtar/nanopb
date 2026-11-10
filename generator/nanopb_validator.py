@@ -59,6 +59,90 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+
+# ---------------------------------------------------------------------------
+# Layout of generated C
+# ---------------------------------------------------------------------------
+
+_FOR_DECL_RE = re.compile(r'for \(((?:const )?(?:pb_size_t|size_t|unsigned|int|u?int\w*_t))\s+(\w+) = ')
+_DECL_RE = re.compile(r'^(?:static\s+)?(?:const\s+)?(?:struct\s+)?[A-Za-z_]\w*(?:\s+const)?'
+                      r'(?:\s*\*+\s*|\s+)[A-Za-z_]\w*\s*(?:\[[^\]]*\])*\s*(?:=|;)')
+_NOT_DECL = ('return ', 'else ', 'goto ', 'case ', 'break;', 'continue;')
+
+
+_PP_INDENT_RE = re.compile(r'^[ \t]+#', re.M)
+_TRAILING_RE = re.compile(r'[ \t]+$', re.M)
+_BLANK_RUN_RE = re.compile(r'\n{3,}')
+
+
+def tidy_c(text: str) -> str:
+    """Final layout pass over generated C: preprocessor lines at column 0,
+    no trailing whitespace, at most one blank line in a row."""
+
+    text = _PP_INDENT_RE.sub('#', text)
+    text = _TRAILING_RE.sub('', text)
+    return _BLANK_RUN_RE.sub('\n\n', text)
+
+
+def _is_declaration(line: str) -> bool:
+    return bool(_DECL_RE.match(line)) and not line.startswith(_NOT_DECL)
+
+
+def c_block(code: str, indent: int) -> str:
+    """Lay out one generated C fragment at ``indent`` spaces, C89 style.
+
+    Declarations always open a block: loop counters move out of the for
+    header (``for (pb_size_t i = 0;`` becomes ``pb_size_t i;`` + ``for (i = 0;``)
+    to the top of the fragment, a fragment that declares anything gets its
+    own ``{ }``, and a declaration after a statement opens a nested block.
+    Lines keep their relative indentation; preprocessor lines go to column 0.
+    """
+
+    if not code or not code.strip():
+        return code
+    hoisted = []
+
+    def hoist(match):
+        decl = '%s %s;' % (match.group(1), match.group(2))
+        if decl not in hoisted:
+            hoisted.append(decl)
+        return 'for (%s = ' % match.group(2)
+
+    code = _FOR_DECL_RE.sub(hoist, code)
+    lines = [l.rstrip() for l in code.split('\n')]
+    while lines and not lines[-1]:
+        lines.pop()
+    body = [l for l in lines if l.strip() and not l.lstrip().startswith('#')]
+    base = min(len(l) - len(l.lstrip()) for l in body) if body else 0
+    lines = [l if l.lstrip().startswith('#') else l[base:] for l in lines]
+
+    wrap = bool(hoisted) or any(_is_declaration(l) for l in lines if l and not l[0].isspace())
+    pad = ' ' * (indent + (4 if wrap else 0))
+    out, opened, seen_statement = [], 0, False
+    for decl in hoisted:
+        out.append(pad + decl)
+    for line in lines:
+        if not line:
+            out.append('')
+            continue
+        if line.lstrip().startswith('#'):
+            out.append(line.lstrip())
+            continue
+        top = not line[0].isspace()
+        if top and _is_declaration(line):
+            if seen_statement:
+                out.append(pad + '    ' * opened + '{')
+                opened += 1
+                seen_statement = False
+        elif top:
+            seen_statement = True
+        out.append(pad + '    ' * opened + line)
+    for level in range(opened - 1, -1, -1):
+        out.append(pad + '    ' * level + '}')
+    if wrap:
+        out = [' ' * indent + '{'] + out + [' ' * indent + '}']
+    return '\n'.join(out) + '\n'
+
 # =============================================================================
 # EXTERNAL DEPENDENCIES (from nanopb_generator.py)
 # =============================================================================
@@ -1242,7 +1326,7 @@ class ConstValueRuleEmitter(RuleEmitter):
             if isinstance(value, str):
                 value = value.encode('latin-1', 'replace')
             data = bytes(value)
-            array_name = '__pb_%s_const' % field_name
+            array_name = 'pbv_%s_const' % field_name
             byte_list = ', '.join('0x%02x' % byte for byte in data) if data else '0x00'
             code = '        static const uint8_t %s[] = { %s };\n' % (array_name, byte_list)
             if ctx.is_oneof and not ctx.is_anonymous:
@@ -1447,9 +1531,9 @@ class ItemsRuleEmitter(RuleEmitter):
                 if isinstance(expected, bytes):
                     expected = expected.decode('utf-8', 'replace')
                 code += '        /* repeated.items string.const validation */\n'
-                code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                code += '            if (strcmp(msg->%s[__pb_i], "%s") != 0) {\n' % (field_name, _escape_c_string(expected))
+                code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            if (strcmp(msg->%s[pbv_i], "%s") != 0) {\n' % (field_name, _escape_c_string(expected))
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must equal specified constant");\n' % constraint_id
                 code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                 code += '            }\n'
@@ -1480,10 +1564,10 @@ class ItemsRuleEmitter(RuleEmitter):
             elif rule_type == RULE_PREFIX and pbtype == 'STRING':
                 prefix = item_rule.get('value', '')
                 code += '        /* repeated.items string.prefix validation */\n'
-                code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                code += '            const char *__pb_prefix = "%s";\n' % prefix
-                code += '            if (!pb_validate_string(msg->%s[__pb_i], (pb_size_t)strlen(msg->%s[__pb_i]), __pb_prefix, PB_VALIDATE_RULE_PREFIX)) {\n' % (field_name, field_name)
+                code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            const char *pbv_prefix = "%s";\n' % prefix
+                code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_prefix, PB_VALIDATE_RULE_PREFIX)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must start with specified prefix");\n' % constraint_id
                 code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                 code += '            }\n'
@@ -1493,10 +1577,10 @@ class ItemsRuleEmitter(RuleEmitter):
             elif rule_type == RULE_SUFFIX and pbtype == 'STRING':
                 suffix = item_rule.get('value', '')
                 code += '        /* repeated.items string.suffix validation */\n'
-                code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                code += '            const char *__pb_suffix = "%s";\n' % suffix
-                code += '            if (!pb_validate_string(msg->%s[__pb_i], (pb_size_t)strlen(msg->%s[__pb_i]), __pb_suffix, PB_VALIDATE_RULE_SUFFIX)) {\n' % (field_name, field_name)
+                code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            const char *pbv_suffix = "%s";\n' % suffix
+                code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_suffix, PB_VALIDATE_RULE_SUFFIX)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must end with specified suffix");\n' % constraint_id
                 code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                 code += '            }\n'
@@ -1506,10 +1590,10 @@ class ItemsRuleEmitter(RuleEmitter):
             elif rule_type == RULE_CONTAINS and pbtype == 'STRING':
                 needle = item_rule.get('value', '')
                 code += '        /* repeated.items string.contains validation */\n'
-                code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                code += '            const char *__pb_needle = "%s";\n' % needle
-                code += '            if (!pb_validate_string(msg->%s[__pb_i], (pb_size_t)strlen(msg->%s[__pb_i]), __pb_needle, PB_VALIDATE_RULE_CONTAINS)) {\n' % (field_name, field_name)
+                code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            const char *pbv_needle = "%s";\n' % needle
+                code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_needle, PB_VALIDATE_RULE_CONTAINS)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must contain specified substring");\n' % constraint_id
                 code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                 code += '            }\n'
@@ -1518,9 +1602,9 @@ class ItemsRuleEmitter(RuleEmitter):
             
             elif rule_type == RULE_ASCII and pbtype == 'STRING':
                 code += '        /* repeated.items string.ascii validation */\n'
-                code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                code += '            if (!pb_validate_string(msg->%s[__pb_i], (pb_size_t)strlen(msg->%s[__pb_i]), NULL, PB_VALIDATE_RULE_ASCII)) {\n' % (field_name, field_name)
+                code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), NULL, PB_VALIDATE_RULE_ASCII)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must contain only ASCII characters");\n' % constraint_id
                 code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                 code += '            }\n'
@@ -1531,9 +1615,9 @@ class ItemsRuleEmitter(RuleEmitter):
                 rule_enum = self.STRING_FORMAT_RULE_TO_C_ENUM.get(rule_type)
                 if rule_enum:
                     code += '        /* repeated.items %s validation */\n' % constraint_id
-                    code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                    code += '            if (!pb_validate_string(msg->%s[__pb_i], (pb_size_t)strlen(msg->%s[__pb_i]), NULL, %s)) {\n' % (field_name, field_name, rule_enum)
+                    code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), NULL, %s)) {\n' % (field_name, field_name, rule_enum)
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "String format validation failed");\n' % constraint_id
                     code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                     code += '            }\n'
@@ -1548,10 +1632,10 @@ class ItemsRuleEmitter(RuleEmitter):
                     arr_values = ', '.join(str(v) for v in enum_vals)
                     code += '        /* repeated.items enum.defined_only validation */\n'
                     code += '        {\n'
-                    code += '            static const int __pb_%s_item_vals[] = { %s };\n' % (field_name, arr_values)
-                    code += '            for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                    code += '                pb_validate_context_push_index(&ctx, __pb_i);\n'
-                    code += '                if (!pb_validate_enum_defined_only((int)msg->%s[__pb_i], __pb_%s_item_vals, (pb_size_t)(sizeof(__pb_%s_item_vals)/sizeof(__pb_%s_item_vals[0])))) {\n' % (field_name, field_name, field_name, field_name)
+                    code += '            static const int pbv_%s_item_vals[] = { %s };\n' % (field_name, arr_values)
+                    code += '            for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                    code += '                pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '                if (!pb_validate_enum_defined_only((int)msg->%s[pbv_i], pbv_%s_item_vals, (pb_size_t)(sizeof(pbv_%s_item_vals)/sizeof(pbv_%s_item_vals[0])))) {\n' % (field_name, field_name, field_name, field_name)
                     code += '                    PB_VALIDATE_RECORD(ctx, "%s", "Value must be a defined enum value");\n' % constraint_id
                     code += '                    if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                     code += '                }\n'
@@ -1564,14 +1648,14 @@ class ItemsRuleEmitter(RuleEmitter):
                 if pbtype == 'STRING':
                     values_array = ', '.join('"%s"' % v for v in values)
                     code += '        /* repeated.items string.in validation */\n'
-                    code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                    code += '            const char *__pb_allowed[] = { %s };\n' % values_array
-                    code += '            bool __pb_match = false;\n'
-                    code += '            for (size_t __pb_k = 0; __pb_k < sizeof(__pb_allowed)/sizeof(__pb_allowed[0]); __pb_k++) {\n'
-                    code += '                if (strcmp(msg->%s[__pb_i], __pb_allowed[__pb_k]) == 0) { __pb_match = true; break; }\n' % field_name
+                    code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '            const char *pbv_allowed[] = { %s };\n' % values_array
+                    code += '            bool pbv_match = false;\n'
+                    code += '            for (size_t pbv_k = 0; pbv_k < sizeof(pbv_allowed)/sizeof(pbv_allowed[0]); pbv_k++) {\n'
+                    code += '                if (strcmp(msg->%s[pbv_i], pbv_allowed[pbv_k]) == 0) { pbv_match = true; break; }\n' % field_name
                     code += '            }\n'
-                    code += '            if (!__pb_match) {\n'
+                    code += '            if (!pbv_match) {\n'
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must be one of allowed set");\n' % constraint_id
                     code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                     code += '            }\n'
@@ -1579,12 +1663,12 @@ class ItemsRuleEmitter(RuleEmitter):
                     code += '        }\n'
                 else:
                     type_name = constraint_id.split('.', 1)[0]
-                    conditions = ['msg->%s[__pb_i] == %s' % (field_name, _c_numeric_literal(v, type_name))
+                    conditions = ['msg->%s[pbv_i] == %s' % (field_name, _c_numeric_literal(v, type_name))
                                   for v in values]
                     condition_str = ' || '.join(conditions) if conditions else 'false'
                     code += '        /* repeated.items %s.in validation */\n' % constraint_id.split('.')[0]
-                    code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
+                    code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                     code += '            if (!(%s)) {\n' % condition_str
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must be one of allowed set");\n' % constraint_id
                     code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
@@ -1597,14 +1681,14 @@ class ItemsRuleEmitter(RuleEmitter):
                 if pbtype == 'STRING':
                     values_array = ', '.join('"%s"' % v for v in values)
                     code += '        /* repeated.items string.not_in validation */\n'
-                    code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
-                    code += '            const char *__pb_blocked[] = { %s };\n' % values_array
-                    code += '            bool __pb_forbidden = false;\n'
-                    code += '            for (size_t __pb_k = 0; __pb_k < sizeof(__pb_blocked)/sizeof(__pb_blocked[0]); __pb_k++) {\n'
-                    code += '                if (strcmp(msg->%s[__pb_i], __pb_blocked[__pb_k]) == 0) { __pb_forbidden = true; break; }\n' % field_name
+                    code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '            const char *pbv_blocked[] = { %s };\n' % values_array
+                    code += '            bool pbv_forbidden = false;\n'
+                    code += '            for (size_t pbv_k = 0; pbv_k < sizeof(pbv_blocked)/sizeof(pbv_blocked[0]); pbv_k++) {\n'
+                    code += '                if (strcmp(msg->%s[pbv_i], pbv_blocked[pbv_k]) == 0) { pbv_forbidden = true; break; }\n' % field_name
                     code += '            }\n'
-                    code += '            if (__pb_forbidden) {\n'
+                    code += '            if (pbv_forbidden) {\n'
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value is in forbidden set");\n' % constraint_id
                     code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
                     code += '            }\n'
@@ -1612,12 +1696,12 @@ class ItemsRuleEmitter(RuleEmitter):
                     code += '        }\n'
                 else:
                     type_name = constraint_id.split('.', 1)[0]
-                    conditions = ['msg->%s[__pb_i] != %s' % (field_name, _c_numeric_literal(v, type_name))
+                    conditions = ['msg->%s[pbv_i] != %s' % (field_name, _c_numeric_literal(v, type_name))
                                   for v in values]
                     condition_str = ' && '.join(conditions) if conditions else 'true'
                     code += '        /* repeated.items %s.not_in validation */\n' % constraint_id.split('.')[0]
-                    code += '        for (pb_size_t __pb_i = 0; __pb_i < msg->%s_count; ++__pb_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, __pb_i);\n'
+                    code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
+                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                     code += '            if (!(%s)) {\n' % condition_str
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value is in forbidden set");\n' % constraint_id
                     code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
@@ -1677,7 +1761,7 @@ class AnyRuleEmitter(RuleEmitter):
         suffix = 'in' if is_in else 'notin'
         macro = 'ANY_IN' if is_in else 'ANY_NOT_IN'
         message = 'type_url not in allowed list' if is_in else 'type_url in disallowed list'
-        array = '__pb_%s_urls_%s' % (field_name, suffix)
+        array = 'pbv_%s_urls_%s' % (field_name, suffix)
         decl = '        static const char *%s[] = { %s };\n' % (array, values_array)
 
         if ctx.is_oneof and not ctx.is_anonymous:
@@ -1690,22 +1774,22 @@ class AnyRuleEmitter(RuleEmitter):
         if rules in ('REPEATED', 'FIXARRAY') and not ctx.is_oneof:
             count = ('msg->%s_count' % field_name) if rules == 'REPEATED' else \
                 '(sizeof(msg->%s) / sizeof(msg->%s[0]))' % (field_name, field_name)
-            check = ('(__pb_url && strcmp(__pb_url, %s[__pb_k]) == 0)' % array)
+            check = ('(pbv_url && strcmp(pbv_url, %s[pbv_k]) == 0)' % array)
             if is_in:
-                body = ('                bool __pb_ok = false;\n'
-                        '                for (size_t __pb_k = 0; __pb_k < %d; ++__pb_k)\n'
-                        '                    if %s { __pb_ok = true; break; }\n'
-                        '                if (!__pb_ok) {\n') % (len(values), check)
+                body = ('                bool pbv_ok = false;\n'
+                        '                for (size_t pbv_k = 0; pbv_k < %d; ++pbv_k)\n'
+                        '                    if %s { pbv_ok = true; break; }\n'
+                        '                if (!pbv_ok) {\n') % (len(values), check)
             else:
-                body = ('                bool __pb_ok = true;\n'
-                        '                for (size_t __pb_k = 0; __pb_k < %d; ++__pb_k)\n'
-                        '                    if %s { __pb_ok = false; break; }\n'
-                        '                if (!__pb_ok) {\n') % (len(values), check)
+                body = ('                bool pbv_ok = true;\n'
+                        '                for (size_t pbv_k = 0; pbv_k < %d; ++pbv_k)\n'
+                        '                    if %s { pbv_ok = false; break; }\n'
+                        '                if (!pbv_ok) {\n') % (len(values), check)
             return ('        {\n' + decl.replace('        static', '            static') +
-                    '            for (pb_size_t __pb_i = 0; __pb_i < %s; ++__pb_i) {\n'
-                    '                const char *__pb_url = (const char *)msg->%s[__pb_i].type_url;\n'
+                    '            for (pb_size_t pbv_i = 0; pbv_i < %s; ++pbv_i) {\n'
+                    '                const char *pbv_url = (const char *)msg->%s[pbv_i].type_url;\n'
                     '%s'
-                    '                    pb_validate_context_push_index(&ctx, __pb_i);\n'
+                    '                    pb_validate_context_push_index(&ctx, pbv_i);\n'
                     '                    PB_VALIDATE_RECORD(ctx, "%s", "%s");\n'
                     '                    pb_validate_context_pop_index(&ctx);\n'
                     '                    if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
@@ -1762,22 +1846,22 @@ class BytesSetRuleEmitter(RuleEmitter):
             data = self._as_bytes(rule_ir.rule.params.get('value', b''))
             return ('        {\n'
                     '            %s\n'
-                    '            if (!pb_validate_bytes_pattern(%s.bytes, %s.size, __pb_pattern, %d, %s)) {\n'
+                    '            if (!pb_validate_bytes_pattern(%s.bytes, %s.size, pbv_pattern, %d, %s)) {\n'
                     '%s'
                     '            }\n'
-                    '        }\n') % (self._array('__pb_pattern', data), access, access, len(data),
+                    '        }\n') % (self._array('pbv_pattern', data), access, access, len(data),
                                        self.C_RULE[rule_ir.rule_type], fail)
 
         values = [self._as_bytes(v) for v in rule_ir.rule.params.get('values', [])]
         if not values:
             return ''
-        arrays = '\n            '.join(self._array('__pb_v%d' % i, v) for i, v in enumerate(values))
-        items = ', '.join('{ __pb_v%d, %d }' % (i, len(v)) for i, v in enumerate(values))
+        arrays = '\n            '.join(self._array('pbv_v%d' % i, v) for i, v in enumerate(values))
+        items = ', '.join('{ pbv_v%d, %d }' % (i, len(v)) for i, v in enumerate(values))
         negate = '' if rule_ir.rule_type == RULE_IN else '!'
         return ('        {\n'
                 '            %s\n'
-                '            static const pb_validate_bytes_item_t __pb_set[] = { %s };\n'
-                '            if (!(%spb_validate_bytes_in(%s.bytes, %s.size, __pb_set, %d))) {\n'
+                '            static const pb_validate_bytes_item_t pbv_set[] = { %s };\n'
+                '            if (!(%spb_validate_bytes_in(%s.bytes, %s.size, pbv_set, %d))) {\n'
                 '%s'
                 '            }\n'
                 '        }\n') % (arrays, items, negate, access, access, len(values), fail)
@@ -1824,12 +1908,12 @@ class InNotInRuleEmitter(RuleEmitter):
                            ) % (condition_str, rule_ir.constraint_id)
             else:
                 if is_in:
-                    return ('    static const char *__pb_%s_in[] = { %s };\n'
-                            '    PB_VALIDATE_STR_IN(ctx, msg, %s, __pb_%s_in, %d, "%s");\n') % (
+                    return ('    static const char *pbv_%s_in[] = { %s };\n'
+                            '    PB_VALIDATE_STR_IN(ctx, msg, %s, pbv_%s_in, %d, "%s");\n') % (
                         field_name, values_array, field_name, field_name, len(values), rule_ir.constraint_id)
                 else:
-                    return ('    static const char *__pb_%s_notin[] = { %s };\n'
-                            '    PB_VALIDATE_STR_NOT_IN(ctx, msg, %s, __pb_%s_notin, %d, "%s");\n') % (
+                    return ('    static const char *pbv_%s_notin[] = { %s };\n'
+                            '    PB_VALIDATE_STR_NOT_IN(ctx, msg, %s, pbv_%s_notin, %d, "%s");\n') % (
                         field_name, values_array, field_name, field_name, len(values), rule_ir.constraint_id)
         else:
             # Numeric IN/NOT_IN
@@ -1891,13 +1975,13 @@ class EnumDefinedRuleEmitter(RuleEmitter):
 
         if ctx.is_oneof and not ctx.is_anonymous:
             field_access = '%s.%s' % (ctx.oneof_name, field_name)
-            return ('    static const int __pb_%s_vals[] = { %s };\n'
-                    '    if (!pb_validate_enum_defined_only((int)msg->%s, __pb_%s_vals, (pb_size_t)(sizeof(__pb_%s_vals)/sizeof(__pb_%s_vals[0])))) {\n'
+            return ('    static const int pbv_%s_vals[] = { %s };\n'
+                    '    if (!pb_validate_enum_defined_only((int)msg->%s, pbv_%s_vals, (pb_size_t)(sizeof(pbv_%s_vals)/sizeof(pbv_%s_vals[0])))) {\n'
                     '        PB_VALIDATE_RECORD(ctx, "%s", "Value must be a defined enum value");\n'
                     '        if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
                     '    }\n') % (field_name, arr_values, field_access, field_name, field_name, field_name, rule_ir.constraint_id)
-        return ('    static const int __pb_%s_vals[] = { %s };\n'
-                '    PB_VALIDATE_ENUM_DEFINED_ONLY(ctx, msg, %s, __pb_%s_vals, "%s");\n'
+        return ('    static const int pbv_%s_vals[] = { %s };\n'
+                '    PB_VALIDATE_ENUM_DEFINED_ONLY(ctx, msg, %s, pbv_%s_vals, "%s");\n'
                ) % (field_name, arr_values, field_name, field_name, rule_ir.constraint_id)
 
 
@@ -2329,7 +2413,7 @@ class ValidatorGenerator:
             if is_map and rules == 'REPEATED':
                 macro = 'PB_VALIDATE_NESTED_MAP_VALUES'
             elif is_map:
-                return ['    PB_VALIDATE_NESTED_MSG_ITEMS(ctx, %s, msg->%s[__pb_i].value, '
+                return ['    PB_VALIDATE_NESTED_MSG_ITEMS(ctx, %s, msg->%s[pbv_i].value, '
                         'sizeof(msg->%s) / sizeof(msg->%s[0]), violations);\n'
                         % (sub_func, field_name, field_name, field_name)]
             elif rules == 'FIXARRAY':
@@ -2515,7 +2599,7 @@ class ValidatorGenerator:
         The entry's key and value are ordinary fields of the synthetic
         <Field>Entry message, so their rules go through the normal emitters;
         the generated code then reads them from the current entry
-        (``__pb_entry``) instead of from ``msg``.
+        (``pbv_entry``) instead of from ``msg``.
         """
         field_name = getattr(field, 'name', '')
         ctype = getattr(field, 'ctype', None)
@@ -2545,18 +2629,16 @@ class ValidatorGenerator:
                     'validate.proto option "map.%ss" on message "%s" field "%s" produced '
                     'no check. Remove it from the .proto, or wait for support.'
                     % (part, message_name, field_name))
-            code = re.sub(r'\bmsg\b(?=\s*(->|,))', '__pb_entry', code)
+            code = re.sub(r'\bmsg\b(?=\s*(->|,))', 'pbv_entry', code)
             body += '            PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % part
-            body += ''.join('        ' + line if line.strip() else line
-                            for line in code.splitlines(True))
+            body += c_block(code, 12)
             body += '            PB_VALIDATE_FIELD_END(ctx);\n'
         if not body:
             return ''
 
-        out = '        /* map.keys / map.values */\n'
-        out += '        for (pb_size_t __pb_mi = 0; __pb_mi < msg->%s_count; ++__pb_mi) {\n' % field_name
-        out += '            const %s *__pb_entry = &msg->%s[__pb_mi];\n' % (ctype, field_name)
-        out += '            pb_validate_context_push_index(&ctx, __pb_mi);\n'
+        out = '        for (pb_size_t pbv_mi = 0; pbv_mi < msg->%s_count; ++pbv_mi) {\n' % field_name
+        out += '            const %s *pbv_entry = &msg->%s[pbv_mi];\n' % (ctype, field_name)
+        out += '            pb_validate_context_push_index(&ctx, pbv_mi);\n'
         out += body
         out += '            pb_validate_context_pop_index(&ctx);\n'
         out += '        }\n'
@@ -2631,14 +2713,13 @@ class ValidatorGenerator:
 
                 for rule in field_validator.rules:
                     if rule.rule_type == RULE_MAP_ENTRIES:
-                        yield self._emit_map_entries(rule, field, struct_name)
+                        yield c_block(self._emit_map_entries(rule, field, struct_name), 4)
                     else:
-                        yield self._emit_rule(rule, field, message_name=struct_name)
+                        yield c_block(self._emit_rule(rule, field, message_name=struct_name), 4)
 
                 # Automatic recursion for nested message fields
                 try:
-                    for line in self._nested_validation_lines(field, field_name):
-                        yield line
+                    yield c_block(''.join(self._nested_validation_lines(field, field_name)), 4)
                 except Exception:
                     # If field shape is unexpected, skip recursion silently to avoid crashes
                     pass
@@ -2670,8 +2751,7 @@ class ValidatorGenerator:
                     if not lines:
                         continue
                     yield '    PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % fname
-                    for line in lines:
-                        yield line
+                    yield c_block(''.join(lines), 4)
                     yield '    PB_VALIDATE_FIELD_END(ctx);\n'
                     yield '\n'
                 except Exception:
@@ -2691,17 +2771,17 @@ class ValidatorGenerator:
                     # Tag constant format: <MESSAGE_NAME>_<field_name>_tag
                     tag_name = '%s_%s_tag' % (struct_name, field_name)
                     yield '    PB_VALIDATE_ONEOF_CASE(%s)\n' % tag_name
-                    yield '    PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % field_name
+                    yield '        PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % field_name
                     
                     # Get anonymous flag for the oneof
                     is_anonymous = getattr(oneof_obj, 'anonymous', False)
                     
                     for rule in member_fv.rules:
-                        yield self._emit_rule(rule, member_field, is_oneof=True,
-                                             oneof_name=oneof_name, is_anonymous=is_anonymous,
-                                             message_name=struct_name)
-                    
-                    yield '    PB_VALIDATE_FIELD_END(ctx);\n'
+                        yield c_block(self._emit_rule(rule, member_field, is_oneof=True,
+                                                      oneof_name=oneof_name, is_anonymous=is_anonymous,
+                                                      message_name=struct_name), 8)
+
+                    yield '        PB_VALIDATE_FIELD_END(ctx);\n'
                     yield '    PB_VALIDATE_ONEOF_CASE_END()\n'
                 
                 yield '    PB_VALIDATE_ONEOF_DEFAULT()\n'
@@ -2728,10 +2808,9 @@ class ValidatorGenerator:
                 yield '    PB_VALIDATE_ONEOF_BEGIN(ctx, msg, %s)\n' % oneof.name
                 for member, lines in arms:
                     yield '    PB_VALIDATE_ONEOF_CASE(%s_%s_tag)\n' % (struct_name, member.name)
-                    yield '    PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % member.name
-                    for line in lines:
-                        yield line
-                    yield '    PB_VALIDATE_FIELD_END(ctx);\n'
+                    yield '        PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % member.name
+                    yield c_block(''.join(lines), 8)
+                    yield '        PB_VALIDATE_FIELD_END(ctx);\n'
                     yield '    PB_VALIDATE_ONEOF_CASE_END()\n'
                 yield '    PB_VALIDATE_ONEOF_DEFAULT()\n'
                 yield '    PB_VALIDATE_ONEOF_END()\n'
@@ -2739,7 +2818,7 @@ class ValidatorGenerator:
 
             # Generate message-level validations
             for rule in validator.message_rules:
-                yield self._generate_message_rule_check(validator.message, rule)
+                yield c_block(self._generate_message_rule_check(validator.message, rule), 4)
                 yield '\n'
             
             yield '    PB_VALIDATE_END(ctx, violations);\n'

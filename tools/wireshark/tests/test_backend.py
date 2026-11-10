@@ -706,6 +706,32 @@ class BackendTests(unittest.TestCase):
             sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
             self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-I', unit_dir], sources)
 
+    def test_generated_c_layout_and_declarations(self):
+        """Declarations open their block (C89 style), preprocessor lines start in
+        column 0, no reserved __ names, no trailing spaces or blank-line runs."""
+
+        out = os.path.join(self.tmp, 'out')
+        for root in (RULES_PROTOS, STRESS_PROTOS):
+            status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
+            self.assertEqual(status, 0, err)
+        cc = find_cc()
+        for unit in sorted(os.listdir(out)):
+            unit_dir = os.path.join(out, unit)
+            generated = [f for f in os.listdir(unit_dir) if not f.startswith('pb')]
+            for name in generated:
+                with open(os.path.join(unit_dir, name)) as handle:
+                    text = handle.read()
+                self.assertIsNone(re.search(r'^[ \t]+#', text, re.M), '%s: indented preprocessor line' % name)
+                self.assertIsNone(re.search(r'[ \t]+$', text, re.M), '%s: trailing whitespace' % name)
+                self.assertNotIn('\n\n\n', text, '%s: more than one blank line' % name)
+                self.assertIsNone(re.search(r'\b__pb_', text), '%s: reserved identifier' % name)
+                self.assertIsNone(re.search(r'\bfor \((?:pb_size_t|size_t|int) \w+ =', text),
+                                  '%s: declaration in a for header' % name)
+            if cc:
+                sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+                self.compile_each(cc, ['-std=c99', '-Wall', '-Wextra', '-Wdeclaration-after-statement',
+                                       '-Werror', '-I', unit_dir], sources)
+
     def big_message_layout(self):
         root = os.path.join(self.tmp, 'protos')
         self.write_tree(root, {'big/big.proto':

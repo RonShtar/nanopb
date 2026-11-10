@@ -958,12 +958,12 @@ class FilterEmitter(object):
         yield '%s#ifdef PB_VALIDATE_DEBUG\n' % indent
         if with_violations:
             yield '%s{\n' % indent
-            yield '%s    pb_size_t __pb_vi;\n' % indent
-            yield '%s    for (__pb_vi = 0; __pb_vi < violations->count; __pb_vi++) {\n' % indent
+            yield '%s    pb_size_t pbv_vi;\n' % indent
+            yield '%s    for (pbv_vi = 0; pbv_vi < violations->count; pbv_vi++) {\n' % indent
             yield ('%s        PB_VALIDATE_FILTER_LOG("%s: %%s %%s: %%s", '
-                   'violations->violations[__pb_vi].field_path, '
-                   'violations->violations[__pb_vi].constraint_id, '
-                   'violations->violations[__pb_vi].message);\n') % (indent, reason)
+                   'violations->violations[pbv_vi].field_path, '
+                   'violations->violations[pbv_vi].constraint_id, '
+                   'violations->violations[pbv_vi].message);\n') % (indent, reason)
             yield '%s    }\n' % indent
             yield '%s}\n' % indent
         else:
@@ -1897,7 +1897,7 @@ def main_plugin():
                         entry.name = name
                         if insertion_point:
                             entry.insertion_point = insertion_point
-                        entry.content = content
+                        entry.content = nanopb_validator.tidy_c(content)
                         if not insertion_point and name.endswith('_validate' + options.header_extension):
                             validate_headers.append(name)
 
@@ -1915,7 +1915,7 @@ def main_plugin():
                                     (options.source_extension, emitter.source())):
                 entry = response.file.add()
                 entry.name = filter_options.protocol_filter + '_filter' + suffix
-                entry.content = ''.join(content)
+                entry.content = nanopb_validator.tidy_c(''.join(content))
 
         missing = [m for m in filter_options.filter_messages if m not in generated_entries]
         if missing:

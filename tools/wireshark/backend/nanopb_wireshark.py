@@ -524,23 +524,20 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None):
             body = strip_internal_includes(handle.read(), internal)
         return '\n/* ---- %s ---- */\n%s' % (name, body)
 
-    def write_header(name, guard, includes, parts):
+    def write(name, text):
+        from nanopb_validator import tidy_c
         with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
-            handle.write(banner)
-            handle.write('#ifndef %s\n#define %s\n' % (guard, guard))
-            for include in includes:
-                handle.write('#include "%s"\n' % include)
-            for part in parts:
-                handle.write(section(part))
-            handle.write('\n#endif /* %s */\n' % guard)
+            handle.write(tidy_c(text))
+
+    def write_header(name, guard, includes, parts):
+        write(name, banner + '#ifndef %s\n#define %s\n' % (guard, guard)
+              + ''.join('#include "%s"\n' % include for include in includes)
+              + ''.join(section(part) for part in parts)
+              + '\n#endif /* %s */\n' % guard)
 
     def write_source(name, includes, parts):
-        with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
-            handle.write(banner)
-            for include in includes:
-                handle.write('#include "%s"\n' % include)
-            for part in parts:
-                handle.write(section(part))
+        write(name, banner + ''.join('#include "%s"\n' % include for include in includes)
+              + ''.join(section(part) for part in parts))
 
     pb_h, pb_c = unit.name + '.pb.h', unit.name + '.pb.c'
     validate_h, validate_c = unit.name + '_validate.h', unit.name + '_validate.c'
