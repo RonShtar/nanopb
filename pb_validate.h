@@ -945,15 +945,25 @@ extern "C"
     #define PB_VALIDATE_ONEOF_END()                                                                            \
         }
 
-    /* Debug-only pluggable logging hook for generated packet filters
-     * (pkg_Msg_filter_udp/filter_tcp). Default is a no-op; an application
-     * may #define this before including generated filter code to route
-     * rejected-packet diagnostics to its own logger. Generated filter code
-     * only calls this from within "#ifdef PB_VALIDATE_DEBUG" blocks, so it
-     * costs nothing when debug mode is off.
+    /* Logging hook for generated packet filters (<name>_udp / <name>_tcp),
+     * printf-style. Default is a no-op; #define it before including the
+     * generated code (or with -D) to route filter logs to your logger, e.g.
+     *     #define PB_VALIDATE_FILTER_LOG(...) printf(__VA_ARGS__)
      */
     #ifndef PB_VALIDATE_FILTER_LOG
     #define PB_VALIDATE_FILTER_LOG(...) ((void)0)
+    #endif
+
+    /* Called once for every dropped packet, in every build, with the
+     * filter's name and why it dropped the packet (both string literals),
+     * just before the filter returns -1. Accepted packets never reach it.
+     * By default it writes one line through PB_VALIDATE_FILTER_LOG; define
+     * it yourself to count drops or log them in another format. Debug builds
+     * (PB_VALIDATE_DEBUG) also log every violated rule after it.
+     */
+    #ifndef PB_VALIDATE_FILTER_DROP
+    #define PB_VALIDATE_FILTER_DROP(filter_name, reason) \
+        PB_VALIDATE_FILTER_LOG("%s: drop: %s\n", (filter_name), (reason))
     #endif
 
     /* Rule types for internal use */

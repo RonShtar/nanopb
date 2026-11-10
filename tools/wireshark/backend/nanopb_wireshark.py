@@ -373,7 +373,7 @@ def generator_env():
     return env
 
 
-def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None):
+def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None, filter_name=None):
     protoc = os.path.join(nanopb_root, 'generator', 'protoc')
     common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
     # As imported: validate.proto, or validate/validate.proto in a subfolder.
@@ -386,6 +386,8 @@ def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None
         validate_opts = common + (['--filter=' + ';'.join(filters)] if filters else [])
         if protocol:
             validate_opts.append('--protocol-filter=' + protocol)
+            if filter_name:
+                validate_opts.append('--filter-name=' + filter_name)
         cmd += ['--nanopb-validate_opt=' + o for o in validate_opts] + ['--nanopb-validate_out=' + outdir]
     cmd += unit.generated_files()
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -433,7 +435,7 @@ def predicted_mode(unit, entry):
     return 'auto'
 
 
-def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries, protocol=None):
+def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries, protocol=None, filter_name=None):
     """Run the generator with as many of ``entries`` as the filter generator accepts.
 
     The filter generator refuses ambiguous or unsupported protocol shapes (two
@@ -448,7 +450,7 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries, pro
         return name, mode or 'auto'
 
     try:
-        log = run_generator(nanopb_root, unit, outdir, validate, entries, protocol)
+        log = run_generator(nanopb_root, unit, outdir, validate, entries, protocol, filter_name)
         return log, dict(mode_of(e) for e in entries), {}
     except BackendError:
         if not entries:
@@ -457,7 +459,7 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries, pro
     def accepted(spec):
         trial = tempfile.mkdtemp(prefix='nanopb_ws_try_')
         try:
-            run_generator(nanopb_root, unit, trial, validate, [spec], protocol)
+            run_generator(nanopb_root, unit, trial, validate, [spec], protocol, filter_name)
             return None
         except BackendError as exc:
             return plugin_error(str(exc))
@@ -478,7 +480,7 @@ def run_generator_with_filters(nanopb_root, unit, outdir, validate, entries, pro
             errors[name] = error
     shutil.rmtree(outdir, ignore_errors=True)
     os.makedirs(outdir)
-    return run_generator(nanopb_root, unit, outdir, validate, specs, protocol), modes, errors
+    return run_generator(nanopb_root, unit, outdir, validate, specs, protocol, filter_name), modes, errors
 
 
 def strip_internal_includes(text, internal):
@@ -700,6 +702,15 @@ def enable_field_32bit(pb_h):
         handle.write(text)
 
 
+def public_filter_name(template, protocol):
+    """The protocol filter's C name: entry points <name>_udp / <name>_tcp."""
+
+    name = (template or '{unit}_filter').replace('{unit}', protocol)
+    if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name):
+        raise BackendError('--filter-name %s gives "%s", which is not a C identifier' % (template, name))
+    return name
+
+
 def cmd_gen_c(args):
     validate = not args.no_validate
 
@@ -713,11 +724,12 @@ def cmd_gen_c(args):
             entries, source_of_entries = unit_entrypoints(unit, args.port_map)
         specs = [e + (':single' if predicted_mode(unit, e) == 'single' else '') for e in entries]
         protocol = protocol_name(unit) if validate and not args.no_filter else None
-        jobs.append((name, unit, entries, source_of_entries, specs, protocol))
+        public = public_filter_name(args.filter_name, protocol) if protocol else None
+        jobs.append((name, unit, entries, source_of_entries, specs, protocol, public))
 
     def generate(job):
         # Only subprocesses and file I/O: safe to run for several units at once.
-        name, unit, entries, source_of_entries, specs, protocol = job
+        name, unit, entries, source_of_entries, specs, protocol, public = job
         outdir = os.path.join(args.out, name)
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
@@ -726,7 +738,7 @@ def cmd_gen_c(args):
         try:
             try:
                 log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
-                                                                       validate, specs, protocol)
+                                                                       validate, specs, protocol, public)
             except BackendError as exc:
                 if not protocol:
                     raise
@@ -742,8 +754,8 @@ def cmd_gen_c(args):
             shutil.rmtree(gendir, ignore_errors=True)
         with open(os.path.join(outdir, header)) as handle:
             header_text = handle.read()
-        filters = re.findall(r'^int (\w+_filter_udp)\(', header_text, re.M)
-        protocol_filter = protocol + '_filter_udp' if protocol and protocol + '_filter_udp' in filters else None
+        filters = re.findall(r'^int (\w+_udp)\(void \*ctx', header_text, re.M)
+        protocol_filter = public + '_udp' if protocol and public + '_udp' in filters else None
         filters = [f for f in filters if f != protocol_filter]
         # The generator puts its '#error Enable PB_FIELD_32BIT' in the .pb.c.
         with open(os.path.join(outdir, name + '.pb.c')) as handle:
@@ -2097,6 +2109,9 @@ def build_parser():
     p.add_argument('--port-map', default=None,
                    help='messages mapped here get a packet filter (default: unreferenced root messages)')
     p.add_argument('--no-filter', action='store_true', help='do not generate packet filters')
+    p.add_argument('--filter-name', default='{unit}_filter',
+                   help='name of the protocol filter; its entry points are <name>_udp and <name>_tcp '
+                        '({unit} is the protocol folder, default: {unit}_filter)')
     p.set_defaults(func=cmd_gen_c)
 
     p = sub.add_parser('gen-data', help='generate encoded sample messages')

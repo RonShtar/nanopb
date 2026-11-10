@@ -732,6 +732,50 @@ class BackendTests(unittest.TestCase):
                 self.compile_each(cc, ['-std=c99', '-Wall', '-Wextra', '-Wdeclaration-after-statement',
                                        '-Werror', '-I', unit_dir], sources)
 
+    def test_filter_name_callbacks_and_drop_logs(self):
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
+                                          '--unit', 'envelope', '--filter-name', 'net_{unit}')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'][0]['protocol_filter'], 'net_envelope_udp')
+        unit_dir = os.path.join(out, 'envelope')
+        header = self.read('out', 'envelope', 'envelope.pb.h')
+        for decl in ('int net_envelope_udp(void *ctx, const uint8_t *packet, size_t packet_size);',
+                     'int net_envelope_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);',
+                     'extern const pb_filter_t net_envelope_callbacks;'):
+            self.assertIn(decl, header)
+        self.assertNotIn('envelope_filter_udp(', header)
+        status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--unit', 'envelope',
+                                     '--filter-name', '9{unit}')
+        self.assertEqual(status, 1)
+        self.assertIn('not a C identifier', err)
+
+        cc = find_cc()
+        if not cc:
+            self.skipTest('no C compiler')
+        main = os.path.join(unit_dir, 'main_drop.c')
+        with open(main, 'w') as handle:
+            handle.write('#include <stdio.h>\n'
+                         '#include "envelope.pb.h"\n'
+                         'int main(void) {\n'
+                         '    static const uint8_t garbage[] = { 0xff, 0xff, 0xff };\n'
+                         '    const pb_filter_t *f = &net_envelope_callbacks;\n'
+                         '    printf("name=%s udp=%d tcp=%d\\n", f->name, f->udp(NULL, garbage, sizeof(garbage)),\n'
+                         '           f->tcp(NULL, garbage, sizeof(garbage), true));\n'
+                         '    return 0;\n'
+                         '}\n')
+        exe = os.path.join(unit_dir, 'drop.exe')
+        sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+        # Release build (no PB_VALIDATE_DEBUG): drops are still logged.
+        build = subprocess.run(cc + ['-std=c99', '-I', unit_dir, '-DPB_VALIDATE_FILTER_LOG(...)=printf(__VA_ARGS__)',
+                                     '-include', 'stdio.h', '-o', exe] + sources,
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertEqual(build.returncode, 0, build.stdout[-3000:])
+        run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
+        self.assertIn('net_envelope: drop: packet is not a google.protobuf.Any', run.stdout)
+        self.assertEqual(run.stdout.count(': drop: '), 2, run.stdout)
+        self.assertIn('name=net_envelope udp=-1 tcp=-1', run.stdout)
+
     def big_message_layout(self):
         root = os.path.join(self.tmp, 'protos')
         self.write_tree(root, {'big/big.proto':

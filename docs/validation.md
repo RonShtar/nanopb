@@ -337,7 +337,7 @@ build-time decision, not a generation-time one.
 | Violations per call | Stops at the first one, per `PB_VALIDATE_EARLY_EXIT` (ignored when set to 0, but the default is to stop) | Always collects every violation on the message, regardless of `PB_VALIDATE_EARLY_EXIT` |
 | `field_path` | Materialized only when a violation is about to be recorded; no string work on the passing path | Same |
 | `message` | Static string literal (zero-copy `const char *`) | Owned buffer; numeric and string-length rules interpolate the actual/expected value, e.g. `"Value constraint failed (got 200, expected 150)"` |
-| Packet filters (`pkg_Msg_filter_udp`/`filter_tcp`) | Reject with `-1`, no diagnostics | Also call the pluggable `PB_VALIDATE_FILTER_LOG(fmt, ...)` hook (default no-op; define your own before including the generated filter code to route rejections to your logger) with why each packet was rejected |
+| Packet filters (`<name>_udp`/`<name>_tcp`) | Reject with `-1` and report the drop: `PB_VALIDATE_FILTER_DROP(filter, reason)` | Same, and also log every violated rule through `PB_VALIDATE_FILTER_LOG` |
 
 Turning `PB_VALIDATE_DEBUG` on grows `sizeof(pb_violations_t)`, since each
 violation gets its own owned `field_path`/`message` buffers instead of a
@@ -369,6 +369,41 @@ Passed via `--nanopb-validate_opt=` (or before the `:` in
   because protoc already uses it to separate plugin options.)
 - `--protocol-filter=NAME`: one filter for a whole protocol, see
   [Protocol filter](#protocol-filter). Independent of `--filter`.
+- `--filter-name=FILTER`: names the filter's entry points `FILTER_udp` and
+  `FILTER_tcp` (and `FILTER_callbacks`). Applies to the protocol filter, or to
+  the single `--filter` entrypoint. Default: `NAME_filter` for a protocol
+  filter, `pkg_Msg_filter` for an entrypoint.
+
+#### Calling a filter, and drop logs
+
+Each filter also exports a `pb_filter_t` with its name and both callbacks, for
+code that registers filters through function pointers:
+
+```c
+typedef int (*pb_filter_udp_fn)(void *ctx, const uint8_t *packet, size_t packet_size);
+typedef int (*pb_filter_tcp_fn)(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+typedef struct pb_filter_s { const char *name; pb_filter_udp_fn udp; pb_filter_tcp_fn tcp; } pb_filter_t;
+
+extern const pb_filter_t FILTER_callbacks;   /* { "FILTER", FILTER_udp, FILTER_tcp } */
+
+if (FILTER_callbacks.udp(NULL, packet, packet_size) != 0) {
+    /* dropped */
+}
+```
+
+Every dropped packet, in every build, goes through
+`PB_VALIDATE_FILTER_DROP(filter_name, reason)` just before the filter returns
+`-1`; both arguments are string literals, and accepted packets never reach it.
+By default it writes `"<filter>: drop: <reason>\n"` through
+`PB_VALIDATE_FILTER_LOG(fmt, ...)`, which is a no-op until you define it:
+
+```c
+#define PB_VALIDATE_FILTER_LOG(...) printf(__VA_ARGS__)   /* or your logger */
+```
+
+Define `PB_VALIDATE_FILTER_DROP` yourself to count drops or use another format.
+With `PB_VALIDATE_DEBUG`, the filter also logs each violated rule (field path,
+rule id, message) after the drop line.
 
 #### Protocol filter
 
@@ -378,7 +413,10 @@ With `--protocol-filter=NAME` the plugin also writes `NAME_filter.h` /
 ```c
 int NAME_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
 int NAME_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+extern const pb_filter_t NAME_filter_callbacks;
 ```
+
+(`--filter-name=FILTER` renames them `FILTER_udp`, `FILTER_tcp`, `FILTER_callbacks`.)
 
 Every packet is a `google.protobuf.Any`. Its `type_url` is the opcode: a
 `switch` on it selects one of the protocol's messages (every message of the

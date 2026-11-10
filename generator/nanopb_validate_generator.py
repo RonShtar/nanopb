@@ -381,6 +381,41 @@ class Route(object):
         self.type_url = type_url
 
 
+
+#: Shared by every generated filter header (guarded, so several can be included).
+CALLBACK_TYPES = (
+    '#ifndef PB_FILTER_CALLBACKS_DEFINED\n'
+    '#define PB_FILTER_CALLBACKS_DEFINED\n'
+    '/** Filter entry points: return 0 to allow the packet, -1 to drop it. */\n'
+    'typedef int (*pb_filter_udp_fn)(void *ctx, const uint8_t *packet, size_t packet_size);\n'
+    'typedef int (*pb_filter_tcp_fn)(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n'
+    '\n'
+    '/** One filter, ready to register with a dispatcher: name, UDP and TCP callbacks. */\n'
+    'typedef struct pb_filter_s {\n'
+    '    const char *name;\n'
+    '    pb_filter_udp_fn udp;\n'
+    '    pb_filter_tcp_fn tcp;\n'
+    '} pb_filter_t;\n'
+    '#endif\n\n'
+)
+
+
+def callbacks_declaration(public_name):
+    return ('/** %s_udp and %s_tcp as one pb_filter_t, e.g. register(&%s_callbacks). */\n'
+            'extern const pb_filter_t %s_callbacks;\n'
+            % (public_name, public_name, public_name, public_name))
+
+
+def callbacks_definition(public_name):
+    return ('\nconst pb_filter_t %s_callbacks = { "%s", %s_udp, %s_tcp };\n'
+            % (public_name, public_name, public_name, public_name))
+
+
+def drop_line(indent, public_name, reason):
+    """The drop log: every build, through PB_VALIDATE_FILTER_DROP (pb_validate.h)."""
+    return '%sPB_VALIDATE_FILTER_DROP("%s", "%s");\n' % (indent, public_name, reason.replace('"', "'"))
+
+
 class FilterSpec(object):
     """A fully resolved filter, ready to emit.
 
@@ -395,7 +430,7 @@ class FilterSpec(object):
     """
 
     __slots__ = ('entry', 'strategy', 'symbol_prefix', 'dispatch_expr',
-                 'presence_expr', 'routes', 'extra_headers')
+                 'presence_expr', 'routes', 'extra_headers', 'public_name')
 
     def __init__(self, entry, strategy, symbol_prefix, dispatch_expr=None,
                  presence_expr=None, routes=(), extra_headers=()):
@@ -406,16 +441,18 @@ class FilterSpec(object):
         self.presence_expr = presence_expr
         self.routes = tuple(routes)
         self.extra_headers = tuple(extra_headers)
+        # Entry points are <public_name>_udp / _tcp (--filter-name renames them).
+        self.public_name = symbol_prefix + '_filter'
 
     @property
     def udp_signature(self):
-        return ('int %s_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size)'
-                % self.symbol_prefix)
+        return ('int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)'
+                % self.public_name)
 
     @property
     def tcp_signature(self):
-        return ('int %s_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, '
-                'bool is_to_server)' % self.symbol_prefix)
+        return ('int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, '
+                'bool is_to_server)' % self.public_name)
 
     @property
     def core_signature(self):
@@ -922,7 +959,9 @@ class FilterEmitter(object):
         yield ' * @param is_to_server  True if the direction is client -> server.\n'
         yield ' * @return 0 to allow the packet, -1 to reject it.\n'
         yield ' */\n'
-        yield '%s;\n' % spec.tcp_signature
+        yield '%s;\n\n' % spec.tcp_signature
+        yield CALLBACK_TYPES
+        yield callbacks_declaration(spec.public_name)
 
         yield '\n#ifdef __cplusplus\n'
         yield '} /* extern "C" */\n'
@@ -955,8 +994,9 @@ class FilterEmitter(object):
         normal (non-debug) build carries none of this: no extra code, no
         dependency on `violations` having been populated.
         """
-        yield '%s#ifdef PB_VALIDATE_DEBUG\n' % indent
+        yield drop_line(indent, self.spec.public_name, reason)
         if with_violations:
+            yield '#ifdef PB_VALIDATE_DEBUG\n'
             yield '%s{\n' % indent
             yield '%s    pb_size_t pbv_vi;\n' % indent
             yield '%s    for (pbv_vi = 0; pbv_vi < violations->count; pbv_vi++) {\n' % indent
@@ -966,9 +1006,7 @@ class FilterEmitter(object):
                    'violations->violations[pbv_vi].message);\n') % (indent, reason)
             yield '%s    }\n' % indent
             yield '%s}\n' % indent
-        else:
-            yield '%sPB_VALIDATE_FILTER_LOG("%s");\n' % (indent, reason)
-        yield '%s#endif\n' % indent
+            yield '#endif\n'
         yield '%sreturn %s;\n' % (indent, RET_REJECT)
 
     def source_lines(self):
@@ -1158,6 +1196,7 @@ class FilterEmitter(object):
         yield '    (void)is_to_server;\n'
         yield '    return %s_filter_core(packet, packet_size);\n' % spec.symbol_prefix
         yield '}\n'
+        yield callbacks_definition(spec.public_name)
 
 
 # ---------------------------------------------------------------------------
@@ -1287,10 +1326,11 @@ class FilterOptions(object):
     """
 
     __slots__ = ('filter_messages', 'filter_mode', 'filter_payloads', 'entry_modes',
-                 'protocol_filter', 'protocol_messages')
+                 'protocol_filter', 'protocol_messages', 'filter_name')
 
     def __init__(self, filter_message=None, filter_mode='auto', filter_payloads=(),
-                 filter_messages=None, entry_modes=None, protocol_filter=None):
+                 filter_messages=None, entry_modes=None, protocol_filter=None,
+                 filter_name=None):
         if filter_messages is None:
             filter_messages = (filter_message,) if filter_message else ()
         self.filter_messages = tuple(filter_messages)
@@ -1301,6 +1341,8 @@ class FilterOptions(object):
         # --protocol-filter=NAME: one Any-dispatched filter for every message.
         self.protocol_filter = protocol_filter
         self.protocol_messages = ()
+        # --filter-name=NAME: entry points NAME_udp / NAME_tcp.
+        self.filter_name = filter_name
 
     @property
     def filter_message(self):
@@ -1325,6 +1367,7 @@ OWN_OPTIONS = {
     '--filter-mode': 'filter_mode',
     '--filter-payloads': 'filter_payloads',
     '--protocol-filter': 'protocol_filter',
+    '--filter-name': 'filter_name',
 }
 
 #: Options that used to exist and described the generator's internals rather
@@ -1437,9 +1480,18 @@ def build_filter_options(raw):
         raise GeneratorError("--protocol-filter=%s: the name must be a C identifier "
                              "(it prefixes <name>_filter_udp/_tcp)." % protocol_filter)
 
+    filter_name = (raw.get('filter_name') or '').strip() or None
+    if filter_name is not None:
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', filter_name):
+            raise GeneratorError("--filter-name=%s: the name must be a C identifier "
+                                 "(the entry points are <name>_udp / <name>_tcp)." % filter_name)
+        if protocol_filter is None and len(messages) != 1:
+            raise GeneratorError("--filter-name names one filter: give it with --protocol-filter, "
+                                 "or with exactly one --filter entrypoint.")
+
     return FilterOptions(filter_mode=filter_mode, filter_payloads=payload_list,
                          filter_messages=messages, entry_modes=entry_modes,
-                         protocol_filter=protocol_filter)
+                         protocol_filter=protocol_filter, filter_name=filter_name)
 
 
 def parse_plugin_parameter(parameter):
@@ -1489,8 +1541,9 @@ ANY_FQN = 'google.protobuf.Any'
 class ProtocolFilterEmitter(object):
     """Emit NAME_filter.h / NAME_filter.c for every message of a protocol."""
 
-    def __init__(self, name, hub, index, messages, pb_headers, validate_headers):
+    def __init__(self, name, hub, index, messages, pb_headers, validate_headers, public_name=None):
         self.name = name
+        self.public_name = public_name or name + '_filter'
         self.hub = hub                  # ProtoFile that knows every message of the request
         self.index = index              # DescriptorIndex
         self.messages = messages        # protocol message FQNs, in declaration order
@@ -1572,15 +1625,15 @@ class ProtocolFilterEmitter(object):
         yield ' *\n'
         yield ' * @return 0 to allow the packet, -1 to reject it.\n'
         yield ' */\n'
-        yield 'int %s_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);\n' % self.name
-        yield 'int %s_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n\n' % self.name
+        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size);\n' % self.public_name
+        yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n\n' % self.public_name
+        yield CALLBACK_TYPES
+        yield callbacks_declaration(self.public_name) + '\n'
         yield '#ifdef __cplusplus\n} /* extern "C" */\n#endif\n\n'
         yield '#endif /* %s */\n' % guard
 
     def _reject(self, indent, reason):
-        yield '%s#ifdef PB_VALIDATE_DEBUG\n' % indent
-        yield '%sPB_VALIDATE_FILTER_LOG("%s: %s");\n' % (indent, self.name, reason)
-        yield '%s#endif\n' % indent
+        yield drop_line(indent, self.public_name, reason)
         yield '%sreturn %s;\n' % (indent, RET_REJECT)
 
     def _visit(self, indent, field, access):
@@ -1748,10 +1801,12 @@ class ProtocolFilterEmitter(object):
         yield '    }\n'
         yield '    return %s_check_any(&any, 0);\n}\n\n' % name
 
-        yield 'int %s_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % name
+        public = self.public_name
+        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % public
         yield '    (void)ctx;\n    return %s_filter_core(packet, packet_size);\n}\n\n' % name
-        yield 'int %s_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % name
+        yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % public
         yield '    (void)ctx;\n    (void)is_to_server;\n    return %s_filter_core(packet, packet_size);\n}\n' % name
+        yield callbacks_definition(public)
 
 
 def protocol_messages(index, files):
@@ -1830,6 +1885,9 @@ def process_file(filename, fdesc, options, filter_options, index,
     # 2. The filters, spliced into the files nanopb already produced. protoc
     #    appends repeated insertions at one point in order, and every symbol is
     #    namespaced by its entrypoint, so several filters share a file safely.
+    if filter_options.filter_name and not filter_options.protocol_filter:
+        for spec in specs:
+            spec.public_name = filter_options.filter_name
     for spec in specs:
         emitter = FilterEmitter(spec)
         outputs.append((headername, 'eof', ''.join(emitter.header_lines())))
@@ -1910,7 +1968,8 @@ def main_plugin():
             pb_headers = [strip_proto_ext(n) + options.extension + options.header_extension
                           for n in request.file_to_generate]
             emitter = ProtocolFilterEmitter(filter_options.protocol_filter, hub, index,
-                                            filter_options.protocol_messages, pb_headers, validate_headers)
+                                            filter_options.protocol_messages, pb_headers, validate_headers,
+                                            filter_options.filter_name)
             for suffix, content in ((options.header_extension, emitter.header()),
                                     (options.source_extension, emitter.source())):
                 entry = response.file.add()

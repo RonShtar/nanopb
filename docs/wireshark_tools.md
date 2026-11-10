@@ -275,6 +275,13 @@ Build switches such as `PB_VALIDATE_MAX_PATH_DEPTH` or
 build. For what each one costs, see [Validation performance](validation_performance.md);
 for the rules, see [Validation](validation.md).
 
+Generate C names each protocol filter `<protocol>_filter`, so its entry
+points are `<protocol>_filter_udp` / `_tcp`. To choose the name, pass
+`gen-c --filter-name <name>`: `{unit}` stands for the protocol folder, so
+`--filter-name net_{unit}` gives `net_fleet_udp`, `net_fleet_tcp` and
+`net_fleet_callbacks`. Dropped packets are logged in every build; see
+[Validation](validation.md#calling-a-filter-and-drop-logs).
+
 A message of 64 kB or more (large `max_size` / `max_count`), or a field tag
 above 65535, needs `PB_FIELD_32BIT`. Without it the build fails with
 `FIELDINFO_DOES_NOT_FIT_width4_field<N>` or `#error Enable PB_FIELD_32BIT`.
