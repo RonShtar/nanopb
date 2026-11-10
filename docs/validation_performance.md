@@ -43,23 +43,35 @@ Default build, ns per packet:
 
 | operation | valid | bad_first | bad_last | peak stack |
 |---|---|---|---|---|
-| `pb_decode` only | 1188 | 1206 | 1209 | 2040 B |
-| `pb_decode` + `pb_validate_Envelope(&msg, &violations)` | 1751 | 1524 | 1777 | 4360 B |
-| `pb_decode` + `pb_validate_Envelope(&msg, NULL)` | 1436 | 1205 | 1374 | 2040 B |
-| `Envelope_filter_udp()` | 1423 | 1213 | 1354 | 2088 B |
-| `Envelope_filter_udp()` before the changes above | 2020 | 1540 | 1783 | 4424 B |
+| `pb_decode` only | 1140 | 1179 | 1125 | 2040 B |
+| `pb_decode` + `pb_validate_Envelope(&msg, &violations)` | 1616 | 1481 | 1620 | 4360 B |
+| `pb_decode` + `pb_validate_Envelope(&msg, NULL)` | 1238 | 1148 | 1208 | 2040 B |
+| `Envelope_filter_udp()` | 1245 | 1163 | 1219 | 2088 B |
+| `Envelope_filter_udp()` before inline compares (below) | 1350 | 1143 | 1319 | 2088 B |
 
-So on this schema validation adds about 20% on top of decoding when it only
-has to answer pass/fail, and about 50% when it fills a violations buffer.
+So on this schema validation adds under 10% on top of decoding when it only
+has to answer pass/fail, and about 40% when it fills a violations buffer.
+
+Numeric comparisons, string length / prefix checks and item index tracking
+are inline in the check macros (`PB_VALIDATE_COMPARE`,
+`pb_validate_string_inline`, `PB_VALIDATE_PUSH_INDEX`): the rule type is a
+constant in generated code, so a check folds to one compare with no call, and
+index paths are only tracked when a violations buffer is collecting. That
+halved the validation part (about 200 ns to 100 ns per packet here) and made
+the generated validators 4% smaller at `-Os`.
 
 The filter (valid packet) per build configuration:
 
 | configuration | ns | peak stack |
 |---|---|---|
-| default | 1423 | 2088 B |
-| `PB_BUFFER_ONLY` + `PB_NO_ERRMSG` | 1142 | 1984 B |
-| `PB_VALIDATE_FILTER_STATIC_BUFFERS` | 1438 | 1832 B |
-| `PB_VALIDATE_DEBUG` | 2255 | 8376 B |
+| default | 1245 | 2088 B |
+| `PB_BUFFER_ONLY` + `PB_NO_ERRMSG` | 984 | 1984 B |
+| `PB_VALIDATE_FILTER_STATIC_BUFFERS` | 1315 | 1832 B |
+| `PB_VALIDATE_DEBUG` | 2065 | 8376 B |
+
+`tools/wireshark/tests/test_performance.py` runs this benchmark and fails if
+the filter costs more than 1.25 x decoding, if dropping costs more than
+accepting, or if stack use grows past its budget.
 
 ## Switches
 

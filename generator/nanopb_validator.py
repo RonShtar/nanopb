@@ -1532,12 +1532,12 @@ class ItemsRuleEmitter(RuleEmitter):
                     expected = expected.decode('utf-8', 'replace')
                 code += '        /* repeated.items string.const validation */\n'
                 code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                 code += '            if (strcmp(msg->%s[pbv_i], "%s") != 0) {\n' % (field_name, _escape_c_string(expected))
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must equal specified constant");\n' % constraint_id
-                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                 code += '            }\n'
-                code += '            pb_validate_context_pop_index(&ctx);\n'
+                code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                 code += '        }\n'
 
             elif rule_type == RULE_MIN_LEN and pbtype == 'STRING':
@@ -1565,50 +1565,50 @@ class ItemsRuleEmitter(RuleEmitter):
                 prefix = item_rule.get('value', '')
                 code += '        /* repeated.items string.prefix validation */\n'
                 code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                 code += '            const char *pbv_prefix = "%s";\n' % prefix
-                code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_prefix, PB_VALIDATE_RULE_PREFIX)) {\n' % (field_name, field_name)
+                code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
+                code += '            if (!pb_validate_string_inline(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_prefix, PB_VALIDATE_RULE_PREFIX)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must start with specified prefix");\n' % constraint_id
-                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                 code += '            }\n'
-                code += '            pb_validate_context_pop_index(&ctx);\n'
+                code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                 code += '        }\n'
             
             elif rule_type == RULE_SUFFIX and pbtype == 'STRING':
                 suffix = item_rule.get('value', '')
                 code += '        /* repeated.items string.suffix validation */\n'
                 code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                 code += '            const char *pbv_suffix = "%s";\n' % suffix
+                code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                 code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_suffix, PB_VALIDATE_RULE_SUFFIX)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must end with specified suffix");\n' % constraint_id
-                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                 code += '            }\n'
-                code += '            pb_validate_context_pop_index(&ctx);\n'
+                code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                 code += '        }\n'
             
             elif rule_type == RULE_CONTAINS and pbtype == 'STRING':
                 needle = item_rule.get('value', '')
                 code += '        /* repeated.items string.contains validation */\n'
                 code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                 code += '            const char *pbv_needle = "%s";\n' % needle
+                code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                 code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), pbv_needle, PB_VALIDATE_RULE_CONTAINS)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must contain specified substring");\n' % constraint_id
-                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                 code += '            }\n'
-                code += '            pb_validate_context_pop_index(&ctx);\n'
+                code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                 code += '        }\n'
             
             elif rule_type == RULE_ASCII and pbtype == 'STRING':
                 code += '        /* repeated.items string.ascii validation */\n'
                 code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                 code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), NULL, PB_VALIDATE_RULE_ASCII)) {\n' % (field_name, field_name)
                 code += '                PB_VALIDATE_RECORD(ctx, "%s", "String must contain only ASCII characters");\n' % constraint_id
-                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                 code += '            }\n'
-                code += '            pb_validate_context_pop_index(&ctx);\n'
+                code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                 code += '        }\n'
             
             elif rule_type in (RULE_EMAIL, RULE_HOSTNAME, RULE_IP, RULE_IPV4, RULE_IPV6) and pbtype == 'STRING':
@@ -1616,12 +1616,12 @@ class ItemsRuleEmitter(RuleEmitter):
                 if rule_enum:
                     code += '        /* repeated.items %s validation */\n' % constraint_id
                     code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     code += '            if (!pb_validate_string(msg->%s[pbv_i], (pb_size_t)strlen(msg->%s[pbv_i]), NULL, %s)) {\n' % (field_name, field_name, rule_enum)
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "String format validation failed");\n' % constraint_id
-                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                     code += '            }\n'
-                    code += '            pb_validate_context_pop_index(&ctx);\n'
+                    code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                     code += '        }\n'
             
             elif rule_type == RULE_ENUM_DEFINED:
@@ -1634,12 +1634,12 @@ class ItemsRuleEmitter(RuleEmitter):
                     code += '        {\n'
                     code += '            static const int pbv_%s_item_vals[] = { %s };\n' % (field_name, arr_values)
                     code += '            for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                    code += '                pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '                PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     code += '                if (!pb_validate_enum_defined_only((int)msg->%s[pbv_i], pbv_%s_item_vals, (pb_size_t)(sizeof(pbv_%s_item_vals)/sizeof(pbv_%s_item_vals[0])))) {\n' % (field_name, field_name, field_name, field_name)
                     code += '                    PB_VALIDATE_RECORD(ctx, "%s", "Value must be a defined enum value");\n' % constraint_id
-                    code += '                    if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                    code += '                    if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                     code += '                }\n'
-                    code += '                pb_validate_context_pop_index(&ctx);\n'
+                    code += '                PB_VALIDATE_POP_INDEX(ctx);\n'
                     code += '            }\n'
                     code += '        }\n'
 
@@ -1649,17 +1649,17 @@ class ItemsRuleEmitter(RuleEmitter):
                     values_array = ', '.join('"%s"' % v for v in values)
                     code += '        /* repeated.items string.in validation */\n'
                     code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                     code += '            const char *pbv_allowed[] = { %s };\n' % values_array
                     code += '            bool pbv_match = false;\n'
+                    code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     code += '            for (size_t pbv_k = 0; pbv_k < sizeof(pbv_allowed)/sizeof(pbv_allowed[0]); pbv_k++) {\n'
                     code += '                if (strcmp(msg->%s[pbv_i], pbv_allowed[pbv_k]) == 0) { pbv_match = true; break; }\n' % field_name
                     code += '            }\n'
                     code += '            if (!pbv_match) {\n'
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must be one of allowed set");\n' % constraint_id
-                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                     code += '            }\n'
-                    code += '            pb_validate_context_pop_index(&ctx);\n'
+                    code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                     code += '        }\n'
                 else:
                     type_name = constraint_id.split('.', 1)[0]
@@ -1668,12 +1668,12 @@ class ItemsRuleEmitter(RuleEmitter):
                     condition_str = ' || '.join(conditions) if conditions else 'false'
                     code += '        /* repeated.items %s.in validation */\n' % constraint_id.split('.')[0]
                     code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     code += '            if (!(%s)) {\n' % condition_str
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value must be one of allowed set");\n' % constraint_id
-                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                     code += '            }\n'
-                    code += '            pb_validate_context_pop_index(&ctx);\n'
+                    code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                     code += '        }\n'
             
             elif rule_type == RULE_NOT_IN:
@@ -1682,17 +1682,17 @@ class ItemsRuleEmitter(RuleEmitter):
                     values_array = ', '.join('"%s"' % v for v in values)
                     code += '        /* repeated.items string.not_in validation */\n'
                     code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
                     code += '            const char *pbv_blocked[] = { %s };\n' % values_array
                     code += '            bool pbv_forbidden = false;\n'
+                    code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     code += '            for (size_t pbv_k = 0; pbv_k < sizeof(pbv_blocked)/sizeof(pbv_blocked[0]); pbv_k++) {\n'
                     code += '                if (strcmp(msg->%s[pbv_i], pbv_blocked[pbv_k]) == 0) { pbv_forbidden = true; break; }\n' % field_name
                     code += '            }\n'
                     code += '            if (pbv_forbidden) {\n'
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value is in forbidden set");\n' % constraint_id
-                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                     code += '            }\n'
-                    code += '            pb_validate_context_pop_index(&ctx);\n'
+                    code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                     code += '        }\n'
                 else:
                     type_name = constraint_id.split('.', 1)[0]
@@ -1701,12 +1701,12 @@ class ItemsRuleEmitter(RuleEmitter):
                     condition_str = ' && '.join(conditions) if conditions else 'true'
                     code += '        /* repeated.items %s.not_in validation */\n' % constraint_id.split('.')[0]
                     code += '        for (pb_size_t pbv_i = 0; pbv_i < msg->%s_count; ++pbv_i) {\n' % field_name
-                    code += '            pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    code += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     code += '            if (!(%s)) {\n' % condition_str
                     code += '                PB_VALIDATE_RECORD(ctx, "%s", "Value is in forbidden set");\n' % constraint_id
-                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { pb_validate_context_pop_index(&ctx); return false; }\n'
+                    code += '                if (PB_VALIDATE_SHOULD_EXIT(ctx)) { PB_VALIDATE_POP_INDEX(ctx); return false; }\n'
                     code += '            }\n'
-                    code += '            pb_validate_context_pop_index(&ctx);\n'
+                    code += '            PB_VALIDATE_POP_INDEX(ctx);\n'
                     code += '        }\n'
 
             if len(code) == emitted:
@@ -1789,9 +1789,9 @@ class AnyRuleEmitter(RuleEmitter):
                     '            for (pb_size_t pbv_i = 0; pbv_i < %s; ++pbv_i) {\n'
                     '                const char *pbv_url = (const char *)msg->%s[pbv_i].type_url;\n'
                     '%s'
-                    '                    pb_validate_context_push_index(&ctx, pbv_i);\n'
+                    '                    PB_VALIDATE_PUSH_INDEX(ctx, pbv_i);\n'
                     '                    PB_VALIDATE_RECORD(ctx, "%s", "%s");\n'
-                    '                    pb_validate_context_pop_index(&ctx);\n'
+                    '                    PB_VALIDATE_POP_INDEX(ctx);\n'
                     '                    if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
                     '                }\n'
                     '            }\n'
@@ -2638,9 +2638,9 @@ class ValidatorGenerator:
 
         out = '        for (pb_size_t pbv_mi = 0; pbv_mi < msg->%s_count; ++pbv_mi) {\n' % field_name
         out += '            const %s *pbv_entry = &msg->%s[pbv_mi];\n' % (ctype, field_name)
-        out += '            pb_validate_context_push_index(&ctx, pbv_mi);\n'
+        out += '            PB_VALIDATE_PUSH_INDEX(ctx, pbv_mi);\n'
         out += body
-        out += '            pb_validate_context_pop_index(&ctx);\n'
+        out += '            PB_VALIDATE_POP_INDEX(ctx);\n'
         out += '        }\n'
         return out
 

@@ -10,6 +10,7 @@
 #include "pb.h"
 #include <stdbool.h>
 #include <stddef.h>
+#include <string.h> /* strlen/strncmp in pb_validate_string_inline */
 #include <time.h>  /* For timestamp validation */
 
 #ifdef __cplusplus
@@ -154,6 +155,18 @@ extern "C"
             if ((ctx_var).violations) pb_validate_context_pop_field(&(ctx_var));                               \
         } while (0)
 
+    /* Same for a repeated-item index segment: without a violations buffer
+     * there is no path to track, so loops over items make no calls. */
+    #define PB_VALIDATE_PUSH_INDEX(ctx_var, index_expr)                                                        \
+        do {                                                                                                   \
+            if ((ctx_var).violations) (void)pb_validate_context_push_index(&(ctx_var), (index_expr));          \
+        } while (0)
+
+    #define PB_VALIDATE_POP_INDEX(ctx_var)                                                                     \
+        do {                                                                                                   \
+            if ((ctx_var).violations) pb_validate_context_pop_index(&(ctx_var));                               \
+        } while (0)
+
     /* Helper for guarding checks behind has_XXX flag for OPTIONAL fields.
      * The generator expands FIELD_RULES_ENUM to the field.rules symbol when
      * it knows the field is optional, so that checks are skipped when the
@@ -193,7 +206,7 @@ extern "C"
     #define PB_VALIDATE_NUMERIC_GENERIC(ctx_var, msg_ptr, field_name, CTYPE, FUNC, RULE_ENUM, VALUE_EXPR, CONSTRAINT_ID) \
         do {                                                                                                   \
             CTYPE pbv_expected = (CTYPE)(VALUE_EXPR);                                                          \
-            if (!FUNC((msg_ptr)->field_name, &pbv_expected, (RULE_ENUM))) {                                    \
+            if (!PB_VALIDATE_COMPARE(FUNC, CTYPE, (msg_ptr)->field_name, pbv_expected, RULE_ENUM)) {           \
                 pb_violations_record_numeric(&(ctx_var), (CONSTRAINT_ID), "Value constraint failed",           \
                                               (double)((msg_ptr)->field_name), (double)pbv_expected);          \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
@@ -203,7 +216,7 @@ extern "C"
     #define PB_VALIDATE_NUMERIC_GENERIC(ctx_var, msg_ptr, field_name, CTYPE, FUNC, RULE_ENUM, VALUE_EXPR, CONSTRAINT_ID) \
         do {                                                                                                   \
             CTYPE pbv_expected = (CTYPE)(VALUE_EXPR);                                                          \
-            if (!FUNC((msg_ptr)->field_name, &pbv_expected, (RULE_ENUM))) {                                    \
+            if (!PB_VALIDATE_COMPARE(FUNC, CTYPE, (msg_ptr)->field_name, pbv_expected, RULE_ENUM)) {           \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "Value constraint failed");                         \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -216,8 +229,8 @@ extern "C"
         do {                                                                                                   \
             uint32_t pbv_min_len_v = (uint32_t)(MIN_LEN);                                                      \
             pb_size_t pbv_len_v = (pb_size_t)strlen((msg_ptr)->field_name);                                    \
-            if (!pb_validate_string((msg_ptr)->field_name, pbv_len_v,                                          \
-                                    &pbv_min_len_v, PB_VALIDATE_RULE_MIN_LEN)) {                               \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, pbv_len_v,                                   \
+                                           &pbv_min_len_v, PB_VALIDATE_RULE_MIN_LEN)) {                        \
                 pb_violations_record_numeric(&(ctx_var), (CONSTRAINT_ID), "String too short",                  \
                                               (double)pbv_len_v, (double)pbv_min_len_v);                       \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
@@ -227,8 +240,8 @@ extern "C"
     #define PB_VALIDATE_STR_MIN_LEN(ctx_var, msg_ptr, field_name, MIN_LEN, CONSTRAINT_ID)                      \
         do {                                                                                                   \
             uint32_t pbv_min_len_v = (uint32_t)(MIN_LEN);                                                      \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    &pbv_min_len_v, PB_VALIDATE_RULE_MIN_LEN)) {                               \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           &pbv_min_len_v, PB_VALIDATE_RULE_MIN_LEN)) {                        \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String too short");                                \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -240,8 +253,8 @@ extern "C"
         do {                                                                                                   \
             uint32_t pbv_max_len_v = (uint32_t)(MAX_LEN);                                                      \
             pb_size_t pbv_len_v = (pb_size_t)strlen((msg_ptr)->field_name);                                    \
-            if (!pb_validate_string((msg_ptr)->field_name, pbv_len_v,                                          \
-                                    &pbv_max_len_v, PB_VALIDATE_RULE_MAX_LEN)) {                               \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, pbv_len_v,                                   \
+                                           &pbv_max_len_v, PB_VALIDATE_RULE_MAX_LEN)) {                        \
                 pb_violations_record_numeric(&(ctx_var), (CONSTRAINT_ID), "String too long",                   \
                                               (double)pbv_len_v, (double)pbv_max_len_v);                       \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
@@ -251,8 +264,8 @@ extern "C"
     #define PB_VALIDATE_STR_MAX_LEN(ctx_var, msg_ptr, field_name, MAX_LEN, CONSTRAINT_ID)                      \
         do {                                                                                                   \
             uint32_t pbv_max_len_v = (uint32_t)(MAX_LEN);                                                      \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    &pbv_max_len_v, PB_VALIDATE_RULE_MAX_LEN)) {                               \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           &pbv_max_len_v, PB_VALIDATE_RULE_MAX_LEN)) {                        \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String too long");                                 \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -263,8 +276,8 @@ extern "C"
     #define PB_VALIDATE_STR_PREFIX(ctx_var, msg_ptr, field_name, PREFIX_STR, CONSTRAINT_ID)                    \
         do {                                                                                                   \
             const char *pbv_prefix = (PREFIX_STR);                                                             \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    pbv_prefix, PB_VALIDATE_RULE_PREFIX)) {                                    \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           pbv_prefix, PB_VALIDATE_RULE_PREFIX)) {                             \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String must start with specified prefix");         \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -273,8 +286,8 @@ extern "C"
     #define PB_VALIDATE_STR_SUFFIX(ctx_var, msg_ptr, field_name, SUFFIX_STR, CONSTRAINT_ID)                    \
         do {                                                                                                   \
             const char *pbv_suffix = (SUFFIX_STR);                                                             \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    pbv_suffix, PB_VALIDATE_RULE_SUFFIX)) {                                    \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           pbv_suffix, PB_VALIDATE_RULE_SUFFIX)) {                             \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String must end with specified suffix");           \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -283,8 +296,8 @@ extern "C"
     #define PB_VALIDATE_STR_CONTAINS(ctx_var, msg_ptr, field_name, NEEDLE_STR, CONSTRAINT_ID)                  \
         do {                                                                                                   \
             const char *pbv_needle = (NEEDLE_STR);                                                             \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    pbv_needle, PB_VALIDATE_RULE_CONTAINS)) {                                  \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           pbv_needle, PB_VALIDATE_RULE_CONTAINS)) {                           \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String must contain specified substring");         \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -294,8 +307,8 @@ extern "C"
     #define PB_VALIDATE_STR_CONST(ctx_var, msg_ptr, field_name, CONST_STR, CONSTRAINT_ID)                      \
         do {                                                                                                   \
             const char *pbv_const = (CONST_STR);                                                               \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    pbv_const, PB_VALIDATE_RULE_EQ)) {                                         \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           pbv_const, PB_VALIDATE_RULE_EQ)) {                                  \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "Value must equal specified constant");             \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -306,8 +319,8 @@ extern "C"
      */
     #define PB_VALIDATE_STR_FORMAT(ctx_var, msg_ptr, field_name, RULE_ENUM, CONSTRAINT_ID, ERR_MSG)            \
         do {                                                                                                   \
-            if (!pb_validate_string((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),           \
-                                    NULL, (RULE_ENUM))) {                                                      \
+            if (!pb_validate_string_inline((msg_ptr)->field_name, (pb_size_t)strlen((msg_ptr)->field_name),    \
+                                           NULL, (RULE_ENUM))) {                                               \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, ERR_MSG);                                           \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -338,7 +351,7 @@ extern "C"
         do {                                                                                                   \
             const char *pbv_s = NULL; pb_size_t pbv_l = 0;                                                     \
             if (pb_read_callback_string(&(msg_ptr)->field_name, &pbv_s, &pbv_l)) {                             \
-                if (!pb_validate_string(pbv_s, pbv_l, NULL, (RULE_ENUM))) {                                    \
+                if (!pb_validate_string_inline(pbv_s, pbv_l, NULL, (RULE_ENUM))) {                             \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, ERR_MSG);                                       \
                     if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                        \
                 }                                                                                              \
@@ -353,7 +366,7 @@ extern "C"
             const char *pbv_s = NULL; pb_size_t pbv_l = 0;                                                     \
             if (pb_read_callback_string(&(msg_ptr)->field_name, &pbv_s, &pbv_l)) {                             \
                 uint32_t pbv_len_v = (uint32_t)(LEN_VALUE);                                                    \
-                if (!pb_validate_string(pbv_s, pbv_l, &pbv_len_v, (RULE_ENUM))) {                              \
+                if (!pb_validate_string_inline(pbv_s, pbv_l, &pbv_len_v, (RULE_ENUM))) {                       \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, ERR_MSG);                                       \
                     if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                        \
                 }                                                                                              \
@@ -368,7 +381,7 @@ extern "C"
             const char *pbv_s = NULL; pb_size_t pbv_l = 0;                                                     \
             if (pb_read_callback_string(&(msg_ptr)->field_name, &pbv_s, &pbv_l)) {                             \
                 const char *pbv_pattern = (PATTERN_STR);                                                       \
-                if (!pb_validate_string(pbv_s, pbv_l, pbv_pattern, (RULE_ENUM))) {                             \
+                if (!pb_validate_string_inline(pbv_s, pbv_l, pbv_pattern, (RULE_ENUM))) {                      \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, ERR_MSG);                                       \
                     if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                        \
                 }                                                                                              \
@@ -383,7 +396,7 @@ extern "C"
         do {                                                                                                   \
             const char *pbv_s = NULL; pb_size_t pbv_l = 0;                                                     \
             if (pb_read_callback_string(&(msg_ptr)->field_name, &pbv_s, &pbv_l)) {                             \
-                if (!pb_validate_string(pbv_s, pbv_l, (RULE_DATA_EXPR), (RULE_ENUM))) {                        \
+                if (!pb_validate_string_inline(pbv_s, pbv_l, (RULE_DATA_EXPR), (RULE_ENUM))) {                 \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, ERR_MSG);                                       \
                     if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                        \
                 }                                                                                              \
@@ -496,14 +509,14 @@ extern "C"
             pb_size_t pbv_i;                                                                                   \
             for (pbv_i = 0; pbv_i < (msg_ptr)->field_name##_count; ++pbv_i) {                                  \
                 uint32_t pbv_min_len_v = (uint32_t)(MIN_LEN);                                                  \
-                pb_validate_context_push_index(&(ctx_var), pbv_i);                                             \
-                if (!pb_validate_string((msg_ptr)->field_name[pbv_i],                                          \
-                                        (pb_size_t)strlen((msg_ptr)->field_name[pbv_i]),                       \
-                                        &pbv_min_len_v, PB_VALIDATE_RULE_MIN_LEN)) {                           \
+                PB_VALIDATE_PUSH_INDEX(ctx_var, pbv_i);                                                        \
+                if (!pb_validate_string_inline((msg_ptr)->field_name[pbv_i],                                   \
+                                               (pb_size_t)strlen((msg_ptr)->field_name[pbv_i]),                \
+                                               &pbv_min_len_v, PB_VALIDATE_RULE_MIN_LEN)) {                    \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String too short");                            \
-                    if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) { pb_validate_context_pop_index(&(ctx_var)); return false; } \
+                    if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) { PB_VALIDATE_POP_INDEX(ctx_var); return false; }    \
                 }                                                                                              \
-                pb_validate_context_pop_index(&(ctx_var));                                                     \
+                PB_VALIDATE_POP_INDEX(ctx_var);                                                                \
             }                                                                                                  \
         } while (0)
 
@@ -512,14 +525,14 @@ extern "C"
             pb_size_t pbv_i;                                                                                   \
             for (pbv_i = 0; pbv_i < (msg_ptr)->field_name##_count; ++pbv_i) {                                  \
                 uint32_t pbv_max_len_v = (uint32_t)(MAX_LEN);                                                  \
-                pb_validate_context_push_index(&(ctx_var), pbv_i);                                             \
-                if (!pb_validate_string((msg_ptr)->field_name[pbv_i],                                          \
-                                        (pb_size_t)strlen((msg_ptr)->field_name[pbv_i]),                       \
-                                        &pbv_max_len_v, PB_VALIDATE_RULE_MAX_LEN)) {                           \
+                PB_VALIDATE_PUSH_INDEX(ctx_var, pbv_i);                                                        \
+                if (!pb_validate_string_inline((msg_ptr)->field_name[pbv_i],                                   \
+                                               (pb_size_t)strlen((msg_ptr)->field_name[pbv_i]),                \
+                                               &pbv_max_len_v, PB_VALIDATE_RULE_MAX_LEN)) {                    \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String too long");                             \
-                    if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) { pb_validate_context_pop_index(&(ctx_var)); return false; } \
+                    if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) { PB_VALIDATE_POP_INDEX(ctx_var); return false; }    \
                 }                                                                                              \
-                pb_validate_context_pop_index(&(ctx_var));                                                     \
+                PB_VALIDATE_POP_INDEX(ctx_var);                                                                \
             }                                                                                                  \
         } while (0)
 
@@ -529,12 +542,12 @@ extern "C"
             pb_size_t pbv_i;                                                                                   \
             for (pbv_i = 0; pbv_i < (msg_ptr)->field_name##_count; ++pbv_i) {                                  \
                 CTYPE pbv_expected = (CTYPE)(VALUE_EXPR);                                                      \
-                pb_validate_context_push_index(&(ctx_var), pbv_i);                                             \
-                if (!FUNC((msg_ptr)->field_name[pbv_i], &pbv_expected, (RULE_ENUM))) {                         \
+                PB_VALIDATE_PUSH_INDEX(ctx_var, pbv_i);                                                        \
+                if (!PB_VALIDATE_COMPARE(FUNC, CTYPE, (msg_ptr)->field_name[pbv_i], pbv_expected, RULE_ENUM)) { \
                     PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "Value constraint failed");                     \
-                    if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) { pb_validate_context_pop_index(&(ctx_var)); return false; } \
+                    if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) { PB_VALIDATE_POP_INDEX(ctx_var); return false; }    \
                 }                                                                                              \
-                pb_validate_context_pop_index(&(ctx_var));                                                     \
+                PB_VALIDATE_POP_INDEX(ctx_var);                                                                \
             }                                                                                                  \
         } while (0)
 
@@ -614,9 +627,9 @@ extern "C"
             pb_size_t pbv_i;                                                                                   \
             for (pbv_i = 0; pbv_i < pbv_n; ++pbv_i) {                                                          \
                 bool pbv_ok_nested;                                                                            \
-                pb_validate_context_push_index(&(ctx_var), pbv_i);                                             \
+                PB_VALIDATE_PUSH_INDEX(ctx_var, pbv_i);                                                        \
                 pbv_ok_nested = validate_func(&(ITEM), (violations_ptr));                                      \
-                pb_validate_context_pop_index(&(ctx_var));                                                     \
+                PB_VALIDATE_POP_INDEX(ctx_var);                                                                \
                 if (!pbv_ok_nested) (ctx_var).failed = true;                                                   \
                 if (!pbv_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
                     pb_validate_context_pop_field(&(ctx_var));                                                 \
@@ -679,7 +692,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_NUMERIC(ctx_var, msg_ptr, oneof_name, field_name, CTYPE, FUNC, RULE_ENUM, VALUE_EXPR, CONSTRAINT_ID) \
         do {                                                                                                   \
             CTYPE pbv_expected = (CTYPE)(VALUE_EXPR);                                                          \
-            if (!FUNC((msg_ptr)->oneof_name.field_name, &pbv_expected, (RULE_ENUM))) {                         \
+            if (!PB_VALIDATE_COMPARE(FUNC, CTYPE, (msg_ptr)->oneof_name.field_name, pbv_expected, RULE_ENUM)) { \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "Value constraint failed");                         \
                 if (PB_VALIDATE_SHOULD_EXIT(ctx_var)) return false;                                            \
             }                                                                                                  \
@@ -688,7 +701,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_STR_MIN_LEN(ctx_var, msg_ptr, oneof_name, field_name, MIN_LEN, CONSTRAINT_ID)    \
         do {                                                                                                   \
             uint32_t pbv_min_len = (MIN_LEN);                                                                  \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     &pbv_min_len, PB_VALIDATE_RULE_MIN_LEN)) {                                                 \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String too short");                                \
@@ -699,7 +712,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_STR_MAX_LEN(ctx_var, msg_ptr, oneof_name, field_name, MAX_LEN, CONSTRAINT_ID)    \
         do {                                                                                                   \
             uint32_t pbv_max_len = (MAX_LEN);                                                                  \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     &pbv_max_len, PB_VALIDATE_RULE_MAX_LEN)) {                                                 \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String too long");                                 \
@@ -710,7 +723,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_STR_PREFIX(ctx_var, msg_ptr, oneof_name, field_name, PREFIX_STR, CONSTRAINT_ID)  \
         do {                                                                                                   \
             const char *pbv_prefix = (PREFIX_STR);                                                             \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     pbv_prefix, PB_VALIDATE_RULE_PREFIX)) {                                                    \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String must start with specified prefix");         \
@@ -721,7 +734,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_STR_SUFFIX(ctx_var, msg_ptr, oneof_name, field_name, SUFFIX_STR, CONSTRAINT_ID)  \
         do {                                                                                                   \
             const char *pbv_suffix = (SUFFIX_STR);                                                             \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     pbv_suffix, PB_VALIDATE_RULE_SUFFIX)) {                                                    \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String must end with specified suffix");           \
@@ -732,7 +745,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_STR_CONTAINS(ctx_var, msg_ptr, oneof_name, field_name, NEEDLE_STR, CONSTRAINT_ID) \
         do {                                                                                                   \
             const char *pbv_needle = (NEEDLE_STR);                                                             \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     pbv_needle, PB_VALIDATE_RULE_CONTAINS)) {                                                  \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "String must contain specified substring");         \
@@ -742,7 +755,7 @@ extern "C"
 
     #define PB_VALIDATE_ONEOF_STR_FORMAT(ctx_var, msg_ptr, oneof_name, field_name, RULE_ENUM, CONSTRAINT_ID, ERR_MSG) \
         do {                                                                                                   \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     NULL, (RULE_ENUM))) {                                                                      \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, ERR_MSG);                                           \
@@ -769,7 +782,7 @@ extern "C"
     #define PB_VALIDATE_ONEOF_STR_CONST(ctx_var, msg_ptr, oneof_name, field_name, CONST_STR, CONSTRAINT_ID)    \
         do {                                                                                                   \
             const char *pbv_const = (CONST_STR);                                                               \
-            if (!pb_validate_string((msg_ptr)->oneof_name.field_name,                                          \
+            if (!pb_validate_string_inline((msg_ptr)->oneof_name.field_name,                                   \
                     (pb_size_t)strlen((msg_ptr)->oneof_name.field_name),                                       \
                     pbv_const, PB_VALIDATE_RULE_EQ)) {                                                         \
                 PB_VALIDATE_RECORD(ctx_var, CONSTRAINT_ID, "Value must equal specified constant");             \
@@ -1009,6 +1022,45 @@ extern "C"
     bool pb_validate_string(const char *value, pb_size_t length, const void *rule_data, pb_validate_rule_type_t rule_type);
     bool pb_validate_bytes(const pb_bytes_array_t *value, const void *rule_data, pb_validate_rule_type_t rule_type);
     bool pb_validate_enum(int value, const void *rule_data, pb_validate_rule_type_t rule_type);
+
+    /* What the check macros use instead of FUNC(value, &expected, RULE_ENUM)
+     * (FUNC one of the functions above, value converted to CTYPE first):
+     * the same comparison, but RULE_ENUM is a constant in generated code, so
+     * this folds to a single inline compare with no call on the accept path.
+     * Rules other than LT/LTE/GT/GTE/EQ still go through FUNC. */
+    #define PB_VALIDATE_COMPARE(FUNC, CTYPE, value, expected, RULE_ENUM)                                       \
+        ((RULE_ENUM) == PB_VALIDATE_RULE_LT  ? (CTYPE)(value) <  (expected) :                                  \
+         (RULE_ENUM) == PB_VALIDATE_RULE_LTE ? (CTYPE)(value) <= (expected) :                                  \
+         (RULE_ENUM) == PB_VALIDATE_RULE_GT  ? (CTYPE)(value) >  (expected) :                                  \
+         (RULE_ENUM) == PB_VALIDATE_RULE_GTE ? (CTYPE)(value) >= (expected) :                                  \
+         (RULE_ENUM) == PB_VALIDATE_RULE_EQ  ? (CTYPE)(value) == (expected) :                                  \
+         FUNC((value), &(expected), (RULE_ENUM)))
+
+    /* pb_validate_string() for the check macros: the length and prefix rules
+     * are done inline (rule_type is a constant there, so the switch folds
+     * away and strlen of a literal prefix is computed at compile time);
+     * every other rule calls pb_validate_string() itself. Same results. */
+    static inline bool pb_validate_string_inline(const char *value, pb_size_t length,
+                                                 const void *rule_data, pb_validate_rule_type_t rule_type)
+    {
+        if (!value)
+            return rule_type != PB_VALIDATE_RULE_REQUIRED;
+        switch (rule_type)
+        {
+        case PB_VALIDATE_RULE_MIN_LEN:
+            return length >= *(const uint32_t *)rule_data;
+        case PB_VALIDATE_RULE_MAX_LEN:
+            return length <= *(const uint32_t *)rule_data;
+        case PB_VALIDATE_RULE_PREFIX:
+        {
+            const char *prefix = (const char *)rule_data;
+            size_t prefix_len = strlen(prefix);
+            return length >= prefix_len && strncmp(value, prefix, prefix_len) == 0;
+        }
+        default:
+            return pb_validate_string(value, length, rule_data, rule_type);
+        }
+    }
 
     /* Bytes pattern / set helpers. Generated code passes the expected bytes as
      * a plain array plus length, so no pb_bytes_array_t literal is needed.

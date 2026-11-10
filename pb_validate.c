@@ -3,7 +3,6 @@
 #include "pb_validate.h"
 #include <string.h>
 #include <stdio.h>
-#include <ctype.h>
 #include <stdio.h>
 
 static bool is_valid_email(const char *s, size_t len);
@@ -778,6 +777,19 @@ bool pb_read_callback_string(const struct pb_callback_s *callback, const char **
 
 /* --- Additional string constraint helpers --------------------------------- */
 
+/* Character classes for the format rules, without <ctype.h>: these are the
+ * "C" locale classes (isdigit is defined this way in every locale), and an
+ * inline range check avoids a library call per character. */
+static bool is_dec_digit(char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+static bool is_ascii_alnum(unsigned char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
 static bool is_valid_hostname_label(const char *s, size_t len)
 {
     size_t i;
@@ -791,7 +803,7 @@ static bool is_valid_hostname_label(const char *s, size_t len)
         unsigned char c = (unsigned char)s[i];
         if (c > 127)
             return false; /* ASCII only */
-        if (!(isalnum(c) || c == '-'))
+        if (!(is_ascii_alnum(c) || c == '-'))
             return false;
     }
     return true;
@@ -867,7 +879,7 @@ static bool parse_uint_dotted_segment(const char *s, size_t len, int *out)
         return false;
     for (i = 0; i < len; i++)
     {
-        if (!isdigit((unsigned char)s[i]))
+        if (!is_dec_digit(s[i]))
             return false;
         value = value * 10 + (s[i] - '0');
         if (value > 255)
@@ -898,7 +910,7 @@ static bool is_valid_ipv4(const char *s, size_t len)
             parts++;
             start = i + 1;
         }
-        else if (!isdigit((unsigned char)s[i]))
+        else if (!is_dec_digit(s[i]))
         {
             return false;
         }
