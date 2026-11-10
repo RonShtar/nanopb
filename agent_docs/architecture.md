@@ -15,15 +15,15 @@ Nanopb is split into a tiny portable C runtime and a Python generator that turns
 - `<repo_root>/pb_common.c` contains descriptor and shared support code used by both encode and decode paths.
 - `<repo_root>/pb_encode.c` implements stream-oriented protobuf encoding.
 - `<repo_root>/pb_decode.c` implements stream-oriented protobuf decoding.
-- `<repo_root>/pb_validate.c` adds optional generated-message validation support.
+- `<repo_root>/validate/runtime/pb_validate.c` adds optional generated-message validation support.
 
 The runtime intentionally uses stream abstractions instead of depending only on memory buffers. That keeps it suitable for embedded transport and file/network use without requiring large temporary allocations.
 
 ## Generator pieces
 
 - `<repo_root>/generator/nanopb_generator.py` is the main entrypoint and owns parsing, IR construction, naming, and C emission.
-- `<repo_root>/generator/nanopb_validator.py` is a dependency-free library that parses `(validate.*)` options into an IR and emits the C body of `pb_validate_<Message>()` functions from it; it has no protoc plugin entrypoint of its own.
-- `<repo_root>/generator/nanopb_validate_generator.py` is the actual `protoc-gen-nanopb-validate` plugin entrypoint. It drives `nanopb_validator.py` to emit `*_validate.h`/`*_validate.c`, and separately owns the packet-filter feature (`pkg_Msg_filter_udp`/`filter_tcp`, spliced into nanopb's own `.pb.h`/`.pb.c` via `--protoc-insertion-points`).
+- `<repo_root>/validate/nanopb_validate/validator.py` is a dependency-free library that parses `(validate.*)` options into an IR and emits the C body of `pb_validate_<Message>()` functions from it; it has no protoc plugin entrypoint of its own.
+- `<repo_root>/validate/nanopb_validate/filters.py` is the actual `protoc-gen-nanopb-validate` plugin entrypoint. It drives `nanopb_validator.py` to emit `*_validate.h`/`*_validate.c`, and separately owns the packet-filter feature (`pkg_Msg_filter_udp`/`filter_tcp`, spliced into nanopb's own `.pb.h`/`.pb.c` via `--protoc-insertion-points`).
 - `<repo_root>/generator/proto/` contains generator-owned schema files used by the plugin itself.
 - `<repo_root>/generator/protoc-gen-nanopb` and related wrappers expose the generator as a `protoc` plugin.
 
@@ -33,20 +33,20 @@ The generator is the architectural center for schema semantics: if generated cod
 
 Validation is a full cross-cutting feature:
 
-- Schema options live in `<repo_root>/generator/proto/validate.proto`
-- Rule parsing and C emission live in `<repo_root>/generator/nanopb_validator.py`
-- The protoc plugin driving it (and the packet-filter feature) lives in `<repo_root>/generator/nanopb_validate_generator.py`
-- Runtime support lives in `<repo_root>/pb_validate.c` and `<repo_root>/pb_validate.h`
-- End-to-end tests live in `<repo_root>/tests/validation/`
+- Schema options live in `<repo_root>/validate/nanopb_validate/validate_proto/validate.proto`
+- Rule parsing and C emission live in `<repo_root>/validate/nanopb_validate/validator.py`
+- The protoc plugin driving it (and the packet-filter feature) lives in `<repo_root>/validate/nanopb_validate/filters.py`
+- Runtime support lives in `<repo_root>/validate/runtime/pb_validate.c` and `pb_validate.h`
+- End-to-end tests live in `<repo_root>/validate/tests/c/validation/` (and the other `validate/tests/c/` folders)
 
 If you change any one of those layers, verify the others still agree.
 
 A `.proto` option with no C-runtime enforcement (e.g. `string.pattern`, which
 would need a regex engine) is a generation-time error, not a silently-ignored
-no-op: `nanopb_validator.ValidationRuleNotImplementedError`, raised either
+no-op: `validator.ValidationRuleNotImplementedError`, raised either
 while parsing an unsupported option or from `RuleEmitterRegistry.emit()`'s
 fallback when no emitter is registered for a rule type, is caught in
-`nanopb_validate_generator.main_plugin()` and reported as a normal protoc
+`filters.main_plugin()` and reported as a normal protoc
 plugin failure.
 
 The runtime distinguishes two build modes via a single compile-time macro,

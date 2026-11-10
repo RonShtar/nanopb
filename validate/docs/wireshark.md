@@ -2,7 +2,7 @@
 
 This guide covers installing the nanopb tools for Wireshark and using them from
 start to finish. For every option and file format, see the reference,
-[tools/wireshark/README.md](../tools/wireshark/README.md).
+[the Wireshark reference](wireshark-reference.md).
 
 ## What the tools do
 
@@ -79,7 +79,7 @@ each port to its message with the port map.
 
 From a checkout of this repository, using the Python from step 1, run:
 
-    python tools/wireshark/backend/nanopb_wireshark.py install-studio
+    python validate/nanopb_validate wireshark install
 
 This copies into your *Personal Lua Plugins* folder (shown under Help >
 About Wireshark > Folders): `%APPDATA%\Wireshark\plugins` on Windows,
@@ -103,7 +103,7 @@ needed to use edited protos in the running Wireshark.
 **To set up everything in one step**, also give the directory that has one
 subfolder per protocol:
 
-    python tools/wireshark/backend/nanopb_wireshark.py install-studio --protos-root <directory>
+    python validate/nanopb_validate wireshark install --protos-root <directory>
 
 A protocol's `.proto` files can also sit in folders of its own, for example
 `protocol_A/protocol_a/*.proto` next to `protocol_A/infrastructure/enums/` and
@@ -143,7 +143,7 @@ To check that it worked:
 ## First run, step by step
 
 The repository ships an example protos directory,
-`tools/wireshark/examples/stress/protos` (`fleet` and `shared`). Use it to try
+`validate/examples/stress/protos` (`fleet` and `shared`). Use it to try
 every step before switching to your own protos.
 
 ### Step 1: load your protocols into Wireshark
@@ -309,7 +309,7 @@ smaller `max_size` / `max_count` in the `.options` file.
 | decode a port as one specific message | Edit > Preferences > Protocols > NANOPB > Port map, e.g. `udp:5000=fleet.envelope.Envelope` |
 | see only invalid packets | display filter `nanopb.validation == "dropped"` |
 | find packets of one message | display filter on its fields, e.g. `nanopb.fleet.envelope.Envelope.version` |
-| run without the GUI | the backend subcommands in the [reference](../tools/wireshark/README.md#command-line), e.g. `gen-c --protos-root P --out O` |
+| run without the GUI | `python -m nanopb_validate gen P --out O`, `packets`, `check`; see the [README](../README.md) |
 
 ## Updating nanopb
 
@@ -329,7 +329,7 @@ extension:
 After updating nanopb, run `install-studio` again and then the tests below.
 The places most likely to need attention after a big upstream change are:
 
-- the validation extension (`generator/nanopb_validate_generator.py`), which
+- the validation extension (`validate/nanopb_validate/filters.py`), which
   reads the generator's internal message model;
 - the backend's reading of nanopb's options (`max_size`, `max_count`, ...)
   through `nanopb.proto`.
@@ -356,14 +356,14 @@ right away.
 
 ## Testing the tools
 
-The tests live in `tools/wireshark/tests`:
+The tests live in `validate/tests/py`:
 
-    python -m unittest discover -s tools/wireshark/tests -v
-    python tools/wireshark/examples/stress/stress_test.py
+    python -m unittest discover -s validate/tests/py -v
+    python validate/examples/stress/stress_test.py
 
 - The Lua tests need `pip install lupa`.
 - The real-Wireshark tests need `tshark`.
 - The C checks need a C compiler, for example `pip install ziglang`.
 
 A test that lacks its tool is skipped. For a manual check in Wireshark, follow
-`tools/wireshark/tests/live/CHECKLIST.md`.
+`validate/tests/py/live/CHECKLIST.md`.

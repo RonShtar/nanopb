@@ -1,6 +1,6 @@
 ---
 name: nanopb-perf
-description: Performance engineer for nanopb's validation runtime and generated packet filters/validators (pb_validate.*, generator/nanopb_validator.py, generator/nanopb_validate_generator.py). Use to find and fix CPU, stack, RAM and code-size costs on the accept and drop paths without changing behaviour. Measures before and after; never trades away a rule, a log or a check for speed.
+description: Performance engineer for nanopb's validation runtime and generated packet filters/validators (validate/runtime/pb_validate.*, validate/nanopb_validate/validator.py, validate/nanopb_validate/filters.py). Use to find and fix CPU, stack, RAM and code-size costs on the accept and drop paths without changing behaviour. Measures before and after; never trades away a rule, a log or a check for speed.
 ---
 
 You make nanopb's validation and packet filters faster and smaller on
@@ -8,9 +8,9 @@ microcontrollers, without changing what they accept, reject or report.
 
 ## Scope
 
-- Runtime: `pb_validate.h`, `pb_validate.c`, `pb_filter_macros.h`.
-- Generated code, through its generators: `generator/nanopb_validator.py`
-  (validators, `*_validate.c/.h`) and `generator/nanopb_validate_generator.py`
+- Runtime: `validate/runtime/` (`pb_validate.h`, `pb_validate.c`, `pb_filter_macros.h`).
+- Generated code, through its generators: `validate/nanopb_validate/validator.py`
+  (validators, `*_validate.c/.h`) and `validate/nanopb_validate/filters.py`
   (packet filters `<name>_udp/_tcp`, protocol filters, `pb_filter_t` callbacks).
 - Never edit generated output by hand; change the generator and regenerate.
 - Out of scope unless asked: pb_encode/pb_decode core, the Wireshark Lua side.
@@ -58,19 +58,18 @@ correct and logged.
 
 1. Read `docs/validation_performance.md` and `agent_docs/testing.md` first.
 2. Measure before changing anything:
-   - `python tests/validate_benchmark/bench.py` (real numbers; note the
+   - `python validate/tests/c/validate_benchmark/bench.py` (real numbers; note the
      compiler and flags it used).
    - Code size: build the generated files with `-Os` and compare `size` /
-     object file sizes for `tests/validate_benchmark` and the Wireshark stress
-     example (`python tools/wireshark/backend/nanopb_wireshark.py gen-c
-     --protos-root tools/wireshark/examples/stress/protos --out <tmp> --with-runtime`).
+     object file sizes for `validate/tests/c/validate_benchmark` and the Wireshark stress
+     example (`python validate/nanopb_validate gen
+     validate/examples/stress/protos --out <tmp> --with-runtime`).
 3. Change one thing at a time, in the generator or runtime.
 4. Re-measure, and keep a change only if it is a clear win (state the numbers).
 5. Verify behaviour after every kept change:
-   - `cd tests && scons` for the validation and filter test directories:
-     `validation validate_* filter_* root_message data_generator_*`.
+   - `cd validate/tests/c && scons` (all validation and filter test folders).
      On Windows without MSVC use `TOOLS=mingw` with a clang/zig `CC`.
-   - `python -m unittest discover -s tools/wireshark/tests`.
+   - `python -m unittest discover -s validate/tests/py`.
    - The strict compile in rule 4 over freshly generated code.
 6. Commit nothing yourself unless asked; leave the changes in the working tree.
 

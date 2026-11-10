@@ -8,7 +8,7 @@ Nanopb is a small Protocol Buffers implementation for memory-constrained systems
 
 Two architectural choices matter for most tasks:
 
-- The runtime is intentionally small and split by responsibility: common support in `<repo_root>/pb_common.c`, encoding in `<repo_root>/pb_encode.c`, decoding in `<repo_root>/pb_decode.c`, and optional validation in `<repo_root>/pb_validate.c`.
+- The runtime is intentionally small and split by responsibility: common support in `<repo_root>/pb_common.c`, encoding in `<repo_root>/pb_encode.c`, decoding in `<repo_root>/pb_decode.c`; this fork adds optional validation in `<repo_root>/validate/runtime/pb_validate.c`.
 - `.proto` files are turned into C structs and descriptor tables by the Python generator in `<repo_root>/generator/nanopb_generator.py`; the generated code is the bridge between protobuf schemas and the C runtime.
 
 ## What is here
@@ -25,9 +25,9 @@ Two architectural choices matter for most tasks:
 
 - `<repo_root>/pb.h` — compile-time feature flags and common types
 - `<repo_root>/pb_encode.*` / `<repo_root>/pb_decode.*` — public runtime APIs and implementations
-- `<repo_root>/pb_validate.*` — optional declarative validation runtime
-- `<repo_root>/generator/` — schema-to-C generator, validator generator, packaged entrypoints
-- `<repo_root>/generator/proto/` — generator-owned protobuf definitions such as `nanopb.proto` and `validate.proto`
+- `<repo_root>/validate/` — this fork's additions (validation, packet filters, Wireshark tools), kept out of nanopb's files so nanopb upgrades are plain merges; entry point `<repo_root>/validate/README.md`
+- `<repo_root>/generator/` — schema-to-C generator and packaged entrypoints (nanopb's, unmodified)
+- `<repo_root>/generator/proto/` — generator-owned protobuf definitions such as `nanopb.proto` (`validate.proto` is in `<repo_root>/validate/nanopb_validate/validate_proto/`)
 - `<repo_root>/tests/` — canonical behavior and regression coverage
 - `<repo_root>/examples/` — minimal consumer-facing examples for major integration styles
 - `<repo_root>/extra/` — reusable integration files (`nanopb.mk`, CMake helpers, Bazel support)
@@ -38,7 +38,7 @@ Two architectural choices matter for most tasks:
 
 - Runtime bug or feature: start with `<repo_root>/pb.h` plus the relevant `<repo_root>/pb_*.c`
 - Generator bug or generated-code shape issue: `<repo_root>/generator/nanopb_generator.py` and the nearest case in `<repo_root>/tests/`
-- Validation work: `<repo_root>/pb_validate.*`, `<repo_root>/generator/nanopb_validator.py`, `<repo_root>/tests/validation/`
+- Validation, filters, Wireshark tools: `<repo_root>/validate/` only (runtime in `validate/runtime/`, generators in `validate/nanopb_validate/`, tests in `validate/tests/`); never edit nanopb's own files for them, `validate/tests/py/test_upstream_separation.py` enforces it
 - Build-system integration: matching files in `<repo_root>/CMakeLists.txt`, `<repo_root>/meson.build`, `<repo_root>/BUILD.bazel`, `<repo_root>/Package.swift`, or `<repo_root>/extra/`
 
 ## How to work in this repo

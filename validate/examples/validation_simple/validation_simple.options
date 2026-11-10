@@ -1,6 +1,0 @@
-# Options file for validation_simple example
-
-# Set max sizes for string fields
-UserProfile.username    max_size:21
-UserProfile.email       max_size:101
-

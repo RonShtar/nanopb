@@ -114,12 +114,12 @@ class BackendTests(unittest.TestCase):
         self.assertIn('bool pb_validate_demo_envelope_Envelope(', self.read('envelope', 'envelope_validate.c'))
 
     def schema_messages(self, root):
-        from nanopb_wireshark import DEFAULT_NANOPB_ROOT, setup_nanopb, write_schema
+        from backend import DEFAULT_NANOPB_ROOT, setup_nanopb, write_schema
         setup_nanopb(DEFAULT_NANOPB_ROOT)
         return write_schema(root, [], os.path.join(self.tmp, 'schema.luadata'))
 
     def test_schema_exports_rules(self):
-        from nanopb_wireshark import int64_key
+        from backend import int64_key
         messages = self.schema_messages(RULES_PROTOS)
 
         def field(msg, name):
@@ -177,7 +177,7 @@ class BackendTests(unittest.TestCase):
             return result, json.load(handle)
 
     def test_gen_packets_capture_and_manifest(self):
-        from nanopb_wireshark import read_capture
+        from backend import read_capture
         result, manifest = self.gen_packets(FIXTURES)
         self.assertTrue(result['pcap'].endswith('.pcapng'))
         self.assertGreater(result['passed'], 0)
@@ -205,7 +205,7 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(second['schema_changed'])
 
     def test_gen_packets_pcap_format_and_no_install(self):
-        from nanopb_wireshark import read_capture
+        from backend import read_capture
         out = os.path.join(self.tmp, 'packets')
         status, result, err = run_backend('gen-packets', '--protos-root', FIXTURES, '--unit', 'telemetry',
                                           '--out', out, '--no-install', '--format', 'pcap', '--valid', '1')
@@ -225,7 +225,7 @@ class BackendTests(unittest.TestCase):
                 self.check_with_c(root, manifest)
 
     def check_with_c(self, root, manifest):
-        from nanopb_wireshark import c_identifier
+        from backend import c_identifier
         by_unit = {}
         for entry in manifest['packets']:
             by_unit.setdefault(entry['unit'], []).append(entry)
@@ -459,7 +459,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result['merged_into'], {'shared': ['fleet']})
 
     def test_gen_c_predicts_filter_modes(self):
-        from nanopb_wireshark import predicted_mode, Unit, DEFAULT_NANOPB_ROOT, setup_nanopb
+        from backend import predicted_mode, Unit, DEFAULT_NANOPB_ROOT, setup_nanopb
         setup_nanopb(DEFAULT_NANOPB_ROOT)
         unit = Unit(STRESS_PROTOS, 'fleet', [])
         self.assertEqual(predicted_mode(unit, 'fleet.envelope.Envelope'), 'single')  # Any + oneof
@@ -854,7 +854,7 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         self.assertEqual(result['protocols'], ['PROTOCOLVALID'])
         self.assertTrue(os.path.isfile(os.path.join(plugins, 'nanopb', 'schema.luadata')))
-        from nanopb_wireshark import read_lua_config
+        from backend import read_lua_config
         config = read_lua_config(os.path.join(plugins, 'nanopb', 'studio_config.luadata'))
         self.assertEqual(config['protos_root'], root)
 
@@ -916,7 +916,7 @@ class BackendTests(unittest.TestCase):
                      for f in files if f.endswith('.lua')]
         self.assertEqual(lua_files, [])
 
-        from nanopb_wireshark import read_lua_config
+        from backend import read_lua_config
         config = read_lua_config(config_path)
         self.assertEqual(config['project'], project)
         self.assertEqual(config['nanopb_root'], '')
@@ -935,7 +935,7 @@ class BackendTests(unittest.TestCase):
     def test_install_studio_dev(self):
         status, result, err = run_backend('install-studio', '--plugins-dir', self.tmp, '--dev')
         self.assertEqual(status, 0, err)
-        from nanopb_wireshark import DEFAULT_NANOPB_ROOT, read_lua_config
+        from backend import DEFAULT_NANOPB_ROOT, read_lua_config
         config = read_lua_config(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata'))
         self.assertEqual(config['nanopb_root'], DEFAULT_NANOPB_ROOT)
 

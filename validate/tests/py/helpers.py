@@ -33,8 +33,7 @@ def option_proto(name):
 os.environ['NANOPB_WS_NO_TK'] = '1'
 
 sys.path.insert(0, PKG_DIR)
-import backend as nanopb_wireshark  # noqa: E402
-sys.modules.setdefault('nanopb_wireshark', nanopb_wireshark)
+import backend  # noqa: E402  (the engine behind python -m nanopb_validate)
 
 
 def run_backend(*argv):
@@ -42,7 +41,7 @@ def run_backend(*argv):
 
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-        status = nanopb_wireshark.main(list(argv))
+        status = backend.main(list(argv))
     text = out.getvalue()
     assert text.rstrip().endswith('__EXIT__=%d' % status), text
     body = text.rstrip()[:-len('__EXIT__=%d' % status)].strip()

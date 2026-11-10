@@ -24,7 +24,7 @@ Treat `<repo_root>` as the root of this checkout.
 
 - `<repo_root>/tests/common/` — shared harness pieces
 - `<repo_root>/tests/regression/` — issue-driven regressions; check here before changing behavior
-- `<repo_root>/tests/validation/` — validation feature coverage
+- `<repo_root>/validate/` — validation, packet filters and Wireshark tools (runtime, Python package, Lua, tests, docs); see `<repo_root>/validate/README.md`
 - `<repo_root>/tests/site_scons/` — SCons platform adapters and generator integration for the test harness
 
 ## Build/integration files worth knowing

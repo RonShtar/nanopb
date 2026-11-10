@@ -7,7 +7,7 @@
 -- Every action asks only for the input (protos) and output directories, then
 -- lists the units found in the input so you can pick which ones to generate.
 --
--- All work is done by validate/nanopb_validate/backend.py in the
+-- All work is done by `python -m nanopb_validate` (validate/ in the
 -- nanopb checkout recorded by `install-studio`; this file
 -- only collects input and shows output. The checkout, the Python executable and
 -- the last used directories are kept in nanopb/studio_config.luadata next to
@@ -125,7 +125,7 @@ local function project_root()
 end
 
 local function backend_path()
-    return join(project_root(), "validate", "nanopb_validate", "backend.py")
+    return join(project_root(), "validate", "nanopb_validate", "cli.py")
 end
 
 local function file_exists(path)
@@ -139,7 +139,7 @@ local function run_backend(args)
     if not file_exists(backend_path()) then
         return false, "nanopb backend not found at " .. backend_path() .. ".\n" ..
             "From the nanopb checkout run\n\n" ..
-            "    python validate/nanopb_validate/backend.py install-studio\n\n" ..
+            "    python validate/nanopb_validate wireshark install\n\n" ..
             "and reload Lua plugins (Ctrl+Shift+L)."
     end
     local parts = { quote(config.python), quote(backend_path()), "--nanopb-root", quote(project_root()) }
@@ -370,7 +370,7 @@ local function tick_units(title, names, selected)
     for _, name in ipairs(names) do
         if not selected[name] then off[#off + 1] = name end
     end
-    local started, ok, text = pcall(run_backend, { "pick-units", "--title", title,
+    local started, ok, text = pcall(run_backend, { "wireshark", "pick", "--title", title,
         "--names", table.concat(names, ","), "--off", table.concat(off, ",") })
     if not (started and ok) then return nil end
     return (parse_unit_names(text))
@@ -383,7 +383,7 @@ local function pick_units(title, generate)
         return
     end
     if names == nil then
-        local ok, text = run_backend(add_common({ "units", "--names-only" }))
+        local ok, text = run_backend(add_common({ "wireshark", "units", "--names-only" }))
         if not ok then
             show(title, false, text)
             return
@@ -474,7 +474,7 @@ local function gen_c()
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
             -- Port-mapped messages are the protocol entrypoints that get a packet filter.
-            local args = add_common({ "gen-c", "--out", output_dir(), "--unit", units })
+            local args = add_common({ "gen", "--out", output_dir(), "--unit", units })
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -501,7 +501,7 @@ local function gen_packets()
     local title = "Generate test packets"
     ask_dirs(title, true, nil, function()
         pick_units(title, function(units)
-            local args = add_common({ "gen-packets", "--mode", "protocol", "--out", output_dir(),
+            local args = add_common({ "packets", "--mode", "protocol", "--out", output_dir(),
                 "--unit", units, "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
@@ -560,7 +560,7 @@ end
 -- Only the protos directory: every subdirectory with .proto files becomes a
 -- protocol (FLEET, SHARED, ...) of the dissector; the port map is kept.
 local function load_now(title, note)
-    local args = add_common({ "install-dissector", "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
+    local args = add_common({ "wireshark", "load", "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
     if config.port_map ~= "" then
         args[#args + 1] = "--port-map"
         args[#args + 1] = config.port_map

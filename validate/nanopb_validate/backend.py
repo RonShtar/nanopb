@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
-"""Backend for the nanopb Wireshark plugins.
+"""Engine behind `python -m nanopb_validate` (cli.py) and the Wireshark plugins.
 
-The Lua plugins only collect input and display results; everything that
-touches .proto files happens here, reusing the nanopb generator, the
-validation plugin and the data generator from this repository.
+Everything that touches .proto directories happens here: finding protocols
+(units), merging their generated C, test packets and captures, the dissector
+schema and installing the plugins. It reuses nanopb's generator read-only and
+our validator, filter plugin and data generator. Use cli.py; these engine
+commands are what its public commands map to:
 
-A "protos root" is a directory whose subdirectories are *units*: every
-subdirectory that contains .proto files is generated as one unit.
+  gen-c             <- gen PROTOS_DIR       merged <unit>.pb.c/.h + _validate.c/.h
+  gen-packets       <- packets PROTOS_DIR   capture of PASSED and DROPPED packets
+  install-studio    <- wireshark install    plugins + project copy, once
+  install-dissector <- wireshark load       dissector + schema for a protos dir
+  refresh-schema    <- wireshark refresh    rebuild the schema if protos changed
+  units             <- wireshark units      protocols and their messages
+  pick-units        <- wireshark pick       tick-box window to choose protocols
+  gen-data, schema     (internal: sample messages, Lua schema)
 
-Subcommands (all print a JSON summary on success, errors go to stderr):
+A "protos root" is a directory whose subdirectories are *units* (protocols):
+every subdirectory with .proto files, directly or in folders of its own.
 
-  units             list units and their messages
-  gen-c             generate <unit>.pb.c/.h (all messages and the packet
-                    filters) and <unit>_validate.c/.h (all validators) per unit
-                    (--with-runtime also copies pb_*.c / pb_*.h)
-  gen-data          generate sample encoded messages (.bin / C array / hex)
-  gen-packets       one capture with valid (PASSED) and invalid (DROPPED)
-                    packets of every message, plus a JSON manifest
-  schema            write the Lua schema used by nanopb_any_dissector.lua
-  install-dissector copy the dissector and its schema into a plugins dir
-  install-studio    install the plugins and a copy of the generator, runtime
-                    and this backend into a plugins dir
-
-The last line of output is always ``__EXIT__=<status>`` so that callers
-without access to the process exit status (Lua 5.1 io.popen) can detect
-failures.
+All commands print a JSON result; the last line of output is always
+``__EXIT__=<status>`` so that callers without access to the process exit
+status (Lua 5.1 io.popen) can detect failures.
 """
 
 from __future__ import print_function

@@ -2,7 +2,7 @@
 
 What a validated packet costs, which parts of it matter, and the
 compile-time switches that change it. All numbers come from
-`tests/validate_benchmark` (see [Measuring](#measuring)); run it on your own
+`validate/tests/c/validate_benchmark` (see [Measuring](#measuring)); run it on your own
 target, since the ratios carry over better than the absolute times.
 
 ## Where the time goes
@@ -34,7 +34,7 @@ Costs that used to be on this path and no longer are:
 
 ## Measured
 
-`tests/validate_benchmark`, a 124-byte `Envelope { version, oneof body:
+`validate/tests/c/validate_benchmark`, a 124-byte `Envelope { version, oneof body:
 Telemetry { device, seq, 8 x Reading { sensor, value, unit }, contact } }`,
 `-O2`, x86-64, zig cc 21 (clang). `bad_first` breaks the first rule checked,
 `bad_last` the last one.
@@ -69,7 +69,7 @@ The filter (valid packet) per build configuration:
 | `PB_VALIDATE_FILTER_STATIC_BUFFERS` | 1315 | 1832 B |
 | `PB_VALIDATE_DEBUG` | 2065 | 8376 B |
 
-`tools/wireshark/tests/test_performance.py` runs this benchmark and fails if
+`validate/tests/py/test_performance.py` runs this benchmark and fails if
 the filter costs more than 1.25 x decoding, if dropping costs more than
 accepting, or if stack use grows past its budget.
 
@@ -126,7 +126,7 @@ a `pb_violations_t` only where you report why a message was rejected.
 
 ## Measuring
 
-    python tests/validate_benchmark/bench.py [--iterations N] [--cc "arm-none-eabi-gcc ..."]
+    python validate/tests/c/validate_benchmark/bench.py [--iterations N] [--cc "arm-none-eabi-gcc ..."]
 
 builds the benchmark in each configuration above and prints the tables in
 markdown. Timings are the best of 7 runs; the peak stack is measured by

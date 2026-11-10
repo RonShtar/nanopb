@@ -21,7 +21,7 @@ Run the default `scons` suite first. The test tree covers encoding, decoding, ca
 
 ### Validation changes
 
-Make sure `<repo_root>/tests/validation/` still passes, because validation spans schema options, generator output, and runtime support.
+Run `python validate/nanopb_validate test` (Python tests, and the C tests in `<repo_root>/validate/tests/c/` with SCons), because validation spans schema options, generator output, and runtime support.
 
 ### Build-system or packaging changes
 

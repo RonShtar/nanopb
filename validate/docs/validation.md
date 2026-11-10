@@ -15,27 +15,34 @@ The validation feature allows you to:
 One command generates the messages and their validators:
 
 ```bash
-python generator/nanopb_generator.py --validate message.proto
+python validate/nanopb_validate gen message.proto
 ```
 
 This writes the usual `message.pb.h` / `message.pb.c`, plus
-`message_validate.h` / `message_validate.c`. All other nanopb options work as
-usual (`-D outdir`, `-I dir`, `-C`, `-s`, `-f`, ...) and reach both code
-generators. Options of the validator itself go in `--validate-opt`, e.g. a
-packet filter:
+`message_validate.h` / `message_validate.c`. nanopb's own options go in
+`--nanopb-opt` (e.g. `--nanopb-opt=-q`, `-s`, `--c-style`) and reach both code
+generators; `-I dir` and `-D outdir` work as with nanopb. A packet filter:
 
 ```bash
-python generator/nanopb_generator.py --validate --validate-opt=--filter=pkg.Envelope message.proto
+python validate/nanopb_validate gen --filter pkg.Envelope message.proto
 ```
+
+For a directory with one folder per protocol, `gen PROTOS_DIR --out DIR`
+writes one merged `<protocol>.pb.c/.h` and `<protocol>_validate.c/.h` per
+protocol (see the [README](../README.md)). Compile with `-I validate/runtime`
+and link `validate/runtime/pb_validate.c`.
 
 ### With protoc directly
 
-`--validate` runs protoc with two plugins: nanopb, then the separate
-`protoc-gen-nanopb-validate`. To call protoc yourself (or from a build
-system):
+`gen` runs protoc with two plugins: nanopb's, then
+`validate/nanopb_validate/plugin/protoc-gen-nanopb-validate` (`.bat` on
+Windows). To call protoc yourself (or from a build system):
 
 ```bash
-protoc   --nanopb_out=--protoc-insertion-points,-x,validate.proto:.   --nanopb-validate_out=-x,validate.proto:.   message.proto
+protoc --plugin=protoc-gen-nanopb-validate=validate/nanopb_validate/plugin/protoc-gen-nanopb-validate \
+       -I. -Ivalidate/nanopb_validate/validate_proto \
+       --nanopb_out=--protoc-insertion-points,-x,validate.proto:. \
+       --nanopb-validate_out=-x,validate.proto:. message.proto
 ```
 
 Two things are required and easy to get wrong:
@@ -45,6 +52,9 @@ Two things are required and easy to get wrong:
   files nanopb produced.
 * nanopb must be given `--protoc-insertion-points`, otherwise there are no
   markers to inject into.
+
+Build systems: `validate/extra/NanopbValidate.cmake` and
+`validate/extra/nanopb_validate.mk` wrap `gen` for CMake and make.
 
 Options that affect C naming (`-C`, `--custom-style`, `-s`, `-f`, `-I`, `-x`)
 must be passed to **both** plugins, since the validate plugin rebuilds nanopb's

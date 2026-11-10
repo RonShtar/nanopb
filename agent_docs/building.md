@@ -20,7 +20,7 @@ Extra tools are only needed for the integration you are touching: `cmake`, `meso
 python3 <repo_root>/generator/nanopb_generator.py path/to/file.proto
 ```
 
-Enable validation generation when needed with the same flags used by `<repo_root>/examples/validation_simple/Makefile` and `<repo_root>/tests/validation/SConscript`.
+Generate validation code with `python validate/nanopb_validate gen FILE.proto` (or a protos directory); build-system add-ons are in `<repo_root>/validate/extra/`. See `<repo_root>/validate/README.md`.
 
 ### CMake
 

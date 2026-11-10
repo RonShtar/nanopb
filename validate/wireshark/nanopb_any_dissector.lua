@@ -64,7 +64,7 @@ local function refresh_schema()
     local root = studio_config.nanopb_root or ""
     if root == "" then root = studio_config.project or "" end
     if root == "" then root = DATA_DIR .. SEP .. "project" end
-    local backend = table.concat({ root, "validate", "nanopb_validate", "backend.py" }, SEP)
+    local backend = table.concat({ root, "validate", "nanopb_validate", "cli.py" }, SEP)
     local f = io.open(backend, "r")
     if not f then return end
     f:close()
@@ -74,7 +74,7 @@ local function refresh_schema()
         return "'" .. arg:gsub("'", "'\\''") .. "'"
     end
     local cmd = table.concat({ quote(python), quote(backend), "--nanopb-root", quote(root),
-        "refresh-schema", "--plugins-dir", quote(plugins) }, " ") .. " 2>&1"
+        "wireshark", "refresh", "--plugins-dir", quote(plugins) }, " ") .. " 2>&1"
     if SEP == "\\" then cmd = '"' .. cmd .. '"' end
     local ok, pipe = pcall(io.popen, cmd, "r")
     if ok and pipe then
