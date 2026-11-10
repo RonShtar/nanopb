@@ -1,0 +1,77 @@
+Help('''
+C tests of the validation runtime, validators and packet filters.
+
+    cd validate/tests/c && scons            (add -c to clean)
+
+Uses nanopb's own test helpers (tests/site_scons) read-only, so nanopb can be
+upgraded without touching this folder. Options, as in nanopb's tests:
+
+CC, CXX, CCFLAGS, LINKFLAGS, PROTOC, PROTOCFLAGS, BUILDDIR (default build)
+TOOLS       SCons tools (default "default"); TOOLS=mingw selects GNU-style
+            commands, e.g. for clang or zig cc on Windows without MSVC
+''')
+
+import os
+import sys
+
+HERE = Dir('#').abspath
+NANOPB = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
+VALIDATE = os.path.join(NANOPB, 'validate')
+UPSTREAM_SITE = os.path.join(NANOPB, 'tests', 'site_scons')
+
+# nanopb's test helpers: RunTest, Compare, Match, Decode, Encode builders, and
+# its nanopb tool module (our tool reuses its emitter).
+sys.path.insert(0, UPSTREAM_SITE)
+sys.path.insert(0, os.path.join(UPSTREAM_SITE, 'site_tools'))
+exec(compile(open(os.path.join(UPSTREAM_SITE, 'site_init.py')).read(),
+             os.path.join(UPSTREAM_SITE, 'site_init.py'), 'exec'))
+
+# Our package: builds nanopb_pb2 / validate_pb2 before any protoc run.
+sys.path.insert(0, os.path.join(VALIDATE, 'nanopb_validate'))
+import env as nv_env  # noqa: E402
+nv_env.setup()
+
+env = Environment(ENV = os.environ, tools = ARGUMENTS.get('TOOLS', 'default').split(','),
+                  toolpath = [os.path.join(UPSTREAM_SITE, 'site_tools'), os.path.join(HERE, 'site_scons', 'site_tools')])
+for var, val in ARGUMENTS.items():
+    if var in ('CCFLAGS', 'CXXFLAGS', 'LINKFLAGS', 'LINKLIBS', 'PROTOCFLAGS'):
+        env.Append(**{var: val})
+    elif var != 'TOOLS':
+        env.Replace(**{var: val})
+
+env.SetDefault(BUILDDIR = 'build')
+env.SConsignFile(env['BUILDDIR'] + '/sconsign')
+env.Replace(NANOPB = NANOPB, VALIDATE = VALIDATE)
+# Windows: 'python3' on PATH is often the Microsoft Store stub; use this Python.
+env.Replace(PYTHON = env['ESCAPE'](sys.executable))
+env['ENV']['PATH'] = os.path.dirname(sys.executable) + os.pathsep + env['ENV'].get('PATH', '')
+# nanopb's generator/protoc wrapper registers protoc-gen-nanopb itself; an
+# empty default keeps nanopb's tool from adding it again (it does not know
+# protoc.bat), which also lets test scripts Append their own flags.
+env.SetDefault(PROTOCFLAGS = '')
+env.Tool('nanopb')            # nanopb's NanopbProto builder (tests/site_scons/site_tools)
+env.Tool('nanopb_validate')   # ours: same builder, plus the validate plugin
+add_nanopb_builders(env)
+
+env.Append(CPPPATH = [NANOPB, nv_env.RUNTIME_DIR, '$COMMON'])
+env.Append(PROTOCPATH = [nv_env.VALIDATE_PROTO_DIR])
+
+if 'gcc' in env['CC'] or 'clang' in env['CC'] or 'zig' in env['CC']:
+    env.Append(CFLAGS = '-g -Wall -Werror ')
+elif 'cl' in env['CC']:
+    env.Append(CFLAGS = '/Zi /W2 /WX /std:c11 /wd4116')
+    env.Append(LINKFLAGS = '/DEBUG')
+env.SetDefault(CORECFLAGS = '')
+env.SetDefault(LINKLIBS = '')
+env.Replace(LINKCOM = env['LINKCOM'] + ' $LINKLIBS')
+
+env['VARIANT_DIR'] = env['BUILDDIR']
+env['BUILD'] = '#' + env['VARIANT_DIR']
+env['COMMON'] = '#' + env['VARIANT_DIR'] + '/common'
+
+# The nanopb runtime objects the tests link with.
+for name in ('pb_encode', 'pb_decode', 'pb_common'):
+    env.Object(env['BUILDDIR'] + '/common/' + name + '.o', os.path.join(NANOPB, name + '.c'))
+
+for subdir in Glob('*/SConscript'):
+    SConscript(subdir, exports = 'env', variant_dir = env['VARIANT_DIR'] + '/' + os.path.dirname(str(subdir)))

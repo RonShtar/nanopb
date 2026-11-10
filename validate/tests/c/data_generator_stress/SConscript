@@ -1,0 +1,80 @@
+# Decode and validate data produced by generator/nanopb_data_generator.py for a
+# schema that mixes validate.proto rules with nanopb storage limits: strings,
+# bytes, integers with int_size, repeated fields, maps, oneofs, nested messages
+# and google.protobuf.Any.
+
+Import("env")
+
+import sys
+
+test_env = env.Clone()
+test_env.Append(PROTOCFLAGS = "--experimental_allow_proto3_optional")
+
+# Enable validation code generation, and exclude validate.proto from the
+# #include list since it is only used for options.
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "")
+
+# pb_validate.h requires C99 features
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+
+test_env.Prepend(CPPPATH = ['.'])
+test_env["PYTHON"] = test_env["ESCAPE"](sys.executable)
+
+# Build pb_validate.o without extra strict flags (avoid conversion warnings)
+validate_obj = test_env.Object("pb_validate.o", "$VALIDATE/runtime/pb_validate.c")
+
+# Generate the test vectors using the data generator. It reads stress.options
+# and google/protobuf/any.options just like nanopb_generator does.
+vectors = test_env.Command("stress_vectors.h",
+                           ["generate_vectors.py", "stress.proto", "stress.options",
+                            "decode_only.proto", "decode_only.options",
+                            "common.proto", "common.options", "legacy.proto", "legacy.options",
+                            "google/protobuf/any.options"],
+                           "$PYTHON ${SOURCES[0]} $TARGET")
+
+# Rebuild the vectors whenever the data generator itself changes.
+test_env.Depends(vectors, "$VALIDATE/nanopb_validate/datagen.py")
+
+# Generate nanopb sources; the validate plugin adds _validate.c/_validate.h
+pb_files = test_env.NanopbProto(["stress", "stress.options"])
+test_env.SideEffect("stress_validate.c", pb_files)
+test_env.SideEffect("stress_validate.h", pb_files)
+test_env.NanopbProto(["google/protobuf/any", "google/protobuf/any.options"])
+
+# Types the validator cannot handle yet are generated without the validate
+# plugin; the vectors for them are only decoded.
+decode_env = env.Clone()
+decode_env.Append(PROTOCFLAGS = "--experimental_allow_proto3_optional")
+decode_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+decode_env.Prepend(CPPPATH = ['.'])
+decode_env.NanopbProto(["common", "common.options"])
+decode_env.NanopbProto(["decode_only", "decode_only.options"])
+decode_env.NanopbProto(["legacy", "legacy.options"])
+
+test_prog = test_env.Program(["run_vectors.c",
+                              "stress.pb.c",
+                              "stress_validate.c",
+                              "decode_only.pb.c",
+                              "common.pb.c",
+                              "legacy.pb.c",
+                              "google/protobuf/any.pb.c",
+                              "$COMMON/pb_decode.o",
+                              "$COMMON/pb_common.o",
+                              validate_obj])
+
+test_env.Depends(test_prog, vectors)
+
+test_env.RunTest(test_prog)
+
+# Pure Python checks (independent rule oracle, options precedence, error cases).
+semantics = test_env.Command("test_generator_semantics.output",
+                             ["test_generator_semantics.py", "stress.proto", "stress.options",
+                              "decode_only.proto", "decode_only.options", "common.proto",
+                              "common.options", "legacy.proto", "python_only.proto",
+                              "google/protobuf/any.options"],
+                             "$PYTHON ${SOURCES[0]} > $TARGET")
+test_env.Depends(semantics, "$VALIDATE/nanopb_validate/datagen.py")

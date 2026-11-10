@@ -11,21 +11,16 @@ from tempfile import TemporaryDirectory
 from ._utils import has_grpcio_protoc, invoke_protoc, print_versions
 
 def build_nanopb_proto(protosrc, dirname):
-    '''Try to build one or more .proto files for python-protobuf.
-    protosrc can be a single path or list/tuple of paths.
+    '''Try to build a .proto file for python-protobuf.
     Returns True if successful.
     '''
 
-    # Support both legacy string input and new iterable input for multiple protos
-    if isinstance(protosrc, (list, tuple)):
-        sources = list(protosrc)
-    else:
-        sources = [protosrc]
-
-    cmd = ["protoc", "--python_out={}".format(dirname)] + sources + ["-I={}".format(dirname)]
-
-    if any(os.path.basename(src) == "validate.proto" for src in sources):
-        cmd.append("--experimental_allow_proto3_optional")
+    cmd = [
+        "protoc",
+        "--python_out={}".format(dirname),
+        protosrc,
+        "-I={}".format(dirname),
+    ]
 
     if has_grpcio_protoc():
         # grpcio-tools has an extra CLI argument
@@ -59,8 +54,6 @@ def load_nanopb_pb2():
     dirname = os.path.dirname(__file__)
     protosrc = os.path.join(dirname, "nanopb.proto")
     protodst = os.path.join(dirname, "nanopb_pb2.py")
-    validatesrc = os.path.join(dirname, "validate.proto")
-    validatedst = os.path.join(dirname, "validate_pb2.py")
 
     if tmpdir is not None and not os.path.isdir(tmpdir):
         tmpdir = None # Use system-wide temp dir
@@ -74,28 +67,19 @@ def load_nanopb_pb2():
 
     if os.path.isfile(protosrc):
         src_date = os.path.getmtime(protosrc)
-        validate_up_to_date = (not os.path.isfile(validatesrc)) or \
-                               (os.path.isfile(validatedst) and os.path.getmtime(validatedst) >= os.path.getmtime(validatesrc))
-        if os.path.isfile(protodst) and os.path.getmtime(protodst) >= src_date and validate_up_to_date:
+        if os.path.isfile(protodst) and os.path.getmtime(protodst) >= src_date:
             try:
                 from . import nanopb_pb2 as nanopb_pb2_mod
-                # If validate.proto exists but not built (older installs), attempt lazy import to see if it's present
-                if os.path.isfile(validatesrc) and not os.path.isfile(validatedst):
-                    # Trigger build of validate.proto only
-                    build_nanopb_proto([validatesrc], dirname)
                 return nanopb_pb2_mod
             except Exception as e:
                 sys.stderr.write("Failed to import nanopb_pb2.py: " + str(e) + "\n"
-                                 "Will automatically attempt to rebuild this.\n"
-                                 "Verify that python-protobuf and protoc versions match.\n")
+                                "Will automatically attempt to rebuild this.\n"
+                                "Verify that python-protobuf and protoc versions match.\n")
                 print_versions()
 
-    # Try to rebuild into generator/proto directory (nanopb.proto + validate.proto if available)
+    # Try to rebuild into generator/proto directory
     if not temporary_only:
-        sources = [protosrc]
-        if os.path.isfile(validatesrc):
-            sources.append(validatesrc)
-        build_nanopb_proto(sources, dirname)
+        build_nanopb_proto(protosrc, dirname)
 
         try:
             from . import nanopb_pb2 as nanopb_pb2_mod
@@ -106,10 +90,7 @@ def load_nanopb_pb2():
 
     # Try to rebuild into temporary directory
     with TemporaryDirectory(prefix = 'nanopb-', dir = tmpdir) as protodir:
-        sources = [protosrc]
-        if os.path.isfile(validatesrc):
-            sources.append(validatesrc)
-        build_nanopb_proto(sources, protodir)
+        build_nanopb_proto(protosrc, protodir)
 
         if protodir not in sys.path:
             sys.path.insert(0, protodir)
@@ -126,3 +107,4 @@ def load_nanopb_pb2():
     sys.stderr.write("Make sure that a protoc generator is available and matches python-protobuf version.\n")
     print_versions()
     sys.exit(1)
+

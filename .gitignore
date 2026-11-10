@@ -1,39 +1,24 @@
-# Git only ignores files it does not track yet. If something listed here still
-# shows up, it was committed earlier: remove it from the index with
-#   git rm --cached <file>
-
-# --- Generated code (always regenerated from .proto files) -----------------
-*.pb.c
-*.pb.h
-*_pb2.py
-*_validate.c
-*_validate.h
-!/pb_validate.c
-!/pb_validate.h
-!tests/enum_validate/enum_validate.c
-generator/nanopb_pb2.pyc
-
-# --- Compiler, linker and coverage output (gcc, clang, zig, MSVC) ----------
-*.o
-*.obj
-*.a
-*.exe
-*.pdb
-*.ilk
-*.exp
 *.gcda
 *.gcno
 *.gcov
-build/
-tests/build
-_codeql_build_dir/
-_codeql_detected_source_root
-bazel-*
-extra/poetry/build
-dist
+*.o
+*.pb.c
+*.pb.h
+*.pb
+*.pyc
+*_pb2.py
+*~
 *.tar.gz
-
-# Example programs (Linux names; Windows adds .exe, covered above)
+*.swp
+.cache/
+.sconsign.dblite
+config.log
+.sconf_temp
+tests/build
+julkaisu.txt
+dist
+docs/*.html
+docs/generator_flow.png
 examples/simple/simple
 examples/network_server/client
 examples/network_server/server
@@ -42,50 +27,23 @@ examples/using_double_on_avr/encode_double
 examples/using_double_on_avr/test_conversions
 examples/using_union_messages/decode
 examples/using_union_messages/encode
-
-# Test programs: tests/<dir>/test_<name> (sources and data are kept)
-tests/*/test_*
-!tests/*/test_*.c
-!tests/*/test_*.cc
-!tests/*/test_*.h
-!tests/*/test_*.proto
-!tests/*/test_*.py
-!tests/*/test_*.pb
-!tests/validation/unimplemented_rules_check.py
-
-# Binary protobuf data: generated, except checked-in test inputs
-*.pb
-!tests/**/*.pb
-
-# --- Tools: SCons, Python, Wireshark tools ---------------------------------
-.sconsign.dblite
-.sconf_temp
-config.log
-.cache/
-__pycache__/
-*.pyc
-.venv/
-nanopb_*_out/
-*.pcap
-*.pcapng
-
-# --- Docs build ------------------------------------------------------------
-docs/*.html
-!docs/feedback.html
-docs/generator_flow.png
-julkaisu.txt
-
-# --- Editors, OS, Claude Code ----------------------------------------------
+generator/nanopb_pb2.pyc
+!generator-bin/**/*
+bazel-*
+extra/poetry/build
+build/
 .idea
+.venv
+# --- nanopb-validate fork: root-level clutter only (rules for the tool live
+# --- in validate/.gitignore). Keep this block last so upstream merges are clean.
 .vscode/
-*~
-*.swp
+__pycache__/
+*.exe
+*.obj
+*.pdb
 desktop.ini
 Thumbs.db
-.DS_Store
-# Windows "nul" device files created by `-o nul` / `> nul` in Git Bash
 nul
 .claude/worktrees/
 .claude/settings.local.json
-
-!generator-bin/**/*
+nanopb_*_out/

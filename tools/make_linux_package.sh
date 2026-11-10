@@ -25,10 +25,8 @@ git archive HEAD | tar x -C $DEST
 
 # Package the Python libraries
 ( cd $DEST/generator; python3 -m PyInstaller --collect-all grpc_tools.grpc_version --strip nanopb_generator.py )
-( cd $DEST/generator; python3 -m PyInstaller --collect-all grpc_tools.grpc_version --strip nanopb_validate_generator.py )
 ( cd $DEST/generator; python3 -m PyInstaller --collect-all grpc_tools.grpc_version --strip protoc  )
 mv $DEST/generator/dist/nanopb_generator $DEST/generator-bin
-cp $DEST/generator/dist/nanopb_validate_generator/nanopb_validate_generator $DEST/generator-bin
 cp $DEST/generator/dist/protoc/protoc $DEST/generator-bin
 
 # Include Google's descriptor.proto and nanopb.proto
@@ -37,11 +35,10 @@ cp -pr $(python3 -c 'import grpc_tools, os.path; print(os.path.dirname(grpc_tool
 cp -pr $DEST/generator/proto $DEST/generator-bin/proto
 
 # Remove temp files
-rm -rf $DEST/generator/dist $DEST/generator/build $DEST/generator/nanopb_generator.spec $DEST/generator/nanopb_validate_generator.spec
+rm -rf $DEST/generator/dist $DEST/generator/build $DEST/generator/nanopb_generator.spec
 
 # Make the nanopb generator available as a protoc plugin
 cp $DEST/generator-bin/nanopb_generator $DEST/generator-bin/protoc-gen-nanopb
-cp $DEST/generator-bin/nanopb_validate_generator $DEST/generator-bin/protoc-gen-nanopb-validate
 
 # Tar it all up
 ( cd dist; tar -czf $VERSION.tar.gz $VERSION )

@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+# protoc plugin launcher for validate/nanopb_validate/filters.py (Linux, macOS).
+#
+#   protoc --plugin=protoc-gen-nanopb-validate=validate/nanopb_validate/plugin/protoc-gen-nanopb-validate \
+#          --nanopb_out=--protoc-insertion-points:DIR --nanopb-validate_out=DIR foo.proto
+#
+# --nanopb_out must come first: this plugin inserts into the files nanopb
+# generates, and protoc runs generators in command line order. The
+# `python -m nanopb_validate gen` command does all of this for you.
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from filters import main_plugin  # noqa: E402
+
+if __name__ == '__main__':
+    main_plugin()

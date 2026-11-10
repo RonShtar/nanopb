@@ -1,0 +1,54 @@
+# Build and run filter_oneof test suite
+# Tests a oneof tunnel: FilterOneofMessage_filter_udp/_filter_tcp
+
+Import("env")
+
+# Clone environment to set validation-specific options
+test_env = env.Clone()
+
+# Generate a filter for the FilterOneofMessage entrypoint. It declares exactly
+# one oneof and no Any field, so --filter-mode=auto resolves to oneof dispatch.
+# Also exclude validate.proto from #include list since it's only used for options
+test_env.Replace(NANOPBFLAGS = "-x,validate.proto")
+test_env.Replace(NANOPB_VALIDATE_FLAGS = "--filter=FilterOneofMessage")
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+# Also enable C99 for stdbool.h
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+
+# Prepend the build directory to CPPPATH so our generated headers are found
+# before any system-wide google/protobuf headers
+test_env.Prepend(CPPPATH = ['.'])
+
+# Build pb_validate.o without extra strict flags (avoid conversion warnings)
+test_env.Object("pb_validate.o", "$VALIDATE/runtime/pb_validate.c")
+
+# Generate nanopb sources for the proto file
+# The NanopbProto builder generates .pb.c and .pb.h
+# The nanopb-validate plugin also generates _validate.c and _validate.h
+pb_files = test_env.NanopbProto("filter_oneof")
+pb_sources = ["filter_oneof.pb.c"]
+validate_c = "filter_oneof_validate.c"
+validate_h = "filter_oneof_validate.h"
+test_env.SideEffect(validate_c, pb_files)
+test_env.SideEffect(validate_h, pb_files)
+validate_sources = [validate_c]
+
+# All C source files for the test binary
+sources = ["test_filter_oneof.c"] + pb_sources + validate_sources
+
+# Build the test binary
+test_prog = test_env.Program(
+    sources + [
+        "$COMMON/pb_encode.o",
+        "$COMMON/pb_decode.o",
+        "$COMMON/pb_common.o",
+        "pb_validate.o"
+    ]
+)
+
+# Run the test
+test_env.RunTest(test_prog)

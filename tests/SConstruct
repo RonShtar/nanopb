@@ -18,8 +18,6 @@ PLATFORM    Run using simulator
 NODEFARGS   Do not add the default CCFLAGS
 NOVALGRIND  Do not use valgrind for memory checks
 NOUNSAFE    Skip tests that intentionally break memory safety
-TOOLS       SCons tools to use (default "default"), e.g. TOOLS=mingw for
-            clang or zig cc on Windows
 
 For example, for a clang build, use:
 scons CC=clang CXX=clang++
@@ -27,10 +25,7 @@ scons CC=clang CXX=clang++
 
 import os
 import platform
-
-# TOOLS=mingw selects GNU-style compile/link commands, e.g. for clang or
-# zig cc on Windows where SCons would otherwise default to MSVC.
-env = Environment(ENV = os.environ, tools = ARGUMENTS.get('TOOLS', 'default').split(','))
+env = Environment(ENV = os.environ)
 
 # Allow giving environment flags on command line.
 list_vars = ['CCFLAGS', 'CXXFLAGS', 'LINKFLAGS', 'LINKLIBS', 'PROTOCFLAGS']

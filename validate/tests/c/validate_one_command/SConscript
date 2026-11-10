@@ -1,0 +1,31 @@
+# Generate with the one-command form, python -m nanopb_validate gen, then
+# build and run: .pb.c/.pb.h and _validate.c/_validate.h, with a packet filter.
+
+Import("env")
+
+test_env = env.Clone()
+
+# Remove -ansi flag since pb_validate.h requires C99 features (inline)
+cflags = str(test_env.get('CFLAGS', ''))
+if '-ansi' in cflags:
+    cflags = cflags.replace('-ansi', '')
+test_env.Replace(CFLAGS = cflags + ' -std=c99 ')
+test_env.Prepend(CPPPATH = ['.'])
+
+test_env.Object("pb_validate.o", "$VALIDATE/runtime/pb_validate.c")
+
+generated = test_env.Command(
+    ["cli.pb.c", "cli.pb.h", "cli_validate.c", "cli_validate.h"],
+    ["cli.proto", "cli.options"],
+    "$PYTHON $VALIDATE/nanopb_validate gen --nanopb-opt=-q --filter Command ${SOURCE.file}",
+    chdir = 1)
+test_env.Depends(generated, ["$VALIDATE/nanopb_validate/cli.py",
+                             "$VALIDATE/nanopb_validate/validator.py",
+                             "$VALIDATE/nanopb_validate/filters.py"])
+
+test_prog = test_env.Program(
+    ["test_cli.c", "cli.pb.c", "cli_validate.c",
+     "$COMMON/pb_encode.o", "$COMMON/pb_decode.o", "$COMMON/pb_common.o", "pb_validate.o"]
+)
+
+test_env.RunTest(test_prog)

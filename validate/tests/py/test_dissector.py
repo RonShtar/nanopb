@@ -1,0 +1,820 @@
+"""Runs the Wireshark Lua plugins against a mock Wireshark API (wireshark_mock.lua).
+
+Needs ``pip install lupa`` (Lua 5.4 inside Python); skipped otherwise.
+This checks decoding logic and the studio -> backend flow; it does not
+replace a check in a real Wireshark (see tests/live).
+"""
+
+import json
+import os
+import re
+import shutil
+import struct
+import sys
+import tempfile
+import unittest
+
+from helpers import (FIXTURES, REPO_ROOT, STRESS_PROTOS, TESTS_DIR, TOOL_DIR, any_of, option_proto, f_bytes, f_fixed32, f_fixed64, f_sint,
+                     f_varint, run_backend, varint)
+
+sys.path.insert(0, os.path.join(TESTS_DIR, 'live'))
+import cases as live_cases  # noqa: E402
+import live_test  # noqa: E402
+
+try:
+    import lupa.lua54 as lupa
+except ImportError:  # pragma: no cover
+    lupa = None
+
+PORT_TYPE = {'udp': 3, 'tcp': 2}
+
+
+def lua_path(path):
+    return path.replace('\\', '/')
+
+
+@unittest.skipIf(lupa is None, 'lupa not installed')
+class LuaTestCase(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='nanopb_ws_lua_')
+        self.lua = lupa.LuaRuntime(unpack_returned_tuples=True)
+        self.mock = self.lua.eval('dofile("%s")' % lua_path(os.path.join(TESTS_DIR, 'wireshark_mock.lua')))
+        # Wireshark's Dir API, backed by the real file system.
+        listdir = lambda path, ext: self.lua.table_from(sorted(
+            f for f in os.listdir(path) if f.endswith(ext or '')))
+        self.lua.eval('function(isdir, listdir) Dir = {'
+                      ' exists = function(p) return isdir(p) end,'
+                      ' open = function(p, ext) local t, i = listdir(p, ext), 0'
+                      '   return function() i = i + 1 return t[i] end end } end')(os.path.isdir, listdir)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class DissectorTests(LuaTestCase):
+    def setUp(self):
+        super(DissectorTests, self).setUp()
+        status, _, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir', self.tmp,
+                                     '--port-map', live_cases.PORT_MAP)
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        self.proto = self.mock.protos['nanopb']
+
+    def route(self, transport, port, data, decode_as=False):
+        """Dispatch like Wireshark: port table, then heuristics. Returns tree text or None."""
+
+        tvb = self.mock.tvb(data)
+        tree = self.mock.tree()
+        pinfo = self.mock.pinfo(PORT_TYPE[transport], port)
+        if decode_as or self.mock.tables[transport + '.port'].entries[port] is not None:
+            self.assertEqual(self.proto.dissector(tvb, pinfo, tree), len(data))
+        elif not self.mock.heuristics[transport](tvb, pinfo, tree):
+            return None
+        return self.mock.render(tree)
+
+    def run_case(self, case):
+        if case.how == 'decode_as':
+            self.assertIsNone(self.route(case.transport, case.port, case.payload),
+                              'decode-as case must not be claimed without Decode As')
+            self.proto.pref_values['default_message'] = live_cases.DECODE_AS_MESSAGE
+        text = self.route(case.transport, case.port, case.payload, decode_as=case.how == 'decode_as')
+        self.assertIsNotNone(text, case.name)
+        low = text.lower()
+        for line in case.expect:
+            self.assertIn(line.lower(), low, '%s\n%s' % (case.name, text))
+        for line in case.experts:
+            self.assertIn(line.lower(), low, '%s\n%s' % (case.name, text))
+        if not case.experts:
+            self.assertNotIn('!', text, '%s\n%s' % (case.name, text))
+        return text
+
+    def test_live_cases(self):
+        for case in live_cases.all_cases(generated=3):
+            with self.subTest(case=case.name):
+                self.proto.pref_values['default_message'] = ''
+                self.run_case(case)
+
+    def test_filters_use_registered_fields(self):
+        abbrs = set(f.abbr for f in self.proto.fields.values())
+        abbrs |= set(e.abbr for e in self.proto.experts.values())
+        for case in live_cases.CASES:
+            for name in re.findall(r'nanopb[\w.]*', case.filter or ''):
+                self.assertIn(name, abbrs, case.filter)
+
+    def test_ports_registered(self):
+        same = self.lua.eval('rawequal')
+        self.assertTrue(same(self.mock.tables['udp.port'].entries[5000], self.proto))
+        self.assertTrue(same(self.mock.tables['tcp.port'].entries[7000], self.proto))
+        self.assertTrue(self.mock.tables['udp.port'].decode_as)
+
+    def test_heuristic_rejects_other_traffic(self):
+        for data in (b'GET / HTTP/1.1\r\n\r\n', f_varint(1, 5),
+                     f_bytes(1, 'type.googleapis.com/no.Such') + f_bytes(2, b'\x08\x01'),
+                     f_bytes(1, 'type.googleapis.com/demo.payloads.Ping') + f_bytes(2, b'\x0a\x05')):
+            self.assertIsNone(self.route('udp', 6000, data), data)
+
+    def test_heuristic_pref_off(self):
+        self.proto.pref_values['heuristic'] = False
+        case = [c for c in live_cases.CASES if c.how == 'heuristic'][0]
+        self.assertIsNone(self.route(case.transport, case.port, case.payload))
+
+    def test_unknown_fields(self):
+        text = self.route('udp', 5000, f_varint(1, 1) + f_varint(15, 77) + f_bytes(14, f_varint(1, 2)))
+        self.assertIn('field_15: 77', text)
+        self.assertIn('field 14: 2 bytes', text)
+
+
+RULES_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules')
+RULES_PORT = 5300
+NOW = 1700000000
+
+
+def inner(code=1, tag='t-a'):
+    return f_varint(1, code) + f_bytes(2, tag)
+
+
+def envelope(body=b'', inner_msg=None, at=1000, extra=b''):
+    """A valid rules.Envelope (small=1 in the oneof) unless parts are replaced."""
+
+    data = f_bytes(1, inner() if inner_msg is None else inner_msg) if inner_msg is not False else b''
+    data += body if body else f_varint(6, 1)
+    data += extra
+    if at is not None:
+        data += f_bytes(8, f_varint(1, at))
+    return data
+
+
+VALID_NUMBERS = f_fixed64(7, 'Q', 10)
+VALID_STRINGS = (f_bytes(1, 'ab') + f_bytes(2, 'a@b.c') + f_bytes(7, 'a') + f_bytes(8, 'ok!') + f_bytes(9, 'v1')
+                 + f_bytes(10, b'\x01') + f_bytes(11, b'\xca\xfe') + f_bytes(12, b'\x01'))
+
+
+class ValidationTests(LuaTestCase):
+    """Dissector verdicts on the rules fixture, against the semantics of pb_validate."""
+
+    def setUp(self):
+        super(ValidationTests, self).setUp()
+        status, _, err = run_backend('install-dissector', '--protos-root', RULES_PROTOS, '--plugins-dir', self.tmp,
+                                     '--port-map', 'udp:%d=rules.Envelope' % RULES_PORT)
+        self.assertEqual(status, 0, err)
+        self.mock.now = NOW
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        self.proto = self.mock.protos['nanopb']
+
+    def verdict(self, data):
+        tree = self.mock.tree()
+        pinfo = self.mock.pinfo(PORT_TYPE['udp'], RULES_PORT)
+        self.proto.dissector(self.mock.tvb(data), pinfo, tree)
+        text = self.mock.render(tree)
+        problems = re.findall(r'^    (\S+): ([\w.]+) - ', text, re.M)
+        return ('dropped' if 'Validation: DROPPED' in text else 'passed'), problems, text, pinfo.cols.info.value
+
+    def assertPasses(self, data):
+        verdict, problems, text, _ = self.verdict(data)
+        self.assertEqual(verdict, 'passed', text)
+
+    def assertDrops(self, data, path, rule):
+        verdict, problems, text, _ = self.verdict(data)
+        self.assertEqual(verdict, 'dropped', text)
+        self.assertIn((path, rule), problems, text)
+
+    def numbers(self, *fields):
+        return envelope(body=f_bytes(3, VALID_NUMBERS + b''.join(fields)))
+
+    def strings(self, *fields):
+        return envelope(body=f_bytes(4, VALID_STRINGS + b''.join(fields)))
+
+    def lists(self, *fields):
+        return envelope(body=f_bytes(5, f_varint(1, 1) + b''.join(fields)))
+
+    def test_valid_envelope_passes(self):
+        verdict, _, text, info = self.verdict(envelope())
+        self.assertEqual(verdict, 'passed', text)
+        self.assertTrue(info.endswith('[PASSED]'), info)
+        self.assertRegex(text, r'Validation: PASSED \(\d+ checks\)')
+
+    def test_presence(self):
+        self.assertDrops(envelope(inner_msg=False), 'inner', 'required')
+        self.assertDrops(envelope(inner_msg=inner(code=0)), 'inner.code', 'uint32.gte')
+        # optional field: absent is fine, present is checked
+        self.assertPasses(envelope())
+        self.assertDrops(envelope(extra=f_varint(2, 4)), 'opt', 'uint32.gte')
+        self.assertPasses(envelope(extra=f_varint(2, 5)))
+        # oneof arm is checked only when selected
+        self.assertDrops(envelope(body=f_varint(6, 4)), 'small', 'uint32.lte')
+
+    def test_implicit_fields_are_checked_at_their_default(self):
+        # x64 (fixed64 gte 10) is absent, so it is 0 and fails, as in the C struct.
+        self.assertDrops(envelope(body=f_bytes(3, b'')), 'numbers.x64', 'fixed64.gte')
+        self.assertPasses(self.numbers())
+
+    def test_numbers(self):
+        self.assertDrops(self.numbers(f_varint(1, -10)), 'numbers.i32', 'int32.gt')
+        self.assertDrops(self.numbers(f_sint(2, 13)), 'numbers.s32', 'sint32.not_in')
+        self.assertDrops(self.numbers(f_varint(3, 3)), 'numbers.u32', 'uint32.in')
+        self.assertPasses(self.numbers(f_varint(4, -5000000000)))
+        self.assertDrops(self.numbers(f_varint(4, -5000000001)), 'numbers.i64', 'int64.gte')
+        self.assertPasses(self.numbers(f_varint(5, 9000000000000000000)))
+        self.assertDrops(self.numbers(f_varint(5, (1 << 64) - 1)), 'numbers.u64', 'uint64.lte')
+        self.assertDrops(self.numbers(f_sint(6, -1)), 'numbers.s64', 'sint64.not_in')
+        self.assertPasses(self.numbers(f_sint(6, -(1 << 63))))
+        self.assertDrops(self.numbers(f_fixed32(8, 'i', 1)), 'numbers.sf32', 'sfixed32.lte')
+        self.assertDrops(self.numbers(f_fixed64(10, 'd', -1.5)), 'numbers.dbl', 'double.gt')
+        self.assertDrops(self.numbers(f_varint(11, 1)), 'numbers.flag', 'bool.const')
+        self.assertDrops(self.numbers(f_varint(12, 2)), 'numbers.level', 'enum.not_in')
+        self.assertDrops(self.numbers(f_varint(12, 5)), 'numbers.level', 'enum.defined_only')
+
+    def test_float_constants_are_float32(self):
+        # C compares a float with (float)0.1, so 0.1f itself passes.
+        self.assertPasses(self.numbers(f_fixed32(9, 'f', 0.1)))
+        self.assertDrops(self.numbers(f_fixed32(9, 'f', 0.10001)), 'numbers.ratio', 'float.lte')
+        self.assertPasses(self.lists(f_bytes(6, struct.pack('<ff', 0.1, -3.0))))
+        self.assertDrops(self.lists(f_bytes(6, struct.pack('<ff', 0.0, 0.2))), 'lists.temps[1]', 'float.lte')
+
+    def test_strings(self):
+        self.assertPasses(self.strings())
+        self.assertDrops(envelope(body=f_bytes(4, b'')), 'strings.name', 'string.min_len')
+        self.assertDrops(self.strings(f_bytes(1, 'abcdefghijk')), 'strings.name', 'string.max_len')
+        # C sees the string up to the first NUL: "ab" is short enough.
+        self.assertPasses(self.strings(f_bytes(1, b'ab\x00cdefghijkl')))
+        self.assertDrops(self.strings(f_bytes(2, 'a..b@c')), 'strings.email', 'string.email')
+        self.assertPasses(self.strings(f_bytes(2, 'a@b')))
+        self.assertDrops(self.strings(f_bytes(3, '-bad.example')), 'strings.host', 'string.hostname')
+        self.assertPasses(self.strings(f_bytes(3, 'a-1.example')))
+        self.assertDrops(self.strings(f_bytes(4, '1.2.3.256')), 'strings.ip4', 'string.ipv4')
+        self.assertPasses(self.strings(f_bytes(5, '1::')))
+        self.assertPasses(self.strings(f_bytes(5, '::ffff:1.2.3.4')))
+        self.assertDrops(self.strings(f_bytes(5, '1:2:')), 'strings.ip6', 'string.ipv6')
+        self.assertDrops(self.strings(f_bytes(5, '1::2::3')), 'strings.ip6', 'string.ipv6')
+        self.assertPasses(self.strings(f_bytes(6, 'fe80::1')))
+        self.assertDrops(self.strings(f_bytes(6, 'host')), 'strings.addr', 'string.ip')
+        self.assertDrops(self.strings(f_bytes(7, 'd')), 'strings.code', 'string.in')
+        self.assertDrops(self.strings(f_bytes(8, 'okay')), 'strings.note', 'string.suffix')
+        self.assertDrops(self.strings(f_bytes(8, 'no!')), 'strings.note', 'string.contains')
+        self.assertDrops(self.strings(f_bytes(8, 'ok\xe9!')), 'strings.note', 'string.ascii')
+        self.assertDrops(self.strings(f_bytes(9, 'v2')), 'strings.version', 'string.const')
+
+    def test_bytes(self):
+        self.assertDrops(self.strings(f_bytes(10, b'\x02')), 'strings.blob', 'bytes.prefix')
+        self.assertDrops(self.strings(f_bytes(10, b'\x01\x00\x00\x00\x00')), 'strings.blob', 'bytes.max_len')
+        # bytes keep embedded NULs
+        self.assertPasses(self.strings(f_bytes(10, b'\x01\x00')))
+        self.assertDrops(self.strings(f_bytes(11, b'\xca')), 'strings.magic', 'bytes.const')
+        self.assertDrops(self.strings(f_bytes(12, b'\x03')), 'strings.kind', 'bytes.in')
+
+    def test_repeated(self):
+        self.assertDrops(envelope(body=f_bytes(5, b'')), 'lists.nums', 'repeated.min_items')
+        self.assertDrops(self.lists(f_varint(1, 1)), 'lists.nums[1]', 'repeated.unique')
+        self.assertDrops(self.lists(f_bytes(1, varint(2) + varint((1 << 64) - 1))), 'lists.nums[2]', 'int32.gte')
+        self.assertDrops(self.lists(f_bytes(2, '')), 'lists.words[0]', 'string.min_len')
+        self.assertDrops(self.lists(f_varint(3, 1), f_varint(3, 7)), 'lists.levels[1]', 'enum.defined_only')
+        self.assertDrops(self.lists(f_bytes(5, inner()), f_bytes(5, inner(code=100))), 'lists.inners[1].code',
+                         'uint32.lte')
+        pairs = b''.join(f_bytes(4, f_bytes(1, k) + f_varint(2, 1)) for k in ('a', 'b', 'c'))
+        self.assertDrops(self.lists(pairs), 'lists.counts', 'map.max_pairs')
+        # map.keys / map.values apply to every entry, with the C validator's paths
+        self.assertPasses(self.lists(f_bytes(4, f_bytes(1, 'abc') + f_varint(2, 0))))
+        self.assertDrops(self.lists(f_bytes(4, f_bytes(1, 'abcd') + f_varint(2, 1))), 'lists.counts[0].key',
+                         'string.max_len')
+        self.assertDrops(self.lists(f_bytes(4, f_bytes(1, 'a') + f_varint(2, 1)),
+                                    f_bytes(4, f_bytes(1, 'b') + f_varint(2, (1 << 64) - 1))),
+                         'lists.counts[1].value', 'int32.gte')
+
+    def test_any(self):
+        self.assertPasses(envelope(extra=f_bytes(7, any_of('rules.Inner', inner()))))
+        self.assertDrops(envelope(extra=f_bytes(7, any_of('rules.Numbers', b''))), 'extra', 'any.in')
+        bad_payload = envelope(extra=f_bytes(7, any_of('rules.Inner', inner(code=0))))
+        self.assertDrops(bad_payload, 'extra<rules.Inner>.code', 'uint32.gte')
+        self.proto.pref_values['validate_any'] = False
+        self.assertPasses(bad_payload)
+
+    def test_timestamp_uses_capture_time(self):
+        self.assertPasses(envelope(at=NOW - 1))
+        self.assertDrops(envelope(at=NOW), 'at', 'timestamp.lt_now')
+
+    def test_nanopb_decode_failures(self):
+        self.assertDrops(self.strings(f_bytes(1, 'x' * 16)), 'strings.name', 'nanopb.max_size')
+        five = b''.join(f_varint(1, n) for n in (2, 3, 4, 5, 6))
+        self.assertDrops(self.lists(five), 'lists.nums', 'nanopb.max_count')
+        self.assertDrops(envelope(body=f_bytes(6, b'\x01')), 'small', 'decode.wire_type')
+        self.assertDrops(self.numbers(f_varint(1, 1 << 40)), 'numbers.i32', 'decode.int_range')
+        _, problems, text, info = self.verdict(envelope()[:-1])
+        self.assertIn('[DROPPED decode.malformed', info)
+
+    def test_validation_pref_off(self):
+        self.proto.pref_values['validate'] = False
+        _, _, text, info = self.verdict(envelope(body=f_varint(6, 4)))
+        self.assertNotIn('Validation', text)
+        self.assertNotIn('[', info)
+
+    def test_info_column_and_fields(self):
+        verdict, _, text, info = self.verdict(envelope(body=f_varint(6, 4)))
+        self.assertEqual(info, 'rules.Envelope (%d bytes) [DROPPED uint32.lte small]'
+                         % len(envelope(body=f_varint(6, 4))))
+        self.assertIn('!nanopb.validation.violation: small: uint32.lte - must be <= 3 (got 4)', text)
+        self.assertIn('Field: small', text)
+
+
+class GeneratedPacketsTests(LuaTestCase):
+    """gen-packets output, routed by port through the mock: verdicts match the manifest."""
+
+    def test_verdicts_match_manifest(self):
+        for root in (RULES_PROTOS, FIXTURES, STRESS_PROTOS):
+            with self.subTest(root=root):
+                self.check(root)
+
+    def check(self, root):
+        plugins = tempfile.mkdtemp(prefix='nanopb_ws_gen_', dir=self.tmp)
+        status, result, err = run_backend('gen-packets', '--protos-root', root, '--out', plugins,
+                                          '--plugins-dir', plugins)
+        self.assertEqual(status, 0, err)
+        with open(result['manifest']) as handle:
+            manifest = json.load(handle)
+        self.mock.reload()
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(plugins, 'nanopb_any_dissector.lua')))
+        proto = self.mock.protos['nanopb']
+        for entry in manifest['packets']:
+            tree = self.mock.tree()
+            pinfo = self.mock.pinfo(PORT_TYPE[entry['transport']], entry['port'])
+            proto.dissector(self.mock.tvb(bytes.fromhex(entry['hex'])), pinfo, tree)
+            text = self.mock.render(tree)
+            self.assertIn('Validation: %s' % entry['expect'].upper(), text, '%s\n%s' % (entry, text))
+            if entry['violate']:
+                self.assertRegex(text, r'\n    [^\n]*\b%s\b[^\n]* - ' % re.escape(entry['violate']['field']),
+                                 '%s\n%s' % (entry, text))
+
+
+PROTOCOL_PORT = 16000
+
+
+class ProtocolDecodeTests(LuaTestCase):
+    """One Proto per protocol (folder of the protos root), as with Decode As: every
+    packet is an Any whose type_url selects a message of that protocol."""
+
+    def install(self, root, plugins=None):
+        plugins = plugins or self.tmp
+        status, result, err = run_backend('gen-packets', '--mode', 'protocol', '--protos-root', root,
+                                          '--out', plugins, '--plugins-dir', plugins,
+                                          '--protocol-port', str(PROTOCOL_PORT))
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(plugins, 'nanopb_any_dissector.lua')))
+        with open(result['manifest']) as handle:
+            return result, json.load(handle)
+
+    def dissect(self, port, data):
+        proto = self.mock.tables['udp.port'].entries[port]
+        self.assertIsNotNone(proto, port)
+        tree = self.mock.tree()
+        pinfo = self.mock.pinfo(PORT_TYPE['udp'], port)
+        self.assertEqual(proto.dissector(self.mock.tvb(data), pinfo, tree), len(data))
+        return self.mock.render(tree), pinfo
+
+    def test_protocols_registered_for_decode_as(self):
+        result, _ = self.install(FIXTURES)
+        name = 'envelope'
+        self.assertIsNotNone(self.mock.protos[name], name)
+        self.assertTrue(self.mock.tables['udp.port'].decode_as_names[name], name)
+        self.assertTrue(self.mock.tables['tcp.port'].decode_as_names[name], name)
+        self.assertIn('Decode As ENVELOPE', result['summary'])
+        # telemetry does not import google.protobuf.Any, and is a protocol all the same.
+        self.assertIsNotNone(self.mock.protos['telemetry'])
+        self.assertTrue(self.mock.tables['udp.port'].decode_as_names['telemetry'])
+        # Generate test packets maps each protocol's port, as a Decode As would.
+        same = self.lua.eval('rawequal')
+        self.assertTrue(same(self.mock.tables['udp.port'].entries[PROTOCOL_PORT], self.mock.protos[name]))
+
+    def test_verdicts_match_manifest(self):
+        for root in (RULES_PROTOS, FIXTURES, STRESS_PROTOS):
+            with self.subTest(root=root):
+                plugins = tempfile.mkdtemp(prefix='nanopb_ws_proto_', dir=self.tmp)
+                self.mock.reload()
+                _, manifest = self.install(root, plugins)
+                self.assertTrue(manifest['packets'])
+                for entry in manifest['packets']:
+                    text, pinfo = self.dissect(entry['port'], bytes.fromhex(entry['hex']))
+                    self.assertIn('Validation: %s' % entry['expect'].upper(), text, '%s\n%s' % (entry, text))
+                    self.assertIn(entry['message'], pinfo.cols.info.value)
+
+    def test_unknown_type_and_depth(self):
+        self.install(FIXTURES)
+        ping = 'demo.payloads.Ping'
+        # A message of another protocol on the envelope port.
+        text, _ = self.dissect(PROTOCOL_PORT, any_of('demo.telemetry.Telemetry', b''))
+        self.assertIn('Validation: DROPPED', text)
+        self.assertIn('filter.unknown_type', text)
+        text, _ = self.dissect(PROTOCOL_PORT, any_of(ping, b''))
+        self.assertIn('Validation: PASSED', text, text)
+        # Five nested Anys: the fifth is beyond PB_VALIDATE_FILTER_MAX_ANY_DEPTH (4).
+        body = any_of(ping, b'')
+        for _ in range(4):
+            body = any_of('demo.envelope.Envelope', f_bytes(2, body))
+        text, _ = self.dissect(PROTOCOL_PORT, body)
+        self.assertIn('filter.depth', text)
+        self.assertIn('Validation: DROPPED', text)
+
+    def test_primary_protocol_preference(self):
+        self.install(FIXTURES)
+        nanopb = self.mock.protos['nanopb']
+        other = any_of('demo.telemetry.Telemetry', b'')
+        # Not set: an auto-detected Any shows the protocol that owns its message.
+        tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+        nanopb.dissector(self.mock.tvb(other), pinfo, tree)
+        self.assertNotIn('filter.unknown_type', self.mock.render(tree))
+        self.assertEqual(pinfo.cols.protocol, 'TELEMETRY')
+        # Protocol = envelope: NANOPB packets are envelope packets.
+        nanopb.pref_values['protocol'] = 1
+        tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+        nanopb.dissector(self.mock.tvb(other), pinfo, tree)
+        text = self.mock.render(tree)
+        self.assertIn('filter.unknown_type', text)
+        self.assertEqual(pinfo.cols.protocol, 'ENVELOPE')
+        tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+        nanopb.dissector(self.mock.tvb(any_of('demo.payloads.Ping', b'')), pinfo, tree)
+        self.assertIn('Validation: PASSED', self.mock.render(tree))
+        self.assertIn('envelope demo.payloads.Ping', pinfo.cols.info.value)
+
+    def test_stale_preference_does_not_stop_decoding(self):
+        self.install(FIXTURES)
+        nanopb = self.mock.protos['nanopb']
+        stale = 'proto.messages.BaseMessage'
+        ping = any_of('demo.payloads.Ping', b'')
+        for pref, value in (('port_map', 'udp:6000=' + stale), ('default_message', stale)):
+            nanopb.pref_values['port_map'] = ''
+            nanopb.pref_values['default_message'] = ''
+            nanopb.pref_values[pref] = value
+            nanopb.prefs_changed()
+            tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+            nanopb.dissector(self.mock.tvb(ping), pinfo, tree)
+            text = self.mock.render(tree)
+            self.assertIn('Root message not in schema: ' + stale, text)
+            self.assertIn('demo.payloads.Ping', text)
+
+    def write_protos(self, files):
+        root = os.path.join(self.tmp, 'one_message')
+        for path, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(root, path)), exist_ok=True)
+            with open(os.path.join(root, path), 'w') as handle:
+                handle.write(text)
+        return root
+
+    def test_one_message_protocol_needs_no_any(self):
+        rules = 'import "validate/validate.proto";\nmessage Header { uint32 seq = 1; }\n'
+        root = self.write_protos({
+            'radio/radio.proto': 'syntax = "proto3";\npackage radio;\n' + rules +
+                                 'message Frame { Header h = 1; uint32 ch = 2 [(validate.rules).uint32.lte = 16]; }\n'})
+        os.makedirs(os.path.join(root, 'radio', 'validate'))
+        shutil.copy(option_proto('validate'),
+                    os.path.join(root, 'radio', 'validate'))
+        _, manifest = self.install(root)
+        self.assertEqual(set(e['message'] for e in manifest['packets']), {'radio.Frame'})
+        self.assertEqual(set(e['expect'] for e in manifest['packets']), {'passed', 'dropped'})
+        for entry in manifest['packets']:
+            self.assertFalse(entry['any_wrapped'])
+            text, pinfo = self.dissect(entry['port'], bytes.fromhex(entry['hex']))
+            self.assertIn('Validation: ' + entry['expect'].upper(), text)
+            self.assertEqual(pinfo.cols.protocol, 'RADIO')
+            self.assertIn('radio radio.Frame', pinfo.cols.info.value)
+
+    def test_one_root_protocol_takes_plain_and_any_packets(self):
+        root = self.write_protos({
+            'only/only.proto': 'syntax = "proto3";\npackage only;\nimport "google/protobuf/any.proto";\n'
+                               'message Only { uint32 v = 1; google.protobuf.Any extra = 2; }\n'})
+        status, _, err = run_backend('install-dissector', '--protos-root', root, '--plugins-dir', self.tmp,
+                                     '--port-map', '')
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        for data, shown in ((f_varint(1, 7), 'v: 7'), (any_of('only.Only', f_varint(1, 9)), 'v: 9')):
+            tree = self.mock.tree()
+            self.mock.protos['only'].dissector(self.mock.tvb(data), self.mock.pinfo(PORT_TYPE['udp'], 6000), tree)
+            text = self.mock.render(tree)
+            self.assertIn('only.Only', text)
+            self.assertIn(shown, text)
+            self.assertIn('Validation: PASSED', text)
+
+    def test_same_message_name_in_two_protocols(self):
+        root = os.path.join(self.tmp, 'same_names')
+        for name, body in (('a', 'uint32 x = 1;'), ('b', 'string y = 1;')):
+            os.makedirs(os.path.join(root, name))
+            with open(os.path.join(root, name, name + '.proto'), 'w') as handle:
+                handle.write('syntax = "proto3";\npackage same;\nmessage Msg { %s }\n' % body)
+        status, _, err = run_backend('install-dissector', '--protos-root', root, '--plugins-dir', self.tmp,
+                                     '--port-map', '')
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        results = {}
+        for name, payload in (('a', f_varint(1, 7)), ('b', f_bytes(1, b'hello'))):
+            tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+            data = any_of('same.Msg', payload)
+            self.assertEqual(self.mock.protos[name].dissector(self.mock.tvb(data), pinfo, tree), len(data))
+            results[name] = self.mock.render(tree)
+        self.assertIn('x', results['a'])
+        self.assertNotIn('y:', results['a'])
+        self.assertIn('hello', results['b'])
+        # Packets of the first protocol still decode after one of the second.
+        tree, pinfo = self.mock.tree(), self.mock.pinfo(PORT_TYPE['udp'], 6000)
+        self.mock.protos['a'].dissector(self.mock.tvb(any_of('same.Msg', f_varint(1, 7))), pinfo, tree)
+        self.assertEqual(self.mock.render(tree), results['a'])
+
+    def test_protocol_name_taken_gets_prefix(self):
+        self.lua.execute('Proto("envelope", "someone else")')
+        self.install(FIXTURES)
+        self.assertIsNotNone(self.mock.protos['nanopb_envelope'])
+        same = self.lua.eval('rawequal')
+        self.assertTrue(same(self.mock.tables['udp.port'].entries[PROTOCOL_PORT], self.mock.protos['nanopb_envelope']))
+
+
+class UnenforcedRulesTests(LuaTestCase):
+    def test_not_checked_rules_never_drop(self):
+        status, _, err = run_backend('install-dissector', '--protos-root',
+                                     os.path.join(os.path.dirname(FIXTURES), 'rules_unenforced'),
+                                     '--plugins-dir', self.tmp, '--port-map', 'udp:5400=unenforced.Form')
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        proto = self.mock.protos['nanopb']
+        tree = self.mock.tree()
+        # name "AB" breaks the pattern but not min_len; no oneof arm and no name for "requires".
+        proto.dissector(self.mock.tvb(f_bytes(1, 'AB')), self.mock.pinfo(PORT_TYPE['udp'], 5400), tree)
+        text = self.mock.render(tree)
+        self.assertIn('Validation: PASSED', text)
+        for line in ('Not checked: unenforced.Form: message.requires', 'Not checked: name: string.pattern',
+                     'Not checked: phone: oneof_required', 'Not checked: extra: map.no_sparse'):
+            self.assertIn(line, text)
+
+
+class PcapSelfCheck(LuaTestCase):
+    """The pcap written for Wireshark carries exactly the case payloads, and
+    they dissect as expected when routed by their headers."""
+
+    def test_pcap_round_trip(self):
+        cases = live_cases.all_cases(generated=2)
+        path = os.path.join(self.tmp, 'live.pcap')
+        live_test.write_pcap(path, cases)
+        packets = live_test.read_pcap(path)
+        self.assertEqual(len(packets), len(cases))
+        dissector = DissectorTests('route')
+        dissector.lua, dissector.mock, dissector.tmp = self.lua, self.mock, self.tmp
+        status, _, err = run_backend('install-dissector', '--protos-root', FIXTURES, '--plugins-dir', self.tmp,
+                                     '--port-map', live_cases.PORT_MAP)
+        self.assertEqual(status, 0, err)
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        dissector.proto = self.mock.protos['nanopb']
+        for i, (case, (transport, sport, dport, payload, csum_ok)) in enumerate(zip(cases, packets)):
+            with self.subTest(case=case.name):
+                self.assertEqual((transport, dport, payload), (case.transport, case.port, case.payload))
+                self.assertEqual(sport, live_test.SRC_PORT_BASE + i)
+                self.assertTrue(csum_ok)
+                dissector.proto.pref_values['default_message'] = ''
+                dissector.run_case(case)
+
+    def test_checklist_lists_every_case(self):
+        cases = live_cases.all_cases(generated=1)
+        text = live_test.checklist_markdown(cases)
+        for i, case in enumerate(cases, 1):
+            self.assertIn('### Packet %d: %s' % (i, case.name), text)
+
+
+class StudioTests(LuaTestCase):
+    def setUp(self):
+        super(StudioTests, self).setUp()
+        shutil.copy(os.path.join(TOOL_DIR, 'nanopb_studio.lua'), self.tmp)
+        os.makedirs(os.path.join(self.tmp, 'nanopb'))
+        self.out = os.path.join(self.tmp, 'out dir')  # space on purpose: exercises quoting
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata'), 'w') as handle:
+            handle.write('return { python = %r, nanopb_root = %r, protos_root = %r, output_dir = %r }\n'
+                         % (sys.executable, REPO_ROOT, FIXTURES, self.out))
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_studio.lua')))
+
+    def answer(self, title, *values):
+        self.mock.dialog_answers[title] = self.lua.table(*values)
+
+    def last_window(self):
+        windows = self.mock.windows
+        return windows[len(windows)]
+
+    def picker(self, menu, title, input_dir=FIXTURES):
+        self.answer(title, input_dir, self.out)
+        self.mock.menus[menu]()
+        window = self.last_window()
+        self.assertEqual(window.title, title + ': choose units')
+        return window
+
+    def test_menus_registered(self):
+        names = set(self.mock.menus.keys())
+        self.assertEqual(names, {'nanopb/Set protos directory (once)...',
+                                 'nanopb/Generate C (merged + validation)...',
+                                 'nanopb/Generate test packets (passed + dropped)...',
+                                 'nanopb/Load protos directory into Wireshark...', 'nanopb/About'})
+
+    def test_generate_c_through_backend(self):
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
+        self.assertIn('[x] envelope', picker.text)
+        self.assertIn('[x] telemetry', picker.text)
+        self.answer('Generate C (merged + validation): choose', 'envelope')
+        picker.buttons['Choose...']()
+        self.assertIn('[ ] telemetry', picker.text)
+        picker.buttons['Generate']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIsNotNone(window.buttons['Open output folder'])
+        self.assertEqual(os.listdir(self.out), ['envelope'])
+        # Only the generated files: all protos of the unit merged, with validation.
+        self.assertEqual(sorted(os.listdir(os.path.join(self.out, 'envelope'))),
+                         ['envelope.pb.c', 'envelope.pb.h', 'envelope_validate.c', 'envelope_validate.h'])
+        with open(os.path.join(self.out, 'envelope', 'envelope_validate.c')) as handle:
+            self.assertIn('pb_validate_demo_envelope_Envelope', handle.read())
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            self.assertIn(self.out.replace('\\', '\\\\'), handle.read())
+
+    def test_unit_merged_into_another_starts_deselected(self):
+        stress = STRESS_PROTOS
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
+                             input_dir=stress)
+        self.assertIn('[x] fleet', picker.text)
+        self.assertIn('[ ] shared   (already merged into fleet)', picker.text)
+        picker.buttons['Generate']()
+        self.assertTrue(self.last_window().text.startswith('OK'), self.last_window().text)
+        self.assertEqual(os.listdir(self.out), ['fleet'])
+
+    def test_unit_list_needs_no_python(self):
+        # The picker reads the protos directory itself; only Generate runs the backend.
+        self.lua.execute('io.popen = function() error("no process may be started for the unit list") end')
+        stress = STRESS_PROTOS
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
+                             input_dir=stress)
+        self.assertIn('[x] fleet', picker.text)
+        self.assertIn('[ ] shared   (already merged into fleet)', picker.text)
+
+    def test_generate_with_nothing_selected(self):
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
+        picker.buttons['Select none']()
+        windows = len(self.mock.windows)
+        picker.buttons['Generate']()
+        self.assertEqual(len(self.mock.windows), windows)  # no result window
+        self.assertIn('Select at least one unit.', picker.text)
+        self.assertFalse(os.path.exists(self.out))
+
+    def record_gui_calls(self):
+        self.lua.execute('''
+            gui_calls = {}
+            local function record(...) gui_calls[#gui_calls + 1] = table.concat({ ... }, "|") end
+            function open_capture_file(path, filter) record("open", path, filter) end
+            function reload_lua_plugins() record("reload") end
+            function set_filter(text) record("filter", text) end
+            function apply_filter() record("apply") end
+        ''')
+        return self.lua.eval('gui_calls')
+
+    def test_generate_test_packets_one_button(self):
+        calls = self.record_gui_calls()
+        title = 'Generate test packets'
+        picker = self.picker('nanopb/Generate test packets (passed + dropped)...', title)
+        picker.buttons['Generate']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertRegex(window.text, r'\d+ packets: \d+ expected PASSED, \d+ expected DROPPED')
+        pcap = os.path.join(self.out, 'nanopb_test_packets.pcapng')
+        self.assertTrue(os.path.isfile(pcap))
+        # The dissector and schema are refreshed next to the studio, the capture
+        # is opened, then (schema changed) the plugins are reloaded.
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb', 'schema.luadata')))
+        # Reloading closes the summary window, so it waits for the button.
+        self.assertEqual(len(calls), 0)
+        self.assertIn('Press Open capture', window.text)
+        window.buttons['Open capture']()
+        self.assertEqual([calls[i] for i in range(1, len(calls) + 1)], ['open|%s|' % pcap, 'reload'])
+        window.buttons['Show dropped only']()
+        self.assertEqual(calls[len(calls)], 'apply')  # Lua tables are 1-based
+        self.assertEqual(calls[len(calls) - 1], 'filter|nanopb.validation == "dropped"')
+        self.assertIsNotNone(window.buttons['Open output folder'])
+        # Every packet is an Any on its protocol's port, mapped like a Decode As;
+        # no per-message port is picked, so the saved port map stays empty.
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            self.assertIn('port_map = ""', handle.read())
+        with open(os.path.join(self.tmp, 'nanopb', 'ports.luadata')) as handle:
+            self.assertIn('protocol = "envelope"', handle.read())
+        self.assertIn('packets', window.text)
+        self.assertIn('Decode As', window.text)
+
+        # Same protos again: nothing to reload.
+        picker = self.picker('nanopb/Generate test packets (passed + dropped)...', title)
+        before = len(calls)
+        picker.buttons['Generate']()
+        self.assertEqual([calls[i] for i in range(before + 1, len(calls) + 1)], ['open|%s|' % pcap])
+
+    def test_many_units_are_chosen_by_number(self):
+        root = os.path.join(self.tmp, 'many')
+        names = ['p%d' % i for i in range(1, 10)]
+        for name in names:
+            os.makedirs(os.path.join(root, name))
+            with open(os.path.join(root, name, name + '.proto'), 'w') as handle:
+                handle.write('syntax = "proto3";\npackage %s;\nmessage M { uint32 a = 1; }\n' % name)
+        title = 'Generate C (merged + validation)'
+        picker = self.picker('nanopb/' + title + '...', title, input_dir=root)
+        self.assertIsNone(picker.buttons['p1'])
+        self.assertIn('[x] p9', picker.text)
+        self.answer(title + ': choose', '1,3-4,p9')
+        picker.buttons['Choose...']()
+        self.assertIn('   1  [x] p1', picker.text)
+        self.assertIn('   2  [ ] p2', picker.text)
+        self.assertIn('   4  [x] p4', picker.text)
+        self.assertIn('   9  [x] p9', picker.text)
+        self.answer(title + ': choose', 'nope')
+        picker.buttons['Choose...']()
+        self.assertIn('Not in the list: nope', picker.text)
+        self.assertIn('   2  [ ] p2', picker.text)
+
+    def test_highlights_added_once_and_keep_default_rules(self):
+        config = os.path.join(self.tmp, 'config')
+        os.makedirs(config)
+        with open(os.path.join(self.tmp, 'global_colorfilters'), 'w') as handle:
+            handle.write('@Bad TCP@tcp.analysis.flags@[1,2,3][4,5,6]\n')
+        self.lua.execute('Dir.personal_config_path = function(n) return "%s/" .. n end;'
+                         'Dir.global_config_path = function(n) return "%s/global_" .. n end'
+                         % (lua_path(config), lua_path(self.tmp)))
+        for _ in range(2):
+            self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_studio.lua')))
+        with open(os.path.join(config, 'colorfilters')) as handle:
+            colors = handle.read()
+        self.assertTrue(colors.startswith('@nanopb dropped@nanopb.validation == "dropped"@[65535,65535,0][0,0,0]'))
+        self.assertIn('@Bad TCP@', colors)
+        self.assertEqual(colors.count('@nanopb dropped@'), 1)
+        with open(os.path.join(config, 'dfilter_buttons')) as handle:
+            buttons = handle.read()
+        self.assertEqual(buttons.count('"nanopb Dropped"'), 1)
+        self.assertIn('\\x22Warning\\x22', buttons)
+
+    def test_set_directory_once(self):
+        stress = STRESS_PROTOS
+        self.answer('Set protos directory', stress, self.out)
+        self.mock.menus['nanopb/Set protos directory (once)...']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('without asking', window.text)
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            self.assertIn('protos_root_fixed = "1"', handle.read())
+        # No answer is given for this dialog: it must not be asked.
+        self.mock.menus['nanopb/Generate C (merged + validation)...']()
+        window = self.last_window()
+        self.assertEqual(window.title, 'Generate C (merged + validation): choose units')
+        self.assertIn('[x] fleet', window.text)
+
+    def test_unit_folder_with_vendored_imports_as_input(self):
+        unit = os.path.join(self.tmp, 'protos', 'protocolvalid')
+        for name in ('validate', 'nanopb'):
+            os.makedirs(os.path.join(unit, name))
+            shutil.copy(option_proto(name), os.path.join(unit, name))
+        with open(os.path.join(unit, 'ron.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage ron;\nimport "validate/validate.proto";\n'
+                         'message Ron { uint32 a = 1 [(validate.rules).uint32.lte = 9]; }\n')
+        picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
+                             input_dir=unit)
+        self.assertIn('[x] protocolvalid', picker.text)
+        self.assertNotIn('nanopb\n', picker.text.split('Output:')[1].split('\n', 1)[1])
+        picker.buttons['Generate']()
+        self.assertTrue(self.last_window().text.startswith('OK'), self.last_window().text)
+        self.assertEqual(os.listdir(self.out), ['protocolvalid'])
+
+    def test_load_protos_clears_a_stale_saved_port_map(self):
+        config_path = os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')
+        with open(config_path) as handle:
+            text = handle.read()
+        with open(config_path, 'w') as handle:
+            handle.write(text.replace(' }\n', ', port_map = "udp:5000=proto.messages.BaseMessage" }\n'))
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_studio.lua')))
+        self.answer('Load protos directory into Wireshark', FIXTURES)
+        self.mock.menus['nanopb/Load protos directory into Wireshark...']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('Removed from the port map', window.text)
+        with open(config_path) as handle:
+            self.assertIn('port_map = ""', handle.read())
+
+    def test_install_dissector_next_to_studio(self):
+        # Only the protos directory is asked; every folder is loaded as a protocol.
+        self.answer('Load protos directory into Wireshark', FIXTURES)
+        self.mock.menus['nanopb/Load protos directory into Wireshark...']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('Ctrl+Shift+L', window.text)
+        self.assertIn('Loaded 2 protocol(s)', window.text)
+        self.assertIn('  ENVELOPE\n  TELEMETRY', window.text)
+        self.assertIn('Edit > Preferences > Protocols > NANOPB > Protocol', window.text)
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, 'nanopb', 'schema.luadata')))
+        # The dissector loads both protocols.
+        self.mock.reload()
+        self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_any_dissector.lua')))
+        for name in ('envelope', 'telemetry'):
+            self.assertTrue(self.mock.tables['udp.port'].decode_as_names[name], name)
+
+    def test_backend_failure_is_reported(self):
+        missing = os.path.join(self.tmp, 'nope')
+        self.answer('Generate C (merged + validation)', missing, self.out)
+        self.mock.menus['nanopb/Generate C (merged + validation)...']()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('FAILED'), window.text)
+        self.assertIn('is not a directory', window.text)
+
+
+if __name__ == '__main__':
+    unittest.main()

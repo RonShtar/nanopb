@@ -139,9 +139,7 @@ if(nanopb_BUILD_RUNTIME)
             pb_encode.h
             pb_encode.c
             pb_decode.h
-            pb_decode.c
-            pb_validate.h
-            pb_validate.c)
+            pb_decode.c)
         set_target_properties(protobuf-nanopb PROPERTIES
             SOVERSION ${nanopb_SOVERSION})
         install(TARGETS protobuf-nanopb EXPORT nanopb-targets
@@ -162,9 +160,7 @@ if(nanopb_BUILD_RUNTIME)
             pb_encode.h
             pb_encode.c
             pb_decode.h
-            pb_decode.c
-            pb_validate.h
-            pb_validate.c)
+            pb_decode.c)
         set_target_properties(protobuf-nanopb-static PROPERTIES
             OUTPUT_NAME protobuf-nanopb)
         install(TARGETS protobuf-nanopb-static EXPORT nanopb-targets
@@ -186,6 +182,6 @@ if(nanopb_BUILD_RUNTIME)
         ${CMAKE_CURRENT_BINARY_DIR}/nanopb-config-version.cmake
         DESTINATION ${CMAKE_INSTALL_CMAKEDIR})
 
-    install(FILES pb.h pb_common.h pb_encode.h pb_decode.h pb_validate.h pb_validate.c
+    install(FILES pb.h pb_common.h pb_encode.h pb_decode.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/nanopb)
 endif()

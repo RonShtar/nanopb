@@ -1,0 +1,30 @@
+# Ignore rules for validate/ only (nanopb's own .gitignore stays upstream's).
+# Git only ignores files it does not track yet: `git rm --cached <file>` if a
+# listed file still shows up.
+
+# Generated code and Python modules
+*_validate.c
+*_validate.h
+!/runtime/pb_validate.c
+!/runtime/pb_validate.h
+nanopb_validate/validate_proto/*_pb2.py
+__pycache__/
+
+# Build output: SCons (tests/c), compilers incl. MSVC and zig, captures
+tests/c/build/
+.sconsign.dblite
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.pcap
+*.pcapng
+nanopb_*_out/
+
+# C test programs: tests/c/<dir>/test_<name> (sources are kept)
+tests/c/*/test_*
+!tests/c/*/test_*.c
+!tests/c/*/test_*.h
+!tests/c/*/test_*.proto
+!tests/c/*/test_*.py
