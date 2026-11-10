@@ -2517,7 +2517,17 @@ class ValidatorGenerator:
                 # Skip oneof names as they are already documented above
                 if fname in validator.oneof_validators:
                     continue
-                yield ' * - %s: no constraints\n' % _escape_for_comment(fname)
+                field_obj = next((f for f in getattr(validator.message, 'fields', []) or []
+                                  if getattr(f, 'name', None) == fname), None)
+                try:
+                    nested = field_obj is not None and bool(self._nested_validation_lines(field_obj, fname))
+                except Exception:
+                    nested = False
+                if nested:
+                    yield ' * - %s: no rules of its own; each %s is validated\n' % (
+                        _escape_for_comment(fname), _escape_for_comment(str(field_obj.ctype)))
+                else:
+                    yield ' * - %s: no constraints\n' % _escape_for_comment(fname)
             # Message-level rules summary
             if validator.message_rules:
                 yield ' *\n'
