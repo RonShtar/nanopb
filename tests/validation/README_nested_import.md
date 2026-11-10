@@ -90,7 +90,6 @@ bool pb_validate_ParentRecord(const ParentRecord *msg, pb_violations_t *violatio
 {
     // ... parent field validations ...
     
-    /* Validate field: child */
     PB_VALIDATE_FIELD_BEGIN(ctx, "child");
     PB_VALIDATE_NESTED_MSG_OPTIONAL(ctx, pb_validate_ChildProfile, msg, child, violations);
     PB_VALIDATE_FIELD_END(ctx);

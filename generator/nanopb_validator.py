@@ -2310,7 +2310,7 @@ class ValidatorGenerator:
         if rules in ('REPEATED', 'FIXARRAY'):
             if allocation != 'STATIC':
                 return []
-            member = ''
+            is_map = False
             entry = self._message_by_name(ctype)
             if entry is not None and getattr(getattr(entry, 'desc', None), 'options', None) is not None \
                     and entry.desc.options.map_entry:
@@ -2322,15 +2322,21 @@ class ValidatorGenerator:
                 if not inner or getattr(value_field, 'pbtype', None) not in ('MESSAGE', 'MSG_W_CB'):
                     return []
                 sub_func = 'pb_validate_' + str(getattr(value_field, 'ctype')).replace('.', '_')
-                member = '.value'
+                is_map = True
             elif not self._has_validator(ctype):
                 return []
-            if rules == 'FIXARRAY':
-                count = 'sizeof(msg->%s) / sizeof(msg->%s[0])' % (field_name, field_name)
+            # One macro per shape, so no call has an empty argument.
+            if is_map and rules == 'REPEATED':
+                macro = 'PB_VALIDATE_NESTED_MAP_VALUES'
+            elif is_map:
+                return ['    PB_VALIDATE_NESTED_MSG_ITEMS(ctx, %s, msg->%s[__pb_i].value, '
+                        'sizeof(msg->%s) / sizeof(msg->%s[0]), violations);\n'
+                        % (sub_func, field_name, field_name, field_name)]
+            elif rules == 'FIXARRAY':
+                macro = 'PB_VALIDATE_NESTED_MSG_FIXARRAY'
             else:
-                count = 'msg->%s_count' % field_name
-            return ['    PB_VALIDATE_NESTED_MSG_ARRAY(ctx, %s, msg, %s, %s, %s, violations);\n'
-                    % (sub_func, field_name, count, member)]
+                macro = 'PB_VALIDATE_NESTED_MSG_REPEATED'
+            return ['    %s(ctx, %s, msg, %s, violations);\n' % (macro, sub_func, field_name)]
 
         if not self._has_validator(ctype):
             return []
@@ -2609,13 +2615,10 @@ class ValidatorGenerator:
             # Generate validation function
             yield 'bool %s(const %s *msg, pb_violations_t *violations)\n' % (func_name, struct_name)
             
+            # Comments in the body would only repeat the code (each field is
+            # named by PB_VALIDATE_FIELD_BEGIN); the rules are documented once,
+            # in the Doxygen block of the header.
             yield '{\n'
-            if fields_without_constraints:
-                    yield '    /* Fields without constraints:\n'
-                    for field in fields_without_constraints:
-                        yield '       - %s\n' % field
-                    yield '    */\n'
-                    yield '\n'
             yield '    PB_VALIDATE_BEGIN(ctx, %s, msg, violations);\n' % struct_name
             yield '\n'
             
@@ -2624,9 +2627,8 @@ class ValidatorGenerator:
                 field = field_validator.field
                 field_var_name = Globals.naming_style.var_name(field_name)
                 
-                yield '    /* Validate field: %s */\n' % field_name
                 yield '    PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % field_name
-                
+
                 for rule in field_validator.rules:
                     if rule.rule_type == RULE_MAP_ENTRIES:
                         yield self._emit_map_entries(rule, field, struct_name)
@@ -2667,8 +2669,6 @@ class ValidatorGenerator:
                     lines = self._nested_validation_lines(f, fname)
                     if not lines:
                         continue
-                    # Open path context
-                    yield '    /* Validate field: %s */\n' % fname
                     yield '    PB_VALIDATE_FIELD_BEGIN(ctx, "%s");\n' % fname
                     for line in lines:
                         yield line
@@ -2683,7 +2683,6 @@ class ValidatorGenerator:
                 oneof_obj = oneof_data['oneof']
                 members = oneof_data['members']  # List of (field, FieldValidator) tuples
                 
-                yield '    /* Validate oneof: %s */\n' % oneof_name
                 yield '    PB_VALIDATE_ONEOF_BEGIN(ctx, msg, %s)\n' % oneof_name
                 
                 for member_field, member_fv in members:
@@ -2726,7 +2725,6 @@ class ValidatorGenerator:
                         arms.append((member, lines))
                 if not arms:
                     continue
-                yield '    /* Validate sub-messages of oneof: %s */\n' % oneof.name
                 yield '    PB_VALIDATE_ONEOF_BEGIN(ctx, msg, %s)\n' % oneof.name
                 for member, lines in arms:
                     yield '    PB_VALIDATE_ONEOF_CASE(%s_%s_tag)\n' % (struct_name, member.name)
@@ -2741,7 +2739,6 @@ class ValidatorGenerator:
 
             # Generate message-level validations
             for rule in validator.message_rules:
-                yield '    /* Message rule: %s */\n' % rule.constraint_id
                 yield self._generate_message_rule_check(validator.message, rule)
                 yield '\n'
             

@@ -90,7 +90,8 @@ def is_option_proto(name):
 
 
 def find_units(protos_root):
-    """Units of a protos directory: its subfolders that hold protos of their own.
+    """Units of a protos directory: its subfolders that hold protos, directly
+    or in folders of their own (protocol/enums/*.proto, protocol/messages/...).
 
     Vendored dependencies (google/, or a folder with only validate.proto or
     nanopb.proto) are not units. With no unit subfolder, a directory that
@@ -102,24 +103,53 @@ def find_units(protos_root):
     units = []
     for name in sorted(os.listdir(protos_root)):
         path = os.path.join(protos_root, name)
-        if name != 'google' and os.path.isdir(path) and unit_protos(path):
+        if not skipped_folder(name) and os.path.isdir(path) and all_unit_protos(path):
             units.append(name)
     if not units and unit_protos(protos_root):
         return [os.path.basename(os.path.abspath(protos_root))]
     return units
 
 
+def skipped_folder(name):
+    """Folders that never hold a unit's own protos: vendored google/, hidden ones."""
+
+    return name == 'google' or name.startswith('.')
+
+
 def unit_protos(unit_dir):
+    """The unit's .proto files directly in ``unit_dir``."""
+
     return sorted(f for f in os.listdir(unit_dir)
                   if f.endswith('.proto') and os.path.isfile(os.path.join(unit_dir, f))
                   and not is_option_proto(f))
+
+
+def unit_subfolders(unit_dir):
+    """Every folder below ``unit_dir`` (absolute paths, parents first), without skipped ones."""
+
+    result = []
+    for root, dirs, _ in os.walk(unit_dir):
+        dirs[:] = sorted(d for d in dirs if not skipped_folder(d))
+        result += [os.path.join(root, d) for d in dirs]
+    return result
+
+
+def all_unit_protos(unit_dir):
+    """The unit's .proto files in ``unit_dir`` and its subfolders, as '/'-separated
+    paths relative to ``unit_dir``."""
+
+    result = list(unit_protos(unit_dir))
+    for folder in unit_subfolders(unit_dir):
+        rel = os.path.relpath(folder, unit_dir).replace(os.sep, '/')
+        result += [rel + '/' + f for f in unit_protos(folder)]
+    return sorted(result)
 
 
 def unit_folder(protos_root, name):
     """The folder of unit ``name``: a subfolder, or the root if it is the unit."""
 
     path = os.path.join(protos_root, name)
-    return path if os.path.isdir(path) and unit_protos(path) else protos_root
+    return path if os.path.isdir(path) and all_unit_protos(path) else protos_root
 
 
 def no_units_message(protos_root):
@@ -175,28 +205,92 @@ def compile_descriptor_set(proto_names, include_paths):
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def nested_layout(unit_dir, parent, protos):
+    """(include folders, protoc names) of a unit whose protos sit in subfolders.
+
+    An import names a file relative to some folder: the unit folder
+    ("enums/types.proto"), the protos root ("unit/enums/types.proto"), or
+    a subfolder such as the importing file's own ("types.proto"). Every
+    folder an import needs becomes an include path, and each proto gets the
+    name its importers use, so protoc loads no file twice. Protos nobody
+    imports are named relative to the unit folder.
+    """
+
+    def key(path):
+        return os.path.normcase(os.path.abspath(path))
+
+    paths = dict((p, key(os.path.join(unit_dir, p))) for p in protos)
+    owner = dict((v, k) for k, v in paths.items())
+    subfolders = unit_subfolders(unit_dir)
+    imported_as, roots = {}, []
+    for proto in protos:
+        here = os.path.normpath(os.path.dirname(os.path.join(unit_dir, proto)))
+        with open(os.path.join(unit_dir, proto), encoding='utf-8', errors='replace') as handle:
+            imports = IMPORT_RE.findall(handle.read())
+        for imp in imports:
+            if imp.startswith('google/protobuf/'):
+                continue
+            for root in [here, unit_dir, parent] + subfolders:
+                target = key(os.path.join(root, imp))
+                if os.path.isfile(target):
+                    break
+            else:
+                continue  # found through -I or the default include path, if at all
+            if target in owner:
+                previous = imported_as.setdefault(target, imp)
+                if previous != imp:
+                    raise BackendError('%s is imported both as "%s" and as "%s"; protoc needs one '
+                                       'name per file, use the same import path everywhere'
+                                       % (owner[target], previous, imp))
+            if key(root) not in [key(r) for r in [unit_dir, parent] + roots]:
+                roots.append(root)
+    includes = [unit_dir] + roots + [parent]
+    names = [imported_as.get(paths[p], p) for p in protos]
+    # protoc finds a name in the first include folder that has it.
+    for proto, name in zip(protos, names):
+        found = next((key(os.path.join(r, name)) for r in includes
+                      if os.path.isfile(os.path.join(r, name))), None)
+        if found != paths[proto]:
+            raise BackendError('import "%s" is ambiguous: %s and %s both match; rename one of them '
+                               'or import it with its folder ("folder/%s")'
+                               % (name, proto, os.path.relpath(found, unit_dir) if found else '?',
+                                  os.path.basename(name)))
+    return includes, names
+
+
 class Unit(object):
     """One protos-root subdirectory, resolved to protoc virtual names."""
 
     def __init__(self, protos_root, name, extra_includes):
         self.name = name
         self.dir = unit_folder(protos_root, name)
-        self.protos = unit_protos(self.dir)
+        direct = unit_protos(self.dir)
+        nested = all_unit_protos(self.dir)
         parent = os.path.dirname(self.dir)
-        candidates = [
-            # Imports relative to the unit directory: import "foo.proto";
-            ([self.dir, parent], self.protos),
-            # Imports relative to the protos root: import "unit/foo.proto";
-            ([parent, self.dir], [name + '/' + p for p in self.protos]),
-        ]
+        candidates = []
+        if direct:
+            candidates += [
+                # Imports relative to the unit directory: import "foo.proto";
+                (direct, [self.dir, parent], direct),
+                # Imports relative to the protos root: import "unit/foo.proto";
+                (direct, [parent, self.dir], [name + '/' + p for p in direct]),
+            ]
         errors = []
-        for roots, names in candidates:
+        if len(nested) > len(direct):
+            # Protos in subfolders (unit/enums/a.proto, unit/infra/messages/b.proto):
+            # their import lines say which folders are include paths.
+            try:
+                candidates.append((nested,) + nested_layout(self.dir, parent, nested))
+            except BackendError as exc:
+                errors.append(str(exc))
+        for protos, roots, names in candidates:
             includes = roots + list(extra_includes) + [DEFAULT_INCLUDE]
             try:
                 self.fds = compile_descriptor_set(names, includes)
             except BackendError as exc:
                 errors.append(str(exc))
                 continue
+            self.protos = protos
             self.includes = includes
             self.names = names
             break
@@ -553,10 +647,60 @@ def gen_c_summary(results):
             lines.append('  per-message filters: ' + ', '.join(f + '/_tcp' for f in r['filters']))
         for message, error in sorted(r.get('filter_errors', {}).items()):
             lines.append('  no filter for %s: %s' % (message, error.splitlines()[0]))
+        if r.get('needs_field_32bit'):
+            where = ('enabled in the copied pb.h' if r.get('field_32bit_enabled_in_pb_h') else
+                     'compile EVERY file with -DPB_FIELD_32BIT, nanopb\'s pb_*.c too '
+                     '(or uncomment it in pb.h, or pass --with-runtime)')
+            lines.append('  needs PB_FIELD_32BIT (%s): %s; or lower max_size / max_count in the .options'
+                         % ('; '.join(r['needs_field_32bit']), where))
         if r.get('recommended_defines'):
             lines.append('  smallest validation buffers: ' + ' '.join(
                 '-D%s=%d' % kv for kv in sorted(r['recommended_defines'].items())))
     return '\n'.join(lines)
+
+
+FIELD_32BIT_ERROR_RE = re.compile(r'^#error Enable PB_FIELD_32BIT to support messages exceeding 64kB in size: (.*)$',
+                                  re.M)
+
+
+def needs_field_32bit(unit, header_text):
+    """Why the unit's C code only compiles with PB_FIELD_32BIT, or [] if it does not need it.
+
+    Without it, field descriptors hold 16-bit tags, offsets, sizes and counts:
+    a message struct of 64 kB or more (the generator's #error), or a tag
+    above 65535, fails with FIELDINFO_DOES_NOT_FIT_width4/8_field<N>.
+    """
+
+    reasons = []
+    big = []
+    for match in FIELD_32BIT_ERROR_RE.finditer(header_text):
+        big += [m.strip() for m in match.group(1).split(',') if m.strip()]
+    if big:
+        reasons.append('messages of 64 kB or more: ' + ', '.join(sorted(set(big))))
+    tags = []
+
+    def walk(prefix, msgs):
+        for msg in msgs:
+            tags.extend('%s%s.%s = %d' % (prefix, msg.name, f.name, f.number)
+                        for f in msg.field if f.number > 65535)
+            walk(prefix + msg.name + '.', msg.nested_type)
+
+    for fdesc in unit.fds.file:
+        if not is_option_proto(fdesc.name):
+            walk(fdesc.package + '.' if fdesc.package else '', fdesc.message_type)
+    if tags:
+        reasons.append('field tags above 65535: ' + ', '.join(tags))
+    return reasons
+
+
+def enable_field_32bit(pb_h):
+    """Turn on '#define PB_FIELD_32BIT 1' in a copied pb.h, for runtime and generated code alike."""
+
+    with open(pb_h) as handle:
+        text = handle.read()
+    text = text.replace('/* #define PB_FIELD_32BIT 1 */', '#define PB_FIELD_32BIT 1', 1)
+    with open(pb_h, 'w', newline='\n') as handle:
+        handle.write(text)
 
 
 def cmd_gen_c(args):
@@ -600,9 +744,13 @@ def cmd_gen_c(args):
         finally:
             shutil.rmtree(gendir, ignore_errors=True)
         with open(os.path.join(outdir, header)) as handle:
-            filters = re.findall(r'^int (\w+_filter_udp)\(', handle.read(), re.M)
+            header_text = handle.read()
+        filters = re.findall(r'^int (\w+_filter_udp)\(', header_text, re.M)
         protocol_filter = protocol + '_filter_udp' if protocol and protocol + '_filter_udp' in filters else None
         filters = [f for f in filters if f != protocol_filter]
+        # The generator puts its '#error Enable PB_FIELD_32BIT' in the .pb.c.
+        with open(os.path.join(outdir, name + '.pb.c')) as handle:
+            field_32bit = needs_field_32bit(unit, header_text + handle.read())
         if args.with_runtime:
             runtime = RUNTIME_FILES + (VALIDATE_RUNTIME_FILES if validate else ())
             for fname in runtime:
@@ -610,8 +758,13 @@ def cmd_gen_c(args):
                 if os.path.isfile(src):
                     shutil.copy(src, os.path.join(outdir, fname))
                     files.append(fname)
+            if field_32bit:
+                enable_field_32bit(os.path.join(outdir, 'pb.h'))
         result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
                   'protocol_filter': protocol_filter, 'filters': filters, 'generator_log': log.strip()}
+        if field_32bit:
+            result['needs_field_32bit'] = field_32bit
+            result['field_32bit_enabled_in_pb_h'] = bool(args.with_runtime)
         if protocol_error:
             result['protocol_filter_error'] = protocol_error
         elif not protocol_filter and validate and not args.no_filter:
@@ -1839,7 +1992,7 @@ def merged_into(protos_root, units):
     result = {}
     for name in units:
         folder = unit_folder(protos_root, name)
-        for proto in unit_protos(folder):
+        for proto in all_unit_protos(folder):
             with open(os.path.join(folder, proto), encoding='utf-8', errors='replace') as handle:
                 for path in IMPORT_RE.findall(handle.read()):
                     other = path.split('/', 1)[0]

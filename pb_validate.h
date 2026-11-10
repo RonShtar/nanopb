@@ -596,32 +596,46 @@ extern "C"
         } while (0)
 
     /* Sub-messages in an array: every entry is validated and reported by index.
-     * COUNT is the number of valid entries, MEMBER is empty for repeated
-     * messages or ".value" to validate the value of map entries.
+     * ITEM is the sub-message of entry __pb_i, e.g. (msg)->items[__pb_i];
+     * COUNT is the number of valid entries.
      */
-    #define PB_VALIDATE_NESTED_MSG_ARRAY(ctx_var, validate_func, msg_ptr, field_name, COUNT, MEMBER, violations_ptr) \
+    #define PB_VALIDATE_NESTED_MSG_ITEMS(ctx_var, validate_func, ITEM, COUNT, violations_ptr)                \
         do {                                                                                                   \
             pb_size_t __pb_n = (pb_size_t)(COUNT);                                                             \
             for (pb_size_t __pb_i = 0; __pb_i < __pb_n; ++__pb_i) {                                            \
                 pb_validate_context_push_index(&(ctx_var), __pb_i);                                            \
-                bool __pb_ok_nested = validate_func(&(msg_ptr)->field_name[__pb_i] MEMBER, (violations_ptr));  \
+                bool __pb_ok_nested = validate_func(&(ITEM), (violations_ptr));                                \
                 pb_validate_context_pop_index(&(ctx_var));                                                     \
-                if (!__pb_ok_nested) (ctx_var).failed = true;                                                    \
-            if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                      \
+                if (!__pb_ok_nested) (ctx_var).failed = true;                                                  \
+                if (!__pb_ok_nested && PB_VALIDATE_SHOULD_EXIT(ctx_var)) {                                     \
                     pb_validate_context_pop_field(&(ctx_var));                                                 \
                     return false;                                                                              \
                 }                                                                                              \
             }                                                                                                  \
         } while (0)
 
+    /* Repeated sub-messages (field_name_count entries). */
     #define PB_VALIDATE_NESTED_MSG_REPEATED(ctx_var, validate_func, msg_ptr, field_name, violations_ptr)        \
-        PB_VALIDATE_NESTED_MSG_ARRAY(ctx_var, validate_func, msg_ptr, field_name,                              \
-                                     (msg_ptr)->field_name##_count, , violations_ptr)
+        PB_VALIDATE_NESTED_MSG_ITEMS(ctx_var, validate_func, (msg_ptr)->field_name[__pb_i],                    \
+                                     (msg_ptr)->field_name##_count, violations_ptr)
 
     /* Same for fixed_count arrays, which have no _count member. */
     #define PB_VALIDATE_NESTED_MSG_FIXARRAY(ctx_var, validate_func, msg_ptr, field_name, violations_ptr)        \
-        PB_VALIDATE_NESTED_MSG_ARRAY(ctx_var, validate_func, msg_ptr, field_name,                              \
-                                     sizeof((msg_ptr)->field_name) / sizeof((msg_ptr)->field_name[0]), , violations_ptr)
+        PB_VALIDATE_NESTED_MSG_ITEMS(ctx_var, validate_func, (msg_ptr)->field_name[__pb_i],                    \
+                                     sizeof((msg_ptr)->field_name) / sizeof((msg_ptr)->field_name[0]),         \
+                                     violations_ptr)
+
+    /* map<K, V> with a message V: validates the value of every entry. */
+    #define PB_VALIDATE_NESTED_MAP_VALUES(ctx_var, validate_func, msg_ptr, field_name, violations_ptr)          \
+        PB_VALIDATE_NESTED_MSG_ITEMS(ctx_var, validate_func, (msg_ptr)->field_name[__pb_i].value,              \
+                                     (msg_ptr)->field_name##_count, violations_ptr)
+
+    /* Older form, kept for code generated before PB_VALIDATE_NESTED_MSG_ITEMS:
+     * MEMBER is ".value" for map values; for plain arrays use the macros above
+     * rather than an empty MEMBER argument.
+     */
+    #define PB_VALIDATE_NESTED_MSG_ARRAY(ctx_var, validate_func, msg_ptr, field_name, COUNT, MEMBER, violations_ptr) \
+        PB_VALIDATE_NESTED_MSG_ITEMS(ctx_var, validate_func, (msg_ptr)->field_name[__pb_i] MEMBER, COUNT, violations_ptr)
 
     /* Message held in a oneof arm: validated only while that arm is selected
      * (the caller is already inside the matching case).

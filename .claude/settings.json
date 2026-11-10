@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/nanopb_hook.py\" post",
+            "command": "python \"$(git rev-parse --show-toplevel)/.claude/hooks/nanopb_hook.py\" post",
             "timeout": 120,
             "statusMessage": "nanopb checks"
           }
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python \"$CLAUDE_PROJECT_DIR/.claude/hooks/nanopb_hook.py\" pre",
+            "command": "python \"$(git rev-parse --show-toplevel)/.claude/hooks/nanopb_hook.py\" pre",
             "timeout": 10
           }
         ]

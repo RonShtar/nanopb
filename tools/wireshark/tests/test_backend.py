@@ -592,6 +592,154 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         self.assertEqual(result['units'], ['app'])
 
+    def compile_each(self, cc, flags, sources):
+        """Compile every source on its own: some compilers (zig cc) refuse -c with several files."""
+
+        for source in sources:
+            obj = os.path.join(self.tmp, os.path.basename(source) + '.o')
+            build = subprocess.run(cc + flags + ['-c', source, '-o', obj], cwd=self.tmp,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(build.returncode, 0, source + ': ' + build.stdout[-3000:])
+
+    def write_tree(self, root, files):
+        for path, text in files.items():
+            full = os.path.join(root, *path.split('/'))
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, 'w') as handle:
+                handle.write(text)
+
+    def nested_layout(self):
+        """protos/protocol_A with protocol_a/ and infrastructure/{enums,messages,validate}/,
+        imported three ways: same folder, unit folder, protos root."""
+
+        root = os.path.join(self.tmp, 'protos')
+        generator_protos = os.path.join(os.path.dirname(os.path.dirname(TOOL_DIR)), 'generator', 'proto')
+        with open(os.path.join(generator_protos, 'validate.proto')) as handle:
+            validate = handle.read()
+        self.write_tree(root, {
+            'protocol_A/infrastructure/validate/validate.proto': validate,
+            'protocol_A/infrastructure/enums/enums.proto':
+                'syntax = "proto3";\npackage infra;\nenum Status { OK = 0; BAD = 1; }\n',
+            'protocol_A/infrastructure/messages/header.proto':
+                'syntax = "proto3";\npackage infra;\nimport "enums/enums.proto";\n'
+                'message Header { Status status = 1; uint32 seq = 2; }\n',
+            'protocol_A/protocol_a/enums.proto':
+                'syntax = "proto3";\npackage pa;\nenum Mode { IDLE = 0; RUN = 1; }\n',
+            'protocol_A/protocol_a/structure.proto':
+                'syntax = "proto3";\npackage pa;\nimport "enums.proto";\n'
+                'import "infrastructure/messages/header.proto";\n'
+                'message Structure { Mode mode = 1; infra.Header header = 2; }\n',
+            'protocol_A/protocol_a/messages.proto':
+                'syntax = "proto3";\npackage pa;\nimport "protocol_A/protocol_a/structure.proto";\n'
+                'import "validate/validate.proto";\n'
+                'message Msg { Structure s = 1; uint32 level = 2 [(validate.rules).uint32.lte = 5]; }\n',
+        })
+        return root
+
+    def test_units_in_nested_folders(self):
+        root = self.nested_layout()
+        status, result, err = run_backend('units', '--protos-root', root, '--names-only')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'], ['protocol_A'])
+        status, result, err = run_backend('units', '--protos-root', root)
+        self.assertEqual(status, 0, err)
+        unit = result['units'][0]
+        self.assertEqual(unit['protos'], ['infrastructure/enums/enums.proto', 'infrastructure/messages/header.proto',
+                                          'protocol_a/enums.proto', 'protocol_a/messages.proto',
+                                          'protocol_a/structure.proto'])
+        self.assertEqual(sorted(unit['messages']), ['infra.Header', 'pa.Msg', 'pa.Structure'])
+
+    def test_gen_c_nested_folders(self):
+        root = self.nested_layout()
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'][0]['filters'], ['pa_Msg_filter_udp'])
+        self.assertNotIn('needs_field_32bit', result['units'][0])
+        unit_dir = os.path.join(out, 'protocol_A')
+        with open(os.path.join(unit_dir, 'protocol_A.pb.h')) as handle:
+            header = handle.read()
+        for ctype in ('} infra_Header;', '} pa_Structure;', '} pa_Msg;'):
+            self.assertIn(ctype, header)
+        self.assertNotIn('validate_RepeatedRules', header)
+        cc = find_cc()
+        if cc:
+            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+            self.compile_each(cc, ['-std=c99', '-I', unit_dir], sources)
+
+    def test_nested_folders_same_file_two_import_names(self):
+        root = os.path.join(self.tmp, 'protos')
+        self.write_tree(root, {
+            'p/common/c.proto': 'syntax = "proto3";\npackage c;\nmessage C { uint32 a = 1; }\n',
+            'p/x/x.proto': 'syntax = "proto3";\npackage x;\nimport "common/c.proto";\nmessage X { c.C c = 1; }\n',
+            'p/y/y.proto': 'syntax = "proto3";\npackage y;\nimport "p/common/c.proto";\nmessage Y { c.C c = 1; }\n',
+        })
+        status, _, err = run_backend('units', '--protos-root', root)
+        self.assertEqual(status, 1)
+        self.assertIn('imported both as', err)
+
+    def test_nested_arrays_have_no_empty_macro_arguments(self):
+        root = os.path.join(self.tmp, 'protos')
+        self.write_tree(root, {'arr/arr.proto':
+                               'syntax = "proto3";\npackage arr;\nimport "nanopb.proto";\nimport "validate.proto";\n'
+                               'message Item { uint32 v = 1 [(validate.rules).uint32.lte = 9]; }\n'
+                               'message Box {\n'
+                               '  repeated Item items = 1 [(nanopb).max_count = 4];\n'
+                               '  repeated Item fixed = 2 [(nanopb).max_count = 2, (nanopb).fixed_count = true];\n'
+                               '  map<uint32, Item> by_id = 3 [(nanopb).max_count = 3];\n'
+                               '  uint32 plain = 4;\n'
+                               '}\n'})
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
+        self.assertEqual(status, 0, err)
+        unit_dir = os.path.join(out, 'arr')
+        with open(os.path.join(unit_dir, 'arr_validate.c')) as handle:
+            source = handle.read()
+        self.assertIsNone(re.search(r',\s*,', source), source)
+        self.assertIn('PB_VALIDATE_NESTED_MSG_REPEATED(ctx, pb_validate_arr_Item, msg, items, violations);', source)
+        self.assertIn('PB_VALIDATE_NESTED_MSG_FIXARRAY(ctx, pb_validate_arr_Item, msg, fixed, violations);', source)
+        self.assertIn('PB_VALIDATE_NESTED_MAP_VALUES(ctx, pb_validate_arr_Item, msg, by_id, violations);', source)
+        for chatter in ('/* Validate field:', 'Fields without constraints', '/* Validate oneof', '/* Message rule:'):
+            self.assertNotIn(chatter, source)
+        cc = find_cc()
+        if cc:
+            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+            self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-I', unit_dir], sources)
+
+    def big_message_layout(self):
+        root = os.path.join(self.tmp, 'protos')
+        self.write_tree(root, {'big/big.proto':
+                               'syntax = "proto3";\npackage big;\nimport "nanopb.proto";\n'
+                               'message Small { uint32 a = 1; }\n'
+                               'message Blob { uint32 a = 1; bytes data = 9 [(nanopb).max_size = 70000]; }\n'})
+        return root
+
+    def test_gen_c_says_when_pb_field_32bit_is_needed(self):
+        root = self.big_message_layout()
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--no-validate')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'][0]['needs_field_32bit'], ['messages of 64 kB or more: big_Blob'])
+        self.assertFalse(result['units'][0]['field_32bit_enabled_in_pb_h'])
+        self.assertIn('needs PB_FIELD_32BIT', result['summary'])
+        self.assertIn('-DPB_FIELD_32BIT', result['summary'])
+
+    def test_gen_c_with_runtime_enables_pb_field_32bit(self):
+        root = self.big_message_layout()
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
+        self.assertEqual(status, 0, err)
+        self.assertTrue(result['units'][0]['field_32bit_enabled_in_pb_h'])
+        self.assertIn('enabled in the copied pb.h', result['summary'])
+        unit_dir = os.path.join(out, 'big')
+        with open(os.path.join(unit_dir, 'pb.h')) as handle:
+            self.assertIn('\n#define PB_FIELD_32BIT 1\n', handle.read())
+        cc = find_cc()
+        if cc:
+            # Without PB_FIELD_32BIT this fails with FIELDINFO_DOES_NOT_FIT_width4_field9.
+            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+            self.compile_each(cc, ['-std=c99', '-I', unit_dir], sources)
+
     def test_no_units_says_what_to_enter(self):
         status, _, err = run_backend('gen-c', '--protos-root', self.tmp, '--out', os.path.join(self.tmp, 'out'))
         self.assertEqual(status, 1)

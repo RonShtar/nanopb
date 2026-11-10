@@ -97,6 +97,14 @@ subfolder per protocol:
 
     python tools/wireshark/backend/nanopb_wireshark.py install-studio --protos-root <directory>
 
+A protocol's `.proto` files can also sit in folders of its own, for example
+`protocol_A/protocol_a/*.proto` next to `protocol_A/infrastructure/enums/` and
+`protocol_A/infrastructure/messages/`: `protocol_A` is then one protocol with
+all of them. Imports may be relative to the importing file's folder
+(`"enums.proto"`), to the protocol folder (`"infrastructure/enums/enums.proto"`)
+or to the directory (`"protocol_A/protocol_a/structure.proto"`), but each file
+must be imported the same way everywhere.
+
 The next time Wireshark starts, Decode As lists your protocols and no
 Tools > nanopb item asks for the directory. Inside Wireshark, **Tools > nanopb
 > Set protos directory (once)** does the same; run it again to change the
@@ -266,6 +274,15 @@ Build switches such as `PB_VALIDATE_MAX_PATH_DEPTH` or
 `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` must be the same for every file of the
 build. For what each one costs, see [Validation performance](validation_performance.md);
 for the rules, see [Validation](validation.md).
+
+A message of 64 kB or more (large `max_size` / `max_count`), or a field tag
+above 65535, needs `PB_FIELD_32BIT`. Without it the build fails with
+`FIELDINFO_DOES_NOT_FIT_width4_field<N>` or `#error Enable PB_FIELD_32BIT`.
+Generate C says so in its summary. Define it for every file, nanopb's
+`pb_*.c` included (`-DPB_FIELD_32BIT`, or uncomment it in `pb.h`); with
+`gen-c --with-runtime` it is already enabled in the copied `pb.h`. Defining it
+only for the generated files breaks decoding at run time. The other fix is
+smaller `max_size` / `max_count` in the `.options` file.
 
 ## Everyday tasks
 
