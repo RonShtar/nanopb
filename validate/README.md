@@ -107,7 +107,9 @@ validate/
     validator.py       writes <name>_validate.c/.h from the model
     c_layout.py        generated-C layout (C89 blocks) and #include format
     filters.py         protoc plugin: validators + packet filters
-    datagen.py         valid / invalid sample messages
+    datagen.py         DataGenerator: valid / invalid sample messages (+ CLI)
+    schema.py          descriptors, .options limits, field/message info for datagen
+    values.py, containers.py, violations.py, encoding.py   DataGenerator parts
     env.py             paths; uses nanopb's generator read-only
     plugin/            protoc-gen-nanopb-validate launchers
     validate_proto/    validate.proto (+ any/timestamp)
