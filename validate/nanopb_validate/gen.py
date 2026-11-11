@@ -24,6 +24,8 @@ def generator_env():
 
 def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None, filter_name=None):
     common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
+    # e.g. -L'#include <NanoPB/%s>' (gen --include-prefix): reaches both plugins.
+    common += getattr(unit, 'nanopb_opts', [])
     # As imported: validate.proto, or validate/validate.proto in a subfolder.
     for name in sorted(set(OPTION_PROTOS) | set(f.name for f in unit.fds.file if is_option_proto(f.name))):
         common += ['-x', name]
@@ -324,6 +326,19 @@ def public_filter_name(template, protocol):
     return name
 
 
+def include_prefix_dir(prefix):
+    """'NanoPB' from --include-prefix NanoPB (or NanoPB/), '' without one."""
+
+    return (prefix or '').strip().strip('/\\')
+
+
+def include_format_opts(prefix):
+    """nanopb's -L option for `#include <PREFIX/pb.h>`, or nothing."""
+
+    prefix = include_prefix_dir(prefix)
+    return ['-L#include <%s/%%s>' % prefix] if prefix else []
+
+
 def cmd_gen_c(args):
     validate = not args.no_validate
 
@@ -332,6 +347,7 @@ def cmd_gen_c(args):
     jobs = []
     for name in select_units(args):
         unit = Unit(args.protos_root, name, args.include)
+        unit.nanopb_opts = include_format_opts(getattr(args, 'include_prefix', None))
         entries, source_of_entries = [], None
         if validate and not args.no_filter:
             entries, source_of_entries = unit_entrypoints(unit, args.port_map)
@@ -374,14 +390,19 @@ def cmd_gen_c(args):
         with open(os.path.join(outdir, name + '.pb.c')) as handle:
             field_32bit = needs_field_32bit(unit, header_text + handle.read())
         if args.with_runtime:
+            # With an include prefix the runtime goes where <PREFIX/pb.h> finds it.
+            prefix = include_prefix_dir(getattr(args, 'include_prefix', None))
+            runtime_dir = os.path.join(outdir, prefix) if prefix else outdir
+            if not os.path.isdir(runtime_dir):
+                os.makedirs(runtime_dir)
             runtime = RUNTIME_FILES + (VALIDATE_RUNTIME_FILES if validate else ())
             for fname in runtime:
                 src = os.path.join(env.RUNTIME_DIR if fname in VALIDATE_RUNTIME_FILES else args.nanopb_root, fname)
                 if os.path.isfile(src):
-                    shutil.copy(src, os.path.join(outdir, fname))
-                    files.append(fname)
+                    shutil.copy(src, os.path.join(runtime_dir, fname))
+                    files.append((prefix + '/' if prefix else '') + fname)
             if field_32bit:
-                enable_field_32bit(os.path.join(outdir, 'pb.h'))
+                enable_field_32bit(os.path.join(runtime_dir, 'pb.h'))
         result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts,
                   'protocol_filter': protocol_filter, 'filters': filters, 'generator_log': log.strip()}
         if field_32bit:

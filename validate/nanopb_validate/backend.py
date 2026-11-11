@@ -80,6 +80,9 @@ def build_parser():
     p.add_argument('--filter-name', default='{unit}_filter',
                    help='name of the protocol filter; its entry points are <name>_udp and <name>_tcp '
                         '({unit} is the protocol folder, default: {unit}_filter)')
+    p.add_argument('--include-prefix', metavar='DIR', default=None,
+                   help='include nanopb runtime headers as <DIR/pb.h> (e.g. NanoPB); with --with-runtime '
+                        'the runtime is copied to <out>/<unit>/DIR/. Default <pb.h>')
     p.set_defaults(func=cmd_gen_c)
 
     p = sub.add_parser('gen-data', help='generate encoded sample messages')
@@ -149,6 +152,8 @@ def build_parser():
                    help='run this checkout instead of the copy (edits take effect without reinstalling)')
     p.add_argument('--protos-root', default=None,
                    help='directory with one subfolder per protocol: saved for every menu and loaded now')
+    p.add_argument('--include-prefix', default=None, metavar='DIR',
+                   help='Generate C includes nanopb headers as <DIR/pb.h> (e.g. NanoPB); saved for the menu')
     p.set_defaults(func=cmd_install_studio)
     return parser
 

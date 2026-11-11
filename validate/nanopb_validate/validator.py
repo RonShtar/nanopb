@@ -70,6 +70,18 @@ _DECL_RE = re.compile(r'^(?:static\s+)?(?:const\s+)?(?:struct\s+)?[A-Za-z_]\w*(?
 _NOT_DECL = ('return ', 'else ', 'goto ', 'case ', 'break;', 'continue;')
 
 
+#: How generated files include the runtime headers (pb_validate.h, pb.h, ...):
+#: nanopb's -L / --library-include-format, which the plugin copies here.
+LIBRARY_INCLUDE_FORMAT = '#include <%s>'
+
+
+def lib_include(header: str) -> str:
+    """An #include line for a runtime header, in nanopb's include format."""
+
+    fmt = LIBRARY_INCLUDE_FORMAT
+    return (fmt % header if '%s' in fmt else fmt) + '\n'
+
+
 _PP_INDENT_RE = re.compile(r'^[ \t]+#', re.M)
 _TRAILING_RE = re.compile(r'[ \t]+$', re.M)
 _BLANK_RUN_RE = re.compile(r'\n{3,}')
@@ -2466,7 +2478,7 @@ class ValidatorGenerator:
         yield '#ifndef %s\n' % guard
         yield '#define %s\n' % guard
         yield '\n'
-        yield '#include <pb_validate.h>\n'
+        yield lib_include('pb_validate.h')
         yield '#include "%s.pb.h"\n' % base_name
         
         # Include validation headers for imported proto files

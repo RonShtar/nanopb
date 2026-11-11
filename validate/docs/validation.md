@@ -27,6 +27,10 @@ generators; `-I dir` and `-D outdir` work as with nanopb. A packet filter:
 python validate/nanopb_validate gen --filter pkg.Envelope message.proto
 ```
 
+To include nanopb's headers from a folder of their own (`#include <NanoPB/pb.h>`,
+`<NanoPB/pb_validate.h>`, ...), add `--include-prefix NanoPB`; it sets nanopb's
+`-L` include format for both generators.
+
 For a directory with one folder per protocol, `gen PROTOS_DIR --out DIR`
 writes one merged `<protocol>.pb.c/.h` and `<protocol>_validate.c/.h` per
 protocol (see the [README](../README.md)). Compile with `-I validate/runtime`

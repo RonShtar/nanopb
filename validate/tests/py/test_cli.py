@@ -2,13 +2,15 @@
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 
-from helpers import FIXTURES, PKG_DIR, VALIDATE_DIR
+from helpers import FIXTURES, PKG_DIR, STRESS_PROTOS, VALIDATE_DIR
+from test_backend import find_cc
 
 
 def cli(*argv, cwd=None):
@@ -83,6 +85,42 @@ class CliTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         self.assertEqual(result(stdout)['units'][0]['unit'], 'telemetry')
         self.assertTrue(os.path.isfile(os.path.join(out, 'telemetry', 'telemetry_validate.c')))
+
+    def test_gen_with_include_prefix(self):
+        """--include-prefix NanoPB: every runtime include is <NanoPB/...>, and with --with-runtime the
+        output compiles with only -I <out>/<protocol>."""
+
+        out = os.path.join(self.tmp, 'out')
+        status, stdout, err = cli('gen', STRESS_PROTOS, '--out', out, '--unit', 'fleet', '--with-runtime',
+                                  '--include-prefix', 'NanoPB')
+        self.assertEqual(status, 0, err)
+        unit_dir = os.path.join(out, 'fleet')
+        self.assertTrue(os.path.isfile(os.path.join(unit_dir, 'NanoPB', 'pb_validate.c')))
+        for name in os.listdir(unit_dir):
+            if name.endswith(('.c', '.h')):
+                with open(os.path.join(unit_dir, name)) as handle:
+                    text = handle.read()
+                self.assertIsNone(re.search(r'#include <pb', text), name)
+                if name.endswith('.h'):
+                    self.assertIn('#include <NanoPB/', text, name)
+        cc = find_cc()
+        if not cc:
+            return
+        sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+        sources += [os.path.join(unit_dir, 'NanoPB', f) for f in os.listdir(os.path.join(unit_dir, 'NanoPB'))
+                    if f.endswith('.c')]
+        for source in sources:
+            obj = os.path.join(self.tmp, os.path.basename(source) + '.o')
+            build = subprocess.run(cc + ['-std=c99', '-Wall', '-Werror', '-I', unit_dir, '-c', source, '-o', obj],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(build.returncode, 0, source + ': ' + build.stdout[-2000:])
+
+        # Per-file mode too.
+        proto = self.write('one/cmd.proto', 'syntax = "proto3";\npackage cmd;\nmessage C { uint32 a = 1; }\n')
+        status, _, err = cli('gen', '--include-prefix', 'NanoPB', os.path.basename(proto), cwd=os.path.dirname(proto))
+        self.assertEqual(status, 0, err)
+        with open(os.path.join(os.path.dirname(proto), 'cmd_validate.h')) as handle:
+            self.assertIn('#include <NanoPB/pb_validate.h>', handle.read())
 
     def test_wireshark_subcommands(self):
         status, out, err = cli('wireshark', 'units', '--protos-root', FIXTURES, '--names-only')

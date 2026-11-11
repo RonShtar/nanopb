@@ -37,7 +37,7 @@ works the same.
 | Command | What it does |
 |---|---|
 | `check PROTOS_DIR` | Compiles every protocol and reports errors (syntax, imports, rules the generator cannot honour) and warnings (fields without `max_size`/`max_count`, messages needing `PB_FIELD_32BIT`, filters that cannot be built). Exit 1 on errors. |
-| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (`{unit}` = protocol folder). |
+| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (`{unit}` = protocol folder); `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). |
 | `gen FILE.proto ...` | Per file, like nanopb: `<f>.pb.c/.h` and `<f>_validate.c/.h`. `--filter pkg.Msg` adds a filter; `--nanopb-opt` passes nanopb options to both generators. |
 | `packets PROTOS_DIR --out DIR` | A capture of PASSED and DROPPED packets of every message, plus each packet as a C array and hex; installs the dissector schema. |
 | `wireshark install` | Installs the Lua plugins and a private copy of this tool into Wireshark (once). |
@@ -66,6 +66,10 @@ if (fleet_filter_callbacks.udp(NULL, data, size) != 0)
   `PB_VALIDATE_DEBUG` builds also log each violated rule.
 - `pb_filter_t <name>_callbacks` holds the name and both entry points for
   registration through function pointers.
+- Keep nanopb in its own folder: `gen --include-prefix NanoPB` (or the
+  Wireshark menu's include field, or `wireshark install --include-prefix NanoPB`)
+  writes `#include <NanoPB/pb.h>`, `<NanoPB/pb_validate.h>`, ...; compile with `-I`
+  on the folder that contains `NanoPB/`.
 - Define `PB_FIELD_32BIT` (and any other `PB_*` switch) identically for every
   file, nanopb's included; `check` and `gen` tell you when it is needed.
 

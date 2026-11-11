@@ -21,6 +21,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
+from gen import include_format_opts  # noqa: E402
 
 #: `wireshark` subcommands -> backend commands.
 WIRESHARK = {
@@ -44,14 +45,14 @@ def backend_main(argv):
 # ---------------------------------------------------------------------------
 
 def gen_files(files, includes=(), out_dir='.', filters=(), protocol_filter=None, filter_name=None,
-              nanopb_opts=(), validate_opts=(), validate=True):
+              nanopb_opts=(), validate_opts=(), validate=True, include_prefix=None):
     """Generate <file>.pb.c/.h and <file>_validate.c/.h for each .proto, in one protoc run.
 
     nanopb options (naming styles, -q, ...) go to both plugins, so the C names
     agree; validate.proto is never generated, only used.
     """
 
-    shared = list(nanopb_opts) + ['-x', 'validate.proto']
+    shared = list(nanopb_opts) + ['-x', 'validate.proto'] + include_format_opts(include_prefix)
     own = list(validate_opts)
     if filters:
         own.append('--filter=' + ';'.join(filters))
@@ -85,6 +86,8 @@ def files_parser():
     p.add_argument('--validate-opt', action='append', default=[], metavar='OPT',
                    help='extra option for the validate plugin')
     p.add_argument('--no-validate', action='store_true', help='plain nanopb output only')
+    p.add_argument('--include-prefix', metavar='DIR', help='include runtime headers as <DIR/pb.h> '
+                   '(e.g. NanoPB); default <pb.h>')
     return p
 
 
@@ -95,7 +98,7 @@ def cmd_gen(argv, global_args):
     if files and '--protos-root' not in argv:
         args = files_parser().parse_args(argv)
         return gen_files(args.inputs, args.include, args.out, args.filter, args.protocol_filter, args.filter_name,
-                         args.nanopb_opt, args.validate_opt, not args.no_validate)
+                         args.nanopb_opt, args.validate_opt, not args.no_validate, args.include_prefix)
     return backend_main(global_args + ['gen-c'] + with_protos_root(argv))
 
 

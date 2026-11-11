@@ -727,6 +727,8 @@ def cmd_install_studio(args):
         config['protos_root'] = protos_root
         config['protos_root_fixed'] = '1'
         config['port_map'] = loaded.get('port_map', config.get('port_map', ''))
+    if getattr(args, 'include_prefix', None) is not None:
+        config['include_prefix'] = args.include_prefix.strip().strip('/\\')
     keys = ['python', 'project', 'nanopb_root', 'protos_root', 'output_dir', 'extra_includes', 'port_map']
     keys += sorted(k for k in config if k not in keys)
     with open(config_path, 'w', newline='\n') as handle:

@@ -47,7 +47,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map",
-    "protos_root_fixed" }
+    "protos_root_fixed", "include_prefix" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
@@ -58,6 +58,7 @@ local config = {
     extra_includes = "",
     port_map = "",
     protos_root_fixed = "",
+    include_prefix = "",    -- e.g. NanoPB: generated C includes <NanoPB/pb.h>
 }
 
 local function load_config()
@@ -475,6 +476,10 @@ local function gen_c()
         pick_units(title, function(units)
             -- Port-mapped messages are the protocol entrypoints that get a packet filter.
             local args = add_common({ "gen", "--out", output_dir(), "--unit", units })
+            if (config.include_prefix or "") ~= "" then
+                args[#args + 1] = "--include-prefix"
+                args[#args + 1] = config.include_prefix
+            end
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -595,7 +600,8 @@ local function set_directory()
     dialog(title, {
         { "Protos directory (the folder with one subfolder per protocol)", config.protos_root },
         { "Output directory (empty = <protos directory>/../nanopb_out)", config.output_dir },
-    }, function(input, output)
+        { "Include nanopb headers from (e.g. NanoPB for <NanoPB/pb.h>; empty = <pb.h>)", config.include_prefix },
+    }, function(input, output, prefix)
         input = trim(input)
         if input == "" then
             show(title, false, "Enter the protos directory.")
@@ -603,6 +609,7 @@ local function set_directory()
         end
         config.protos_root = input
         config.output_dir = trim(output)
+        config.include_prefix = trim(prefix or "")
         config.protos_root_fixed = "1"
         save_config()
         load_now(title, "\n\nEvery Tools > nanopb item now uses this directory without asking."
