@@ -27,6 +27,49 @@ _TRAILING_RE = re.compile(r'[ \t]+$', re.M)
 _BLANK_RUN_RE = re.compile(r'\n{3,}')
 
 
+def strip_comments(text: str) -> str:
+    """Remove every comment except Doxygen blocks (/** ... */), outside string and char literals.
+
+    A line that held only a comment disappears; code on the line stays.
+    """
+
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c in '"\'':
+            j = i + 1
+            while j < n and text[j] != c:
+                j += 2 if text[j] == '\\' else 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        elif text.startswith('/*', i) or text.startswith('//', i):
+            if text.startswith('//', i):
+                end = text.find('\n', i)
+                end = n if end < 0 else end
+            else:
+                end = text.find('*/', i + 2)
+                end = n if end < 0 else end + 2
+            if text.startswith('/**', i) and not text.startswith('/**/', i):
+                out.append(text[i:end])
+                i = end
+                continue
+            # A comment alone on its line(s) takes the line with it.
+            line_start = ''.join(out).rfind('\n') + 1
+            before = ''.join(out)[line_start:]
+            rest_end = text.find('\n', end)
+            rest = text[end:rest_end if rest_end >= 0 else n]
+            if before.strip() == '' and rest.strip() == '':
+                joined = ''.join(out)[:line_start]
+                out = [joined]
+                i = (rest_end + 1) if rest_end >= 0 else n
+            else:
+                i = end
+        else:
+            out.append(c)
+            i += 1
+    return '\n'.join(line.rstrip() for line in ''.join(out).split('\n'))
+
+
 def tidy_c(text: str) -> str:
     """Final layout pass over generated C: preprocessor lines at column 0,
     no trailing whitespace, at most one blank line in a row."""

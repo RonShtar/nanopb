@@ -502,6 +502,7 @@ local function gen_c()
 end
 
 local DROPPED_FILTER = 'nanopb.validation == "dropped"'
+local PASSED_FILTER = 'nanopb.validation == "passed"'
 
 -- One button: valid and invalid packets of every message in one capture,
 -- dissector refreshed, capture opened. Every packet is a google.protobuf.Any
@@ -530,8 +531,7 @@ local function gen_packets()
             local reload = json_bool(text, "schema_changed") and reload_lua_plugins
             local notes = { summary, "" }
             if open_capture_file then
-                notes[#notes + 1] = (reload and "Press Open capture to see it." or "Opening the capture.")
-                    .. " Each packet shows Validation: PASSED or DROPPED."
+                notes[#notes + 1] = "Press Open capture to see it. Each packet shows Validation: PASSED or DROPPED."
                 notes[#notes + 1] = "Other ports: Analyze > Decode As > UDP/TCP port > FLEET (your folder name), or set it for all NANOPB"
                     .. "\ntraffic: Edit > Preferences > Protocols > NANOPB > Protocol."
             else
@@ -541,28 +541,30 @@ local function gen_packets()
                 notes[#notes + 1] = reload_lua_plugins and "The protocols changed; Open capture also reloads Lua plugins, which closes this window."
                     or "The dissector schema changed; reload Lua plugins (Ctrl+Shift+L)."
             end
-            local buttons = {}
-            if set_filter and apply_filter then
-                buttons[#buttons + 1] = { "Show dropped only", function()
-                    set_filter(DROPPED_FILTER)
-                    apply_filter()
-                end }
-                buttons[#buttons + 1] = { "Show all", function()
-                    set_filter("")
-                    apply_filter()
-                end }
-            end
             local function open_capture()
                 if open_capture_file and pcap ~= "" then open_capture_file(pcap, "") end
                 -- Last: reloading re-runs the plugins and re-dissects the open capture.
                 if reload then reload_lua_plugins() end
             end
-            -- Reloading closes every plugin window, so it waits until this one has been read.
-            if reload then
-                table.insert(buttons, 1, { "Open capture", open_capture })
-                return true, table.concat(notes, "\n"), buttons
+            local function show_only(filter)
+                return function()
+                    set_filter(filter)
+                    apply_filter()
+                end
             end
-            return true, table.concat(notes, "\n"), buttons, open_capture
+            -- The window stays in front until a button is pressed: opening the capture
+            -- by itself would bring the main window up and hide this one.
+            local buttons = {}
+            if open_capture_file then buttons[#buttons + 1] = { "Open capture", open_capture } end
+            if set_filter and apply_filter then
+                buttons[#buttons + 1] = { "Show passed only", show_only(PASSED_FILTER) }
+                buttons[#buttons + 1] = { "Show dropped only", show_only(DROPPED_FILTER) }
+                buttons[#buttons + 1] = { "Show all", show_only("") }
+            end
+            local packets = units:find(",", 1, true) and output_dir()
+                or (output_dir() .. SEP .. units .. SEP .. "packets")
+            buttons[#buttons + 1] = { "Open packets folder", function() open_folder(packets) end }
+            return true, table.concat(notes, "\n"), buttons
         end)
     end)
 end

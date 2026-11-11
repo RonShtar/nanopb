@@ -571,7 +571,7 @@ class BackendTests(unittest.TestCase):
         out = os.path.join(self.tmp, 'out', 'protocolvalid')
         with open(os.path.join(out, 'protocolvalid.pb.h')) as handle:
             header = handle.read()
-        self.assertIn('ron.pb.h', header)
+        self.assertIn('} ron_Ron;', header)
         self.assertNotIn('validate/validate.pb.h', header)
         self.assertNotIn('nanopb/nanopb.pb.h', header)
         self.assertNotIn('validate_RepeatedRules', header)

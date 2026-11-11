@@ -387,17 +387,33 @@ class ProtocolFilterEmitter(object):
         yield '#ifndef %s\n#define %s\n\n' % (guard, guard)
         yield c_layout.lib_include('pb.h') + '\n'
         yield '#ifdef __cplusplus\nextern "C" {\n#endif\n\n'
+        what = (' * The packet is a google.protobuf.Any; its type_url selects one of the\n'
+                ' * %d messages of the protocol, which is decoded and validated. Every Any\n'
+                ' * inside it is resolved the same way, up to PB_VALIDATE_FILTER_MAX_ANY_DEPTH\n'
+                ' * levels. Unknown type_urls are rejected, and every drop is logged through\n'
+                ' * PB_VALIDATE_FILTER_DROP.\n' % len(self.messages))
         yield '/**\n'
-        yield ' * @brief Decode and validate one %s packet.\n' % self.name
+        yield ' * @brief Decode and validate one %s UDP datagram.\n' % self.name
         yield ' *\n'
-        yield ' * The packet is a google.protobuf.Any; its type_url selects one of the\n'
-        yield ' * %d messages of the protocol, which is decoded and validated. Every Any\n' % len(self.messages)
-        yield ' * inside it is resolved the same way, up to PB_VALIDATE_FILTER_MAX_ANY_DEPTH\n'
-        yield ' * levels. Unknown type_urls are rejected.\n'
+        yield what
         yield ' *\n'
-        yield ' * @return 0 to allow the packet, -1 to reject it.\n'
+        yield ' * @param ctx           Optional user context (unused; reserved).\n'
+        yield ' * @param packet        Pointer to the received datagram.\n'
+        yield ' * @param packet_size   Length of the datagram in bytes.\n'
+        yield ' * @return 0 to allow the packet, -1 to drop it.\n'
         yield ' */\n'
-        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size);\n' % self.public_name
+        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size);\n\n' % self.public_name
+        yield '/**\n'
+        yield ' * @brief Decode and validate one %s message received over TCP.\n' % self.name
+        yield ' *\n'
+        yield what
+        yield ' *\n'
+        yield ' * @param ctx           Optional user context (unused; reserved).\n'
+        yield ' * @param packet        Pointer to one complete framed message.\n'
+        yield ' * @param packet_size   Length of the message in bytes.\n'
+        yield ' * @param is_to_server  True if the direction is client -> server.\n'
+        yield ' * @return 0 to allow the message, -1 to drop it.\n'
+        yield ' */\n'
         yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n\n' % self.public_name
         yield '#ifdef __cplusplus\n} /* extern "C" */\n#endif\n\n'
         yield '#endif /* %s */\n' % guard

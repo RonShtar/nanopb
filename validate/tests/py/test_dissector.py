@@ -684,7 +684,10 @@ class StudioTests(LuaTestCase):
         window.buttons['Show dropped only']()
         self.assertEqual(calls[len(calls)], 'apply')  # Lua tables are 1-based
         self.assertEqual(calls[len(calls) - 1], 'filter|nanopb.validation == "dropped"')
+        window.buttons['Show passed only']()
+        self.assertEqual(calls[len(calls) - 1], 'filter|nanopb.validation == "passed"')
         self.assertIsNotNone(window.buttons['Open output folder'])
+        self.assertIsNotNone(window.buttons['Open packets folder'])
         # Every packet is an Any on its protocol's port, mapped like a Decode As;
         # no per-message port is picked, so the saved port map stays empty.
         with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
@@ -694,10 +697,14 @@ class StudioTests(LuaTestCase):
         self.assertIn('packets', window.text)
         self.assertIn('Decode As', window.text)
 
-        # Same protos again: nothing to reload.
+        # Same protos again: nothing to reload. The window stays in front with its
+        # buttons (opening the capture by itself would hide it); Open capture opens it.
         picker = self.picker('nanopb/Generate test packets (passed + dropped)...', title)
         before = len(calls)
         picker.buttons['Generate']()
+        self.assertEqual(len(calls), before)
+        window = self.last_window()
+        window.buttons['Open capture']()
         self.assertEqual([calls[i] for i in range(before + 1, len(calls) + 1)], ['open|%s|' % pcap])
 
     def test_many_units_are_chosen_by_number(self):
