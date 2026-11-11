@@ -22,7 +22,7 @@ The runtime intentionally uses stream abstractions instead of depending only on 
 ## Generator pieces
 
 - `<repo_root>/generator/nanopb_generator.py` is the main entrypoint and owns parsing, IR construction, naming, and C emission.
-- `<repo_root>/validate/nanopb_validate/validator.py` is a dependency-free library that parses `(validate.*)` options into an IR and emits the C body of `pb_validate_<Message>()` functions from it; it has no protoc plugin entrypoint of its own.
+- `<repo_root>/validate/nanopb_validate/` (`rule_model.py`, `emitters.py`, `validator.py`) is a dependency-free library that parses `(validate.*)` options into an IR and emits the C body of `pb_validate_<Message>()` functions from it; it has no protoc plugin entrypoint of its own.
 - `<repo_root>/validate/nanopb_validate/filters.py` is the actual `protoc-gen-nanopb-validate` plugin entrypoint. It drives `nanopb_validator.py` to emit `*_validate.h`/`*_validate.c`, and separately owns the packet-filter feature (`pkg_Msg_filter_udp`/`filter_tcp`, spliced into nanopb's own `.pb.h`/`.pb.c` via `--protoc-insertion-points`).
 - `<repo_root>/generator/proto/` contains generator-owned schema files used by the plugin itself.
 - `<repo_root>/generator/protoc-gen-nanopb` and related wrappers expose the generator as a `protoc` plugin.
@@ -43,7 +43,7 @@ If you change any one of those layers, verify the others still agree.
 
 A `.proto` option with no C-runtime enforcement (e.g. `string.pattern`, which
 would need a regex engine) is a generation-time error, not a silently-ignored
-no-op: `validator.ValidationRuleNotImplementedError`, raised either
+no-op: `rule_model.ValidationRuleNotImplementedError`, raised either
 while parsing an unsupported option or from `RuleEmitterRegistry.emit()`'s
 fallback when no emitter is registered for a rule type, is caught in
 `filters.main_plugin()` and reported as a normal protoc

@@ -177,7 +177,7 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None):
         return '\n/* ---- %s ---- */\n%s' % (name, body)
 
     def write(name, text):
-        from validator import tidy_c
+        from c_layout import tidy_c
         with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
             handle.write(tidy_c(text))
 

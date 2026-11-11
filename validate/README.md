@@ -102,7 +102,10 @@ validate/
     gen.py             merged C per protocol, PB_FIELD_32BIT hints
     traffic.py         sample messages, captures (pcap/pcapng), C arrays
     wireshark.py       dissector schema, install / load / refresh
-    validator.py       validate.proto rules -> C validators
+    rule_model.py      validate.proto rules -> validation model (per field / message)
+    emitters.py        C code per rule type
+    validator.py       writes <name>_validate.c/.h from the model
+    c_layout.py        generated-C layout (C89 blocks) and #include format
     filters.py         protoc plugin: validators + packet filters
     datagen.py         valid / invalid sample messages
     env.py             paths; uses nanopb's generator read-only

@@ -82,7 +82,7 @@ def field_rule_entries(field, rules_option=None):
     them on the fields of the map's *Entry message.
     """
 
-    import validator as nanopb_validator
+    import rule_model
 
     if rules_option is None:
         rules_option = field_rules(field)
@@ -98,9 +98,9 @@ def field_rule_entries(field, rules_option=None):
                 if name in sub.DESCRIPTOR.fields_by_name and sub.HasField(name):
                     entries.append({'id': '%s.%s' % (kind, name), 'kind': 'UNSUPPORTED'})
                     sub.ClearField(name)
-    rules = nanopb_validator.FieldValidator(field, option).rules
+    rules = rule_model.FieldValidator(field, option).rules
     return [rule_entry(r.constraint_id, r.rule_type, r.params, field.type) for r in rules
-            if r.rule_type != nanopb_validator.RULE_MAP_ENTRIES] + entries
+            if r.rule_type != rule_model.RULE_MAP_ENTRIES] + entries
 
 
 def add_map_entry_rules(msg, messages):
