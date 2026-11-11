@@ -507,7 +507,7 @@ def cmd_gen_packets(args):
         json.dump(manifest, handle, indent=1)
     lines = ['%d packets: %d expected PASSED, %d expected DROPPED' % (len(entries), passed, dropped),
              'Capture: ' + capture,
-             'Each packet as C array (.h) and hex stream (.hex): ' + ', '.join(sorted(packet_files)),
+             'C arrays (packets/c_arrays/) and hex streams (packets/raw_data/): ' + ', '.join(sorted(packet_files)),
              'Ports:'] + ['  ' + p for p in ports]
     lines += ['', 'frame  expect   message  [violated field / rule]']
     for e in entries:
