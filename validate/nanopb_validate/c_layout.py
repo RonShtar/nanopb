@@ -15,6 +15,14 @@ _NOT_DECL = ('return ', 'else ', 'goto ', 'case ', 'break;', 'continue;')
 LIBRARY_INCLUDE_FORMAT = '#include <%s>'
 
 
+#: The pb_validate.h version the generated code needs (PB_VALIDATE_RUNTIME_VERSION).
+RUNTIME_VERSION = 2
+RUNTIME_CHECK = ('#if !defined(PB_VALIDATE_RUNTIME_VERSION) || PB_VALIDATE_RUNTIME_VERSION < %d\n'
+                 '#error "pb_validate.h is older than this generated code: use pb_validate.h and pb_validate.c '
+                 'from the validate/runtime/ of the same nanopb checkout"\n'
+                 '#endif\n' % RUNTIME_VERSION)
+
+
 def lib_include(header: str) -> str:
     """An #include line for a runtime header, in nanopb's include format."""
 

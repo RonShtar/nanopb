@@ -54,7 +54,7 @@ The generator produces C code that uses macros from pb_validate.h to:
 import re
 from collections import OrderedDict
 from typing import Any, List, Optional
-from c_layout import (c_block, lib_include)  # noqa: E402
+from c_layout import (RUNTIME_CHECK, c_block, lib_include)  # noqa: E402
 from rule_model import (FieldContext, FieldValidator, IRBuilder, MessageValidator, RULE_ASCII, RULE_CONTAINS,  # noqa: E402
                         RULE_EMAIL, RULE_ENUM_DEFINED, RULE_EQ, RULE_GT, RULE_GTE, RULE_HOSTNAME, RULE_IN,
                         RULE_IP, RULE_IPV4, RULE_IPV6, RULE_ITEMS, RULE_LT, RULE_LTE, RULE_MAP_ENTRIES,
@@ -415,6 +415,7 @@ class ValidatorGenerator:
         yield '#define %s\n' % guard
         yield '\n'
         yield lib_include('pb_validate.h')
+        yield RUNTIME_CHECK
         yield '#include "%s.pb.h"\n' % base_name
         
         # Include validation headers for imported proto files

@@ -92,3 +92,23 @@ def f_fixed64(number, fmt, value):
 
 def any_of(type_name, payload):
     return f_bytes(1, 'type.googleapis.com/' + type_name) + f_bytes(2, payload)
+
+
+def unit_build(unit_dir):
+    """(-I flags, extra .c files) to compile one generated unit folder.
+
+    A gen run with several protocols puts what they share (types, and with
+    --with-runtime the nanopb runtime) once in a common/ folder next to them;
+    the unit needs its headers on the include path and its sources linked.
+    """
+
+    flags, sources = ['-I', unit_dir], []
+    common = os.path.join(os.path.dirname(os.path.abspath(unit_dir)), 'common')
+    if os.path.isdir(common) and os.path.abspath(common) != os.path.abspath(unit_dir):
+        flags += ['-I', common]
+        sources += [os.path.join(common, f) for f in sorted(os.listdir(common)) if f.endswith('.c')]
+        for sub in sorted(os.listdir(common)):
+            sub_dir = os.path.join(common, sub)
+            if os.path.isdir(sub_dir):
+                sources += [os.path.join(sub_dir, f) for f in sorted(os.listdir(sub_dir)) if f.endswith('.c')]
+    return flags, sources

@@ -37,7 +37,7 @@ works the same.
 | Command | What it does |
 |---|---|
 | `check PROTOS_DIR` | Compiles every protocol and reports errors (syntax, imports, rules the generator cannot honour) and warnings (fields without `max_size`/`max_count`, messages needing `PB_FIELD_32BIT`, filters that cannot be built). Exit 1 on errors. |
-| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (`{unit}` = protocol folder); `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). |
+| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (`{unit}` = protocol folder); `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). With several protocols, what they share (e.g. `google/protobuf/any.proto`, a common import) is written once to `<out>/common/` (`common.pb.c/.h`, `common_validate.c/.h`, and the runtime with `--with-runtime`), so all protocols link into one program. |
 | `gen FILE.proto ...` | Per file, like nanopb: `<f>.pb.c/.h` and `<f>_validate.c/.h`. `--filter pkg.Msg` adds a filter; `--nanopb-opt` passes nanopb options to both generators. |
 | `packets PROTOS_DIR --out DIR` | A capture of PASSED and DROPPED packets of every message, plus each packet as a C array and hex; installs the dissector schema. |
 | `wireshark install` | Installs the Lua plugins and a private copy of this tool into Wireshark (once). |
@@ -62,8 +62,14 @@ if (fleet_filter_udp(NULL, data, size) != 0)
     return;                     /* dropped; one log line says why */
 ```
 
-- Every drop calls `PB_VALIDATE_FILTER_DROP(filter, reason)` in every build;
-  `PB_VALIDATE_DEBUG` builds also log each violated rule.
+- Every drop calls `PB_VALIDATE_FILTER_DROP(filter, reason)` in every build; it hands
+  `PB_VALIDATE_FILTER_LOG` one ready-made string, so a one-argument logger works too
+  (`#define PB_VALIDATE_FILTER_LOG(line) my_log(line)`). `PB_VALIDATE_DEBUG` builds also
+  log each violated rule through `PB_VALIDATE_FILTER_RULE(reason, path, rule_id, message)`.
+- Several protocols in one program: generate them in one `gen` run, add `-I <out>/common`
+  and compile `<out>/common/*.c` once; shared types are never duplicated.
+- Use `pb_validate.c/.h` from the same checkout as the generator: generated code stops with
+  `#error "pb_validate.h is older than this generated code"` otherwise.
 - One filter per protocol: `<protocol>_filter_udp/_tcp` accepts any message of the
   protocol (by its `Any` type_url); a protocol without `Any` gets one filter for its
   root message, `<pkg>_<Msg>_filter_udp/_tcp`.

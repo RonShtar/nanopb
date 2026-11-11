@@ -89,8 +89,9 @@ Validation (`pb_validate.h`):
 | `PB_VALIDATE_MAX_PATH_LENGTH` | 128 | Bytes for one violation's field path. Set it to your longest dotted path + 1. |
 | `PB_VALIDATE_MAX_PATH_DEPTH` | 16 | Path segments tracked while validating with a buffer. Set it to your deepest nesting (fields + array indexes; a map with `keys`/`values` rules needs 3: `counts`, `[i]`, `key`). |
 | `PB_VALIDATE_FILTER_STATIC_BUFFERS` | off | Filters decode into `static` structs instead of the stack. Saves the size of the entrypoint (and `Any` payload) struct per call, but the filter is then not reentrant: do not call the same filter from two threads or from an interrupt. |
-| `PB_VALIDATE_FILTER_LOG(fmt, ...)` | no-op | Filter logging hook (printf-style). Receives one line per dropped packet in every build, plus every violated rule with `PB_VALIDATE_DEBUG`. |
-| `PB_VALIDATE_FILTER_DROP(filter, reason)` | one line via `PB_VALIDATE_FILTER_LOG` | Called once per dropped packet, on the reject path only; accepted packets never pay for it. |
+| `PB_VALIDATE_FILTER_LOG(fmt, ...)` | no-op | Filter logging hook (printf-style or one string). Receives one line per dropped packet in every build, plus every violated rule with `PB_VALIDATE_DEBUG`. |
+| `PB_VALIDATE_FILTER_RULE(reason, path, id, message)` | printf-style via `PB_VALIDATE_FILTER_LOG` | `PB_VALIDATE_DEBUG` only: one call per violated rule after the drop line. |
+| `PB_VALIDATE_FILTER_DROP(filter, reason)` | one string via `PB_VALIDATE_FILTER_LOG` | Called once per dropped packet, on the reject path only; accepted packets never pay for it. |
 | `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` | 4 | Protocol filters (`--protocol-filter`): levels of `Any` resolved inside each other. Each level keeps one decoded payload struct on the stack; `PB_VALIDATE_FILTER_STATIC_BUFFERS` only moves the outermost `Any` to static storage. |
 
 nanopb (`pb.h`, see [reference](reference.md#compilation-options)):

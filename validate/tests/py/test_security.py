@@ -23,7 +23,7 @@ import sys
 import tempfile
 import unittest
 
-from helpers import FIXTURES, STRESS_PROTOS, run_backend
+from helpers import FIXTURES, STRESS_PROTOS, run_backend, unit_build
 from test_backend import find_cc
 
 
@@ -253,9 +253,10 @@ class FilterSecurityTests(unittest.TestCase):
                     'rounds': FUZZ_ROUNDS,
                 })
             exe = os.path.join(unit_dir, 'security_harness.exe')
-            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+            include, shared = unit_build(unit_dir)
+            sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')] + shared
             flags = ['-std=c99', '-O1', '-g', '-fsanitize=undefined', '-fsanitize-trap=undefined',
-                     '-fno-sanitize=function', '-I', unit_dir]
+                     '-fno-sanitize=function'] + include
             build = subprocess.run(self.cc + flags + ['-o', exe] + sources, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, universal_newlines=True)
             self.assertEqual(build.returncode, 0, build.stdout[-3000:])

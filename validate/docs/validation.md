@@ -36,6 +36,14 @@ writes one merged `<protocol>.pb.c/.h` and `<protocol>_validate.c/.h` per
 protocol (see the [README](../README.md)). Compile with `-I validate/runtime`
 and link `validate/runtime/pb_validate.c`.
 
+Protocols generated in the same run share their common imports
+(`google/protobuf/*.proto` and any `.proto` two protocols import, when its
+generated code is identical): those go once to `<out>/common/common.pb.c/.h`
+and `common_validate.c/.h`, which the protocols' headers include. Add
+`-I <out>/common` and compile `common/*.c` once; every protocol then links into
+the same program. With `--with-runtime` the runtime is copied there once, too.
+A run with a single protocol keeps everything in its own folder.
+
 ### With protoc directly
 
 `gen` runs protoc with two plugins: nanopb's, then
@@ -399,16 +407,25 @@ if (NAME_filter_udp(NULL, packet, packet_size) != 0) {
 Every dropped packet, in every build, goes through
 `PB_VALIDATE_FILTER_DROP(filter_name, reason)` just before the filter returns
 `-1`; both arguments are string literals, and accepted packets never reach it.
-By default it writes `"<filter>: drop: <reason>\n"` through
-`PB_VALIDATE_FILTER_LOG(fmt, ...)`, which is a no-op until you define it:
+By default it passes one string, `"<filter>: drop: <reason>\n"` (joined at
+compile time), to `PB_VALIDATE_FILTER_LOG`, which is a no-op until you define it.
+Both a printf-style and a one-argument logger work:
 
 ```c
-#define PB_VALIDATE_FILTER_LOG(...) printf(__VA_ARGS__)   /* or your logger */
+#define PB_VALIDATE_FILTER_LOG(...) printf(__VA_ARGS__)   /* printf-style */
+#define PB_VALIDATE_FILTER_LOG(line) my_log(line)         /* or one string */
 ```
 
 Define `PB_VALIDATE_FILTER_DROP` yourself to count drops or use another format.
-With `PB_VALIDATE_DEBUG`, the filter also logs each violated rule (field path,
-rule id, message) after the drop line.
+With `PB_VALIDATE_DEBUG`, the filter also logs each violated rule after the drop
+line through `PB_VALIDATE_FILTER_RULE(reason, field_path, rule_id, message)`; its
+default formats printf-style through `PB_VALIDATE_FILTER_LOG`, so with a
+one-argument logger define it as well, e.g.
+`#define PB_VALIDATE_FILTER_RULE(reason, path, id, msg) my_log(path)`.
+
+The runtime defines `PB_VALIDATE_RUNTIME_VERSION`; generated code stops with an
+`#error` when `pb_validate.h` is older than the generator (copy `pb_validate.c/.h`
+from the same checkout).
 
 #### Protocol filter
 

@@ -7,6 +7,11 @@
 #ifndef PB_VALIDATE_H_INCLUDED
 #define PB_VALIDATE_H_INCLUDED
 
+/* Version of this runtime. Generated code checks it and stops with an #error
+ * when it is older than the generator that wrote it (copy pb_validate.h and
+ * pb_validate.c from the same validate/runtime/ as the generator). */
+#define PB_VALIDATE_RUNTIME_VERSION 2
+
 #include "pb.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -970,13 +975,26 @@ extern "C"
     /* Called once for every dropped packet, in every build, with the
      * filter's name and why it dropped the packet (both string literals),
      * just before the filter returns -1. Accepted packets never reach it.
-     * By default it writes one line through PB_VALIDATE_FILTER_LOG; define
-     * it yourself to count drops or log them in another format. Debug builds
-     * (PB_VALIDATE_DEBUG) also log every violated rule after it.
+     * By default it passes ONE string, "<filter>: drop: <reason>\n", built at
+     * compile time, to PB_VALIDATE_FILTER_LOG, so a printf-style logger and a
+     * one-argument logger (#define PB_VALIDATE_FILTER_LOG(msg) my_log(msg))
+     * both work. Define it yourself to count drops or use another format.
+     * Debug builds (PB_VALIDATE_DEBUG) also log every violated rule after it.
      */
     #ifndef PB_VALIDATE_FILTER_DROP
     #define PB_VALIDATE_FILTER_DROP(filter_name, reason) \
-        PB_VALIDATE_FILTER_LOG("%s: drop: %s\n", (filter_name), (reason))
+        PB_VALIDATE_FILTER_LOG(filter_name ": drop: " reason "\n")
+    #endif
+
+    /* Debug builds (PB_VALIDATE_DEBUG) only: called after the drop line for
+     * every violated rule, with the drop reason (string literal) and the rule's
+     * field path, rule id and message (strings at run time). The default formats
+     * them printf-style through PB_VALIDATE_FILTER_LOG; with a one-argument
+     * logger, define this too (or leave PB_VALIDATE_DEBUG off).
+     */
+    #ifndef PB_VALIDATE_FILTER_RULE
+    #define PB_VALIDATE_FILTER_RULE(reason, field_path, rule_id, message) \
+        PB_VALIDATE_FILTER_LOG(reason ": %s %s: %s\n", (field_path), (rule_id), (message))
     #endif
 
     /* Rule types for internal use */

@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from helpers import (FIXTURES, STRESS_PROTOS, TOOL_DIR, WIRESHARK_INCLUDE, f_bytes, f_varint, option_proto,
+                     unit_build,
                      run_backend)
 
 RULES_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules')
@@ -716,13 +717,14 @@ class BackendTests(unittest.TestCase):
         """Declarations open their block (C89 style), preprocessor lines start in
         column 0, no reserved __ names, no trailing spaces or blank-line runs."""
 
-        out = os.path.join(self.tmp, 'out')
-        for root in (RULES_PROTOS, STRESS_PROTOS):
+        cc = find_cc()
+        unit_dirs = []
+        for index, root in enumerate((RULES_PROTOS, STRESS_PROTOS)):
+            out = os.path.join(self.tmp, 'out%d' % index)
             status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
             self.assertEqual(status, 0, err)
-        cc = find_cc()
-        for unit in sorted(os.listdir(out)):
-            unit_dir = os.path.join(out, unit)
+            unit_dirs += [os.path.join(out, unit) for unit in sorted(os.listdir(out))]
+        for unit_dir in unit_dirs:
             generated = [f for f in os.listdir(unit_dir) if not f.startswith('pb')]
             for name in generated:
                 with open(os.path.join(unit_dir, name)) as handle:
@@ -735,8 +737,113 @@ class BackendTests(unittest.TestCase):
                                   '%s: declaration in a for header' % name)
             if cc:
                 sources = [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+                include, _ = unit_build(unit_dir)
                 self.compile_each(cc, ['-std=c99', '-Wall', '-Wextra', '-Wdeclaration-after-statement',
-                                       '-Werror', '-I', unit_dir], sources)
+                                       '-Werror'] + include, sources)
+
+    def test_protocols_sharing_imports_link_into_one_program(self):
+        """Two protocols importing google/protobuf/timestamp.proto and the same local
+        .proto: the shared types and the runtime go once into common/, and every
+        protocol links into one program without duplicate symbols."""
+
+        root = os.path.join(self.tmp, 'protos')
+        unit = ('syntax = "proto3";\npackage %(p)s;\nimport "google/protobuf/timestamp.proto";\n'
+                'import "shared.proto";\nmessage %(m)s { google.protobuf.Timestamp at = 1; '
+                'shared.Point where = 2; uint32 id = 3; }\n')
+        self.write_tree(root, {
+            'shared.proto': 'syntax = "proto3";\npackage shared;\nmessage Point { int32 x = 1; int32 y = 2; }\n',
+            'alpha/alpha.proto': unit % {'p': 'alpha', 'm': 'A'},
+            'beta/beta.proto': unit % {'p': 'beta', 'm': 'B'},
+        })
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
+        self.assertEqual(status, 0, err)
+        self.assertEqual(sorted(result['common']['shared']), ['google/protobuf/timestamp.proto', 'shared.proto'])
+        self.assertEqual(sorted(os.listdir(out)), ['alpha', 'beta', 'common'])
+        for name in ('alpha', 'beta'):
+            files = sorted(os.listdir(os.path.join(out, name)))
+            self.assertEqual(files, [name + '.pb.c', name + '.pb.h', name + '_validate.c', name + '_validate.h'])
+            with open(os.path.join(out, name, name + '.pb.h')) as handle:
+                text = handle.read()
+            self.assertIn('#include "common.pb.h"', text)
+            self.assertNotIn('google_protobuf_Timestamp_msg', text.split('#include "common.pb.h"')[1].split('extern')[0])
+        with open(os.path.join(out, 'common', 'common.pb.c')) as handle:
+            self.assertIn('PB_BIND(google_protobuf_Timestamp', handle.read())
+        cc = find_cc()
+        if not cc:
+            return
+        main = os.path.join(self.tmp, 'main.c')
+        with open(main, 'w') as handle:
+            handle.write('#include "alpha_validate.h"\n#include "beta_validate.h"\n#include <stdio.h>\n'
+                         'int main(void) {\n    alpha_A a = alpha_A_init_zero;\n    beta_B b = beta_B_init_zero;\n'
+                         '    printf("%d %d\\n", (int)(alpha_A_msg.field_count + beta_B_msg.field_count),'
+                         ' (int)(google_protobuf_Timestamp_msg.field_count + a.id + b.id));\n'
+                         '    return 0;\n}\n')
+        sources = [main]
+        include = []
+        for name in ('alpha', 'beta'):
+            unit_dir = os.path.join(out, name)
+            flags, common = unit_build(unit_dir)
+            include += flags
+            sources += [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
+        sources += common
+        objects = []
+        for index, source in enumerate(sources):
+            obj = os.path.join(self.tmp, 'o%d.o' % index)
+            build = subprocess.run(cc + ['-std=c99', '-Wall', '-Werror'] + include + ['-c', source, '-o', obj],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+            self.assertEqual(build.returncode, 0, source + ': ' + build.stdout[-3000:])
+            objects.append(obj)
+        exe = os.path.join(self.tmp, 'all.exe')
+        link = subprocess.run(cc + objects + ['-o', exe], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True)
+        self.assertEqual(link.returncode, 0, link.stdout[-3000:])
+        run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(run.returncode, 0)
+        self.assertEqual(run.stdout.split(), ['6', '2'])
+
+    def test_one_argument_drop_logger(self):
+        """PB_VALIDATE_FILTER_DROP hands PB_VALIDATE_FILTER_LOG one ready-made string,
+        so a logger without printf arguments compiles; an older pb_validate.h is an #error."""
+
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
+                                          '--unit', 'envelope')
+        self.assertEqual(status, 0, err)
+        unit_dir = os.path.join(out, 'envelope')
+        with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
+            self.assertEqual(handle.read().count('PB_VALIDATE_RUNTIME_VERSION <'), 1)
+        cc = find_cc()
+        if not cc:
+            return
+        logger = os.path.join(self.tmp, 'logger.h')
+        with open(logger, 'w') as handle:
+            handle.write('void my_log(const char *line);\n#define PB_VALIDATE_FILTER_LOG(line) my_log(line)\n')
+        self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-include', logger, '-I', unit_dir],
+                          [os.path.join(unit_dir, 'envelope.pb.c')])
+        # Debug builds also log each violated rule (root-message filters of protocols without Any).
+        root = os.path.join(self.tmp, 'plain_protos')
+        self.write_tree(root, {'plain/plain.proto': 'syntax = "proto3";\npackage plain;\nimport "validate.proto";\n'
+                               'message Reading { uint32 level = 1 [(validate.rules).uint32 = {lte: 10}]; }\n'})
+        plain_out = os.path.join(self.tmp, 'plain_out')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', plain_out, '--with-runtime')
+        self.assertEqual(status, 0, err)
+        plain_dir = os.path.join(plain_out, 'plain')
+        with open(os.path.join(plain_dir, 'plain.pb.c')) as handle:
+            self.assertIn('PB_VALIDATE_FILTER_RULE(', handle.read())
+        with open(logger, 'a') as handle:
+            handle.write('#define PB_VALIDATE_FILTER_RULE(reason, path, rule, message) my_log(path)\n')
+        self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-DPB_VALIDATE_DEBUG', '-include', logger,
+                               '-I', plain_dir], [os.path.join(plain_dir, 'plain.pb.c')])
+        with open(os.path.join(unit_dir, 'pb_validate.h')) as handle:
+            old = handle.read().replace('#define PB_VALIDATE_RUNTIME_VERSION 2', '#define PB_VALIDATE_RUNTIME_VERSION 1')
+        with open(os.path.join(unit_dir, 'pb_validate.h'), 'w') as handle:
+            handle.write(old)
+        build = subprocess.run(cc + ['-std=c99', '-I', unit_dir, '-c', os.path.join(unit_dir, 'envelope_validate.c'),
+                                     '-o', os.path.join(self.tmp, 'old.o')],
+                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertNotEqual(build.returncode, 0)
+        self.assertIn('pb_validate.h is older than this generated code', build.stdout)
 
     def test_filter_name_and_drop_logs(self):
         out = os.path.join(self.tmp, 'out')

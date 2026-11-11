@@ -495,6 +495,8 @@ local function gen_c()
                 "<unit>.pb.c/.h: all messages, PB_BINDs and the packet filters (_udp/_tcp).\n" ..
                 "<unit>_validate.c/.h: all pb_validate_* validators.\n" ..
                 "Add all four to your project, next to the nanopb runtime.\n" ..
+                "Several protocols: their shared types (google/protobuf/*, common imports) are\n" ..
+                "in common/ once; add -I <output>/common and compile common/*.c once.\n" ..
                 "The -D values are optional: they shrink the validation buffers to what this\n" ..
                 "schema needs (docs/validation_performance.md)."
         end)

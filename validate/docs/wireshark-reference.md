@@ -96,6 +96,7 @@ the includes between them removed:
 |------|----------|
 | `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the protocol filter `<unit>_filter_udp` / `_tcp`, the per-message packet filters `<Msg>_filter_udp` / `_tcp`, and their core |
 | `<unit>_validate.h` / `<unit>_validate.c` | every validator `pb_validate_<msg>()` (all `_validate.h`/`_validate.c` from the validate plugin, see `docs/validation.md`) |
+| `common/common.pb.*`, `common/common_validate.*` | when several units are generated together: the types they share (e.g. `google/protobuf/any.proto`), once; the units include them. Add `-I <output>/common` and compile `common/*.c` once |
 
 `<unit>_validate.h` includes `<unit>.pb.h`; `<unit>.pb.c` includes
 `<unit>_validate.h` because the filters call the validators. Without

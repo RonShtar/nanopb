@@ -112,7 +112,7 @@ class FilterEmitter(object):
             yield '%s{\n' % indent
             yield '%s    pb_size_t pbv_vi;\n' % indent
             yield '%s    for (pbv_vi = 0; pbv_vi < violations->count; pbv_vi++) {\n' % indent
-            yield ('%s        PB_VALIDATE_FILTER_LOG("%s: %%s %%s: %%s\\n", '
+            yield ('%s        PB_VALIDATE_FILTER_RULE("%s", '
                    'violations->violations[pbv_vi].field_path, '
                    'violations->violations[pbv_vi].constraint_id, '
                    'violations->violations[pbv_vi].message);\n') % (indent, reason)
