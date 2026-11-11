@@ -45,7 +45,7 @@ class ValidationRuleNotImplementedError(Exception):
     """Raised when a declared (validate.*) option has no C-runtime enforcement
     yet. Generation fails with this rather than silently emitting no check --
     see the "fail loudly" categories in docs/validation.md. The protoc plugin
-    (nanopb_validate_generator.py) catches this and turns it into a
+    (filters.py) catches this and turns it into a
     GeneratorError, which protoc reports as a plain generation failure."""
 
 

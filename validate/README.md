@@ -106,7 +106,8 @@ validate/
     emitters.py        C code per rule type
     validator.py       writes <name>_validate.c/.h from the model
     c_layout.py        generated-C layout (C89 blocks) and #include format
-    filters.py         protoc plugin: validators + packet filters
+    filters.py         protoc plugin entry: validators + packet filters
+    filter_*.py        filter model, options, analyzer (dispatch), C emission
     datagen.py         DataGenerator: valid / invalid sample messages (+ CLI)
     schema.py          descriptors, .options limits, field/message info for datagen
     values.py, containers.py, violations.py, encoding.py   DataGenerator parts
