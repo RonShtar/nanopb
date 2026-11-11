@@ -130,7 +130,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 env.setup()
 
-import nanopb_generator as nanopb  # noqa: E402
+import nanopb_api as nanopb  # noqa: E402  (everything used from nanopb is listed there)
 import validate_pb2  # noqa: E402
 import c_layout  # noqa: E402
 import rule_model  # noqa: E402
@@ -323,7 +323,7 @@ def process_file(filename, fdesc, options, filter_options, index,
     #    namespaced by its entrypoint, so several filters share a file safely.
     if filter_options.filter_name and not filter_options.protocol_filter:
         for spec in specs:
-            spec.public_name = filter_options.filter_name
+            spec.public_name = filter_options.filter_name + '_filter'
     for spec in specs:
         emitter = FilterEmitter(spec)
         outputs.append((headername, 'eof', ''.join(emitter.header_lines())))

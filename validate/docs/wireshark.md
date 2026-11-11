@@ -92,13 +92,12 @@ About Wireshark > Folders): `%APPDATA%\Wireshark\plugins` on Windows,
 | `nanopb/project/` | a private copy of the generator, the runtime and the backend, so the plugins never depend on where this checkout is |
 | `nanopb/studio_config.luadata` | the Python to use, and your last directories and port map |
 
-**Why Load protos exists.** Wireshark's Lua cannot read `.proto` files, so
+**Loading is automatic.** Wireshark's Lua cannot read `.proto` files, so
 the dissector reads a precompiled `nanopb/schema.luadata` that the Python
-backend builds from your protos. When Wireshark starts, the dissector checks
-whether any `.proto` or `.options` file changed since then and rebuilds the
-schema if so (it takes no time when nothing changed). **Load protos directory
-into Wireshark** does the same on demand, without restarting; it is only
-needed to use edited protos in the running Wireshark.
+backend builds from your protos. It is rebuilt when Wireshark starts (if any
+`.proto` or `.options` file changed; no time when nothing changed), after
+**Set protos directory**, and after **Generate test packets**. There is no
+separate load step.
 
 **To set up everything in one step**, also give the directory that has one
 subfolder per protocol:
@@ -127,8 +126,8 @@ checkout directly instead of a copy.
 Restart Wireshark, or press **Ctrl+Shift+L** (Analyze > Reload Lua Plugins).
 To check that it worked:
 
-- **Tools > nanopb** shows five items: Set protos directory, Generate C, Generate test packets,
-  Load protos directory into Wireshark, and About;
+- **Tools > nanopb** shows four items: Set protos directory, Generate C, Generate test packets
+  and About; the filter toolbar has **nanopb Passed**, **nanopb Dropped** and **nanopb Warnings**;
 - **Tools > nanopb > About** shows the plugins folder, the Python and the
   project copy;
 - Help > About Wireshark > Plugins lists both `.lua` files with no error.
@@ -148,8 +147,8 @@ every step before switching to your own protos.
 
 ### Step 1: load your protocols into Wireshark
 
-1. **Tools > nanopb > Load protos directory into Wireshark**.
-2. Enter the protos directory. That's the only question.
+1. **Tools > nanopb > Set protos directory (once)**.
+2. Enter the protos directory (the other fields are optional).
 3. The result window lists the protocols it loaded, for example `FLEET` and
    `SHARED`, and Lua plugins reload by themselves.
 
@@ -224,10 +223,10 @@ The output directory contains:
 | `nanopb_test_packets.pcapng` | the capture; each packet's comment says `expect=PASSED/DROPPED msg=... field=... rule=...` |
 | `nanopb_test_packets.json` | the manifest: per frame, the message, port, expected verdict, broken rule and bytes |
 | `nanopb_test_packets.txt` | the same as a table, plus the rules that couldn't be generated |
-| `<protocol>/packets/packet_NNN_<Message>_<passed\|dropped>.h` | each packet as a C array, `static const uint8_t ..._data[]` plus `..._DATA_SIZE` |
-| `<protocol>/packets/packet_NNN_<Message>_<passed\|dropped>.hex` | the same bytes as a hex stream |
+| `<protocol>/packets/c_arrays/c_arrays_passed.txt`, `c_arrays_dropped.txt` | every packet of that verdict as a C array, `static const uint8_t packet_NNN_<Message>_<verdict>[]`, with the broken rule in a comment |
+| `<protocol>/packets/raw_data/<Message>_passed.txt`, `<Message>_dropped.txt` | one hex stream per line, for every message |
 
-The `.h` files are meant for firmware unit tests: feed each array to the
+The C arrays are meant for firmware unit tests: feed each array to the
 generated filter and expect `0` (passed) or `-1` (dropped).
 
 ### Step 4: generate the C code
@@ -283,11 +282,11 @@ Build switches such as `PB_VALIDATE_MAX_PATH_DEPTH` or
 build. For what each one costs, see [Validation performance](validation_performance.md);
 for the rules, see [Validation](validation.md).
 
-Generate C names each protocol filter `<protocol>_filter`, so its entry
-points are `<protocol>_filter_udp` / `_tcp`. To choose the name, pass
-`gen-c --filter-name <name>`: `{unit}` stands for the protocol folder, so
-`--filter-name net_{unit}` gives `net_fleet_udp`, `net_fleet_tcp` and
-`net_fleet_callbacks`. Dropped packets are logged in every build; see
+Generate C makes one filter per protocol: `<protocol>_filter_udp` / `_tcp`
+(a protocol without `Any` gets one for its root message instead). To choose
+the name, pass `gen --filter-name <name>`: `{unit}` stands for the protocol
+folder, so `--filter-name net_{unit}` gives `net_fleet_filter_udp` /
+`net_fleet_filter_tcp`. Dropped packets are logged in every build; see
 [Validation](validation.md#calling-a-filter-and-drop-logs).
 
 A message of 64 kB or more (large `max_size` / `max_count`), or a field tag
@@ -303,7 +302,7 @@ smaller `max_size` / `max_count` in the `.options` file.
 
 | I want to... | Do this |
 |--------------|---------|
-| add a protocol | add a folder with its `.proto` files, then restart Wireshark (or **Load protos directory into Wireshark** to load it now) |
+| add a protocol | add a folder with its `.proto` files, then restart Wireshark (or run **Set protos directory** again) |
 | change a message | edit the `.proto`; Wireshark picks it up at its next start. **Generate C** for the firmware |
 | decode a port as a protocol | Decode As > UDP/TCP port > `<PROTOCOL>` |
 | decode a port as one specific message | Edit > Preferences > Protocols > NANOPB > Port map, e.g. `udp:5000=fleet.envelope.Envelope` |
@@ -343,11 +342,11 @@ right away.
 |---------|---------------|
 | No Tools > nanopb menu | The files aren't in the *Personal Lua Plugins* folder, or Lua failed to load them; look at Help > About Wireshark > Plugins. |
 | "Backend did not run" | The Python in `nanopb/studio_config.luadata` is wrong, or is the Windows Store stub. Run `install-studio` again with the right Python. |
-| `google/protobuf/timestamp.proto does not exist` | This comes from Wireshark's own Edit > Preferences > Protocols > ProtoBuf > Protobuf search paths, which the nanopb tools don't use. Remove your entry there and use Tools > nanopb > Load protos directory. If you keep the entry, the file must be at `<search path>/google/protobuf/timestamp.proto`. |
+| `google/protobuf/timestamp.proto does not exist` | This comes from Wireshark's own Edit > Preferences > Protocols > ProtoBuf > Protobuf search paths, which the nanopb tools don't use. Remove your entry there and use Tools > nanopb > Set protos directory. If you keep the entry, the file must be at `<search path>/google/protobuf/timestamp.proto`. |
 | `Root message not in schema: some.Message` | Edit > Preferences > Protocols > NANOPB > Port map or Default message still names a message of protos you no longer load. Clear it there. The packet still decodes with your Protocol preference or as an Any. |
 | Two protocols define the same `package.Message` differently | Each protocol keeps its own definition when you choose it with Decode As or the Protocol preference. Plain NANOPB (auto-detected packets and the port map) uses the first one. Generate C keeps them in separate files, but linking two of them into one program clashes. |
 | `protoc failed` | Run the same backend subcommand in a terminal to see the whole error; check that `protobuf` and `grpcio-tools` are installed for that Python. |
-| My protocol isn't in Decode As | Restart Wireshark, or run **Load protos directory into Wireshark** and press Ctrl+Shift+L. The folder must contain at least one message of its own. |
+| My protocol isn't in Decode As | Restart Wireshark, or run **Set protos directory** again and press Ctrl+Shift+L. The folder must contain at least one message of its own. |
 | A packet has no Validation subtree | It wasn't decoded as nanopb: another dissector claimed it, or nothing maps its port. Use Decode As, the Protocol preference or the port map. |
 | A packet is claimed by another protocol (e.g. KNXnet/IP) | The heuristics of other dissectors run on unmapped ports. Map the port with Decode As. |
 | `pb_callback_t` in the generated header | A string, bytes or repeated field has no `max_size` / `max_count` in its `.options` file. |

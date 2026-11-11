@@ -602,8 +602,7 @@ class StudioTests(LuaTestCase):
         names = set(self.mock.menus.keys())
         self.assertEqual(names, {'nanopb/Set protos directory (once)...',
                                  'nanopb/Generate C (merged + validation)...',
-                                 'nanopb/Generate test packets (passed + dropped)...',
-                                 'nanopb/Load protos directory into Wireshark...', 'nanopb/About'})
+                                 'nanopb/Generate test packets (passed + dropped)...', 'nanopb/About'})
 
     def test_generate_c_through_backend(self):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
@@ -781,8 +780,8 @@ class StudioTests(LuaTestCase):
         with open(config_path, 'w') as handle:
             handle.write(text.replace(' }\n', ', port_map = "udp:5000=proto.messages.BaseMessage" }\n'))
         self.lua.execute('dofile("%s")' % lua_path(os.path.join(self.tmp, 'nanopb_studio.lua')))
-        self.answer('Load protos directory into Wireshark', FIXTURES)
-        self.mock.menus['nanopb/Load protos directory into Wireshark...']()
+        self.answer('Set protos directory', FIXTURES, self.out, '', '')
+        self.mock.menus['nanopb/Set protos directory (once)...']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
         self.assertIn('Removed from the port map', window.text)
@@ -790,9 +789,9 @@ class StudioTests(LuaTestCase):
             self.assertIn('port_map = ""', handle.read())
 
     def test_install_dissector_next_to_studio(self):
-        # Only the protos directory is asked; every folder is loaded as a protocol.
-        self.answer('Load protos directory into Wireshark', FIXTURES)
-        self.mock.menus['nanopb/Load protos directory into Wireshark...']()
+        # Setting the protos directory loads it: every folder becomes a protocol.
+        self.answer('Set protos directory', FIXTURES, self.out, '', '')
+        self.mock.menus['nanopb/Set protos directory (once)...']()
         window = self.last_window()
         self.assertTrue(window.text.startswith('OK'), window.text)
         self.assertIn('Ctrl+Shift+L', window.text)

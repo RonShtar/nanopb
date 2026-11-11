@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # If additional dependencies are needed, they MUST be added to this block.
 
 try:
-    import nanopb_generator  # on sys.path via env.setup()
+    import nanopb_api as nanopb_generator  # what we use from nanopb, see nanopb_api.py
     Globals = nanopb_generator.Globals
     OneOf = nanopb_generator.OneOf
 except (ImportError, AttributeError):

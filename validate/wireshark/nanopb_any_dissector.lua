@@ -3,7 +3,7 @@
 -- Recursive protobuf dissector for Wireshark that follows google.protobuf.Any
 -- by its type_url. Message definitions come from nanopb/schema.luadata next to
 -- this file, written by validate/nanopb_validate (python -m nanopb_validate)
--- (install-dissector, or Tools > nanopb > Load protos directory into Wireshark).
+-- (wireshark install / load, or Tools > nanopb > Set protos directory).
 --
 -- Root message selection, in order:
 --   1. the port map  (Preferences > Protocols > NANOPB > Port map, or
@@ -54,7 +54,7 @@ local studio_config = load_data(DATA_DIR .. SEP .. "studio_config.luadata") or {
 
 -- When Wireshark starts, rebuild the schema if a .proto file changed since it
 -- was built (the backend compares a fingerprint and returns at once when
--- nothing changed), so editing protos needs no Load protos step. Skipped for
+-- nothing changed), so editing protos needs no reload step. Skipped for
 -- an explicit NANOPB_WS_SCHEMA, with NANOPB_WS_NO_REFRESH, or before
 -- install-studio has saved a protos directory.
 local function refresh_schema()
@@ -133,7 +133,7 @@ local e_malformed = ProtoExpert.new("nanopb.malformed", "Malformed protobuf data
 local e_unknown_type = ProtoExpert.new("nanopb.any.unknown_type", "Any type not in schema",
     expert.group.UNDECODED, expert.severity.WARN)
 local e_no_schema = ProtoExpert.new("nanopb.no_schema",
-    "nanopb schema not found; run Tools > nanopb > Load protos directory into Wireshark",
+    "nanopb schema not found; run Tools > nanopb > Set protos directory (once)",
     expert.group.UNDECODED, expert.severity.NOTE)
 local e_depth = ProtoExpert.new("nanopb.depth", "Maximum nesting depth reached",
     expert.group.UNDECODED, expert.severity.WARN)

@@ -23,8 +23,8 @@ except ImportError:
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 env.setup()
-from proto._utils import invoke_protoc  # noqa: E402  (nanopb's generator/proto)
-from proto import TemporaryDirectory  # noqa: E402
+from nanopb_api import invoke_protoc  # noqa: E402
+from nanopb_api import TemporaryDirectory  # noqa: E402
 from schema import (DescriptorRegistry, MessageInfo, NanopbOptionsResolver, OutputFormat, ProtoFieldInfo,  # noqa: E402
                     ValidationConstraint, ValidationRuleNotViolatableError, _OMIT_FIELD, _load_nanopb_pb2,
                     _load_validate_pb2, read_options_file)

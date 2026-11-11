@@ -4,7 +4,7 @@ Validation, packet filters and Wireshark tools for [nanopb](../README.md).
 
 - **Validators.** `validate.proto` rules in your `.proto` files become C
   functions, `pb_validate_<Message>()`, with no heap and no reflection.
-- **Packet filters.** `<name>_udp()` / `<name>_tcp()` decode, identify and
+- **Packet filters.** `<protocol>_filter_udp()` / `_tcp()` decode, identify and
   validate an untrusted packet and return 0 (accept) or -1 (drop, logged).
 - **Wireshark.** A dissector that decodes nested messages and
   `google.protobuf.Any`, shows PASSED / DROPPED per packet, and a Tools menu
@@ -58,14 +58,17 @@ generated code itself keeps C89 declaration style.
 #define PB_VALIDATE_FILTER_LOG(...) printf(__VA_ARGS__)   /* optional: see drops */
 #include "fleet.pb.h"
 
-if (fleet_filter_callbacks.udp(NULL, data, size) != 0)
+if (fleet_filter_udp(NULL, data, size) != 0)
     return;                     /* dropped; one log line says why */
 ```
 
 - Every drop calls `PB_VALIDATE_FILTER_DROP(filter, reason)` in every build;
   `PB_VALIDATE_DEBUG` builds also log each violated rule.
-- `pb_filter_t <name>_callbacks` holds the name and both entry points for
-  registration through function pointers.
+- One filter per protocol: `<protocol>_filter_udp/_tcp` accepts any message of the
+  protocol (by its `Any` type_url); a protocol without `Any` gets one filter for its
+  root message, `<pkg>_<Msg>_filter_udp/_tcp`.
+- Every generated file starts with a Doxygen block (`@file`, `@brief`, `@date`,
+  `@author`; `gen --author "Name"` or the Wireshark dialog sets the author).
 - Keep nanopb in its own folder: `gen --include-prefix NanoPB` (or the
   Wireshark menu's include field, or `wireshark install --include-prefix NanoPB`)
   writes `#include <NanoPB/pb.h>`, `<NanoPB/pb_validate.h>`, ...; compile with `-I`
@@ -141,6 +144,11 @@ validate/
 
 Only additions live outside this folder (`CLAUDE.md`, `agent_docs/`,
 `.claude/`) plus one block at the end of `.gitignore`.
+
+Everything this tool uses from nanopb (generator functions, options, files)
+is listed in `nanopb_validate/nanopb_api.py`, and no other module imports
+nanopb. After a merge, `check` and `tests/py/test_nanopb_api.py` say whether
+anything moved; a fix goes in `nanopb_api.py`, never in nanopb's files.
 
 ## More
 

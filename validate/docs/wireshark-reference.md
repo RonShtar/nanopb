@@ -83,8 +83,7 @@ selected), or use **Select all** / **Select none**, then press **Generate**.
 | Menu | Result |
 |------|--------|
 | Generate C (merged + validation) | `<output>/<unit>/<unit>.pb.c/.h` and `<unit>_validate.c/.h` |
-| Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark, plus every packet as a C array and hex in `<output>/<unit>/packets/` |
-| Load protos directory into Wireshark | the dissector, with every folder of the protos directory as a protocol you can choose (Decode As or the NANOPB **Protocol** preference), for real traffic. Also automatic at Wireshark start when a `.proto` changed |
+| Generate test packets (passed + dropped) | `<output>/nanopb_test_packets.pcapng`, opened in Wireshark, plus the packets as C arrays and hex streams in `<output>/<unit>/packets/` |
 | About | paths, Python, port map |
 
 ### Generating C code
@@ -135,8 +134,8 @@ unknown `type_url`, or `Any` nested deeper than `PB_VALIDATE_FILTER_MAX_ANY_DEPT
 `--protocol-filter` in `docs/validation.md`. A unit without `Any` gets no
 protocol filter, and the result window says so.
 
-**Per-message filters.** In addition, for each **protocol entrypoint** there is
-a filter whose packet is that message itself:
+**Per-message filters.** Only for a protocol that does **not** use `Any` (and so has
+no protocol filter): its root message gets a filter whose packet is that message itself:
 
 ```c
 int <Msg>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
@@ -198,16 +197,17 @@ window has **Show dropped only** (filter `nanopb.validation == "dropped"`),
 
 - `nanopb_test_packets.json`: per frame the message, port, expected verdict, violated field and rule, seed and bytes;
 - `nanopb_test_packets.txt`: the same as a table, plus what was not generated;
-- `<unit>/packets/packet_<frame>_<Message>_<passed|dropped>.h`: each packet as a C array (`static const uint8_t packet_..._data[]` and `PACKET_..._DATA_SIZE`), ready to feed to `<unit>_filter_udp` in a unit test;
-- `<unit>/packets/packet_<frame>_<Message>_<passed|dropped>.hex`: the same bytes as a hex stream.
+- `<unit>/packets/c_arrays/c_arrays_passed.txt` and `c_arrays_dropped.txt`: every packet of that verdict as a C array (`static const uint8_t packet_<frame>_<Message>_<verdict>[]`, with a comment naming the broken rule), ready to feed to `<unit>_filter_udp` in a unit test;
+- `<unit>/packets/raw_data/<Message>_passed.txt` and `<Message>_dropped.txt`: one hex stream per line, for every message (empty when it has no packet of that verdict).
 
 Each packet also carries its expectation as a packet comment
 (`expect=DROPPED msg=... field=... rule=...`, column `frame.comment`).
 
 ### Dissector
 
-**Load protos directory into Wireshark** asks only for the protos directory.
-Every subdirectory with `.proto` files is loaded as a protocol (see [Protocols
+The dissector loads the protos directory by itself: at Wireshark start (when a
+`.proto` changed), after **Set protos directory** and after **Generate test
+packets**. Every subdirectory with `.proto` files is loaded as a protocol (see [Protocols
 and Decode As](#protocols-and-decode-as)), and the result window lists them.
 It builds a schema from **all** units of the
 protos directory, with their validation rules, and keeps your **port map**
@@ -236,7 +236,7 @@ that message, recursively. Unknown types are shown as bytes with an expert warni
 
 Every folder of the protos directory with messages of its own is also a
 protocol, named after the folder (`fleet` -> **FLEET**, `shared` -> **SHARED**),
-and all of them are loaded. Load protos directory into Wireshark lists them. A
+and all of them are loaded; Set protos directory lists them. A
 folder does not have to import `google/protobuf/any.proto` for this. Only the C
 `<unit>_filter_udp` needs that, so Generate C makes it only for such folders.
 There are two ways to choose one:
@@ -400,7 +400,7 @@ installed copy containing the tool).
     nanopb_validate check     P [--unit U]
     nanopb_validate gen       P --out O [--unit U] [--port-map MAP] [--no-filter] [--with-runtime] [--no-validate] [--filter-name NAME]
     nanopb_validate packets   P --out O [--unit U] [--mode ports|protocol] [--protocol-port 16000] [--port-map MAP] [--any-port 15999] [--valid 2] [--max-invalid 40] [--seed 1] [--format pcapng|pcap] [--plugins-dir D | --no-install]
-    nanopb_validate wireshark load    --protos-root P [--plugins-dir D] [--port-map MAP]   (menu: Load protos directory into Wireshark)
+    nanopb_validate wireshark load    --protos-root P [--plugins-dir D] [--port-map MAP]   (same as Set protos directory; also automatic at start) (Wireshark)
     nanopb_validate wireshark install [--plugins-dir D] [--protos-root P] [--dev]
     nanopb_validate wireshark refresh [--plugins-dir D]                                    (run by the dissector at startup)
     nanopb_validate wireshark units   --protos-root P [--names-only]

@@ -146,7 +146,7 @@ def c_identifier(name):
 def compile_descriptor_set(proto_names, include_paths):
     """Compile ``proto_names`` (virtual paths) to a FileDescriptorSet."""
 
-    from proto._utils import invoke_protoc
+    from nanopb_api import invoke_protoc
     from google.protobuf import descriptor_pb2
 
     tmpdir = tempfile.mkdtemp(prefix='nanopb_ws_')

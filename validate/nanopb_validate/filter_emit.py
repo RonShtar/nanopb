@@ -16,12 +16,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 env.setup()
 
-import nanopb_generator as nanopb  # noqa: E402
+import nanopb_api as nanopb  # noqa: E402  (everything used from nanopb is listed there)
 import c_layout  # noqa: E402
 
 Globals = nanopb.Globals
-from filter_model import (ANY_FQN, CALLBACK_TYPES, GeneratorError, RET_ALLOW, RET_REJECT, Route, Strategy,  # noqa: E402
-                          callbacks_declaration, callbacks_definition, drop_line, ir_message_for_fqn,
+from filter_model import (ANY_FQN, GeneratorError, RET_ALLOW, RET_REJECT, Route, Strategy,  # noqa: E402
+                          drop_line, ir_message_for_fqn,
                           strip_proto_ext, type_url_hash, validator_func_name)
 
 
@@ -73,9 +73,7 @@ class FilterEmitter(object):
         yield ' * @param is_to_server  True if the direction is client -> server.\n'
         yield ' * @return 0 to allow the packet, -1 to reject it.\n'
         yield ' */\n'
-        yield '%s;\n\n' % spec.tcp_signature
-        yield CALLBACK_TYPES
-        yield callbacks_declaration(spec.public_name)
+        yield '%s;\n' % spec.tcp_signature
 
         yield '\n#ifdef __cplusplus\n'
         yield '} /* extern "C" */\n'
@@ -310,7 +308,6 @@ class FilterEmitter(object):
         yield '    (void)is_to_server;\n'
         yield '    return %s_filter_core(packet, packet_size);\n' % spec.symbol_prefix
         yield '}\n'
-        yield callbacks_definition(spec.public_name)
 
 
 class ProtocolFilterEmitter(object):
@@ -318,7 +315,7 @@ class ProtocolFilterEmitter(object):
 
     def __init__(self, name, hub, index, messages, pb_headers, validate_headers, public_name=None):
         self.name = name
-        self.public_name = public_name or name + '_filter'
+        self.public_name = (public_name or name) + '_filter'   # <name>_filter_udp / _tcp
         self.hub = hub                  # ProtoFile that knows every message of the request
         self.index = index              # DescriptorIndex
         self.messages = messages        # protocol message FQNs, in declaration order
@@ -402,8 +399,6 @@ class ProtocolFilterEmitter(object):
         yield ' */\n'
         yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size);\n' % self.public_name
         yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n\n' % self.public_name
-        yield CALLBACK_TYPES
-        yield callbacks_declaration(self.public_name) + '\n'
         yield '#ifdef __cplusplus\n} /* extern "C" */\n#endif\n\n'
         yield '#endif /* %s */\n' % guard
 
@@ -581,7 +576,6 @@ class ProtocolFilterEmitter(object):
         yield '    (void)ctx;\n    return %s_filter_core(packet, packet_size);\n}\n\n' % name
         yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % public
         yield '    (void)ctx;\n    (void)is_to_server;\n    return %s_filter_core(packet, packet_size);\n}\n' % name
-        yield callbacks_definition(public)
 
 
 def protocol_messages(index, files):

@@ -1,5 +1,5 @@
 """Model shared by the packet-filter generator: descriptor index, message references and
-routes, FilterSpec (one resolved filter), the pb_filter_t callback types and drop lines.
+routes, FilterSpec (one resolved filter) and drop lines.
 """
 
 from __future__ import unicode_literals
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 env.setup()
 
-import nanopb_generator as nanopb  # noqa: E402
+import nanopb_api as nanopb  # noqa: E402  (everything used from nanopb is listed there)
 import validate_pb2  # noqa: E402
 
 OneOf = nanopb.OneOf
@@ -242,35 +242,6 @@ class Route(object):
         self.target = target
         self.access = access
         self.type_url = type_url
-
-
-#: Shared by every generated filter header (guarded, so several can be included).
-CALLBACK_TYPES = (
-    '#ifndef PB_FILTER_CALLBACKS_DEFINED\n'
-    '#define PB_FILTER_CALLBACKS_DEFINED\n'
-    '/** Filter entry points: return 0 to allow the packet, -1 to drop it. */\n'
-    'typedef int (*pb_filter_udp_fn)(void *ctx, const uint8_t *packet, size_t packet_size);\n'
-    'typedef int (*pb_filter_tcp_fn)(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);\n'
-    '\n'
-    '/** One filter, ready to register with a dispatcher: name, UDP and TCP callbacks. */\n'
-    'typedef struct pb_filter_s {\n'
-    '    const char *name;\n'
-    '    pb_filter_udp_fn udp;\n'
-    '    pb_filter_tcp_fn tcp;\n'
-    '} pb_filter_t;\n'
-    '#endif\n\n'
-)
-
-
-def callbacks_declaration(public_name):
-    return ('/** %s_udp and %s_tcp as one pb_filter_t, e.g. register(&%s_callbacks). */\n'
-            'extern const pb_filter_t %s_callbacks;\n'
-            % (public_name, public_name, public_name, public_name))
-
-
-def callbacks_definition(public_name):
-    return ('\nconst pb_filter_t %s_callbacks = { "%s", %s_udp, %s_tcp };\n'
-            % (public_name, public_name, public_name, public_name))
 
 
 def drop_line(indent, public_name, reason):

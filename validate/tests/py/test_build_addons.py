@@ -37,7 +37,7 @@ static int send(uint32_t level)
     demo_Ping m = demo_Ping_init_zero;
     m.level = level;
     if (!pb_encode(&s, demo_Ping_fields, &m)) return 99;
-    return demo_Ping_filter_callbacks.udp(NULL, buf, s.bytes_written);
+    return demo_Ping_filter_udp(NULL, buf, s.bytes_written);
 }
 
 int main(void)

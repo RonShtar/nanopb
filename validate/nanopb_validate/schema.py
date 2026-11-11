@@ -49,7 +49,7 @@ def _load_validate_pb2() -> Any:
 def _load_nanopb_pb2() -> Any:
     """nanopb_pb2 from nanopb's generator/proto package."""
 
-    from proto import nanopb_pb2
+    from nanopb_api import nanopb_pb2
     return nanopb_pb2
 
 

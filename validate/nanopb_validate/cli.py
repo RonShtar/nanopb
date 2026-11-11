@@ -80,7 +80,7 @@ def files_parser():
     p.add_argument('--filter', action='append', default=[], metavar='pkg.Msg',
                    help='also generate a packet filter with this entrypoint (repeatable)')
     p.add_argument('--protocol-filter', metavar='NAME', help='one Any-dispatched filter for every message')
-    p.add_argument('--filter-name', metavar='NAME', help='entry points NAME_udp / NAME_tcp')
+    p.add_argument('--filter-name', metavar='NAME', help='entry points NAME_filter_udp / NAME_filter_tcp')
     p.add_argument('--nanopb-opt', action='append', default=[], metavar='OPT',
                    help='option for nanopb_generator (e.g. -q, -s, --c-style), passed to both plugins')
     p.add_argument('--validate-opt', action='append', default=[], metavar='OPT',
@@ -135,6 +135,9 @@ def cmd_check(argv, global_args):
 
     out = tempfile.mkdtemp(prefix='nanopb_check_')
     report = {'protos_root': os.path.abspath(args.protos_root), 'protocols': [], 'errors': 0, 'warnings': 0}
+    import nanopb_api
+    report['nanopb'] = nanopb_api.check()
+    report['errors'] += len(report['nanopb'])
     try:
         units_argv = global_args + ['units', '--protos-root', args.protos_root, '--names-only']
         names = run_json(backend.main, units_argv).get('units', [])
@@ -160,7 +163,7 @@ def cmd_check(argv, global_args):
         import shutil
         shutil.rmtree(out, ignore_errors=True)
 
-    lines = []
+    lines = ['ERROR nanopb: ' + p for p in report['nanopb']]
     for entry in report['protocols']:
         state = 'ERROR' if entry['errors'] else ('warn' if entry['warnings'] else 'ok')
         lines.append('%-5s %s' % (state, entry['protocol']))

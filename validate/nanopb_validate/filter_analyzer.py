@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 env.setup()
 
-import nanopb_generator as nanopb  # noqa: E402
+import nanopb_api as nanopb  # noqa: E402  (everything used from nanopb is listed there)
 
 Globals = nanopb.Globals
 OneOf = nanopb.OneOf

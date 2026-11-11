@@ -285,13 +285,22 @@ class BackendTests(unittest.TestCase):
             port = {'envelope': 16000, 'telemetry': 16001}[entry['unit']]
             # telemetry never uses Any and has one root message: it is sent as it is.
             self.assertEqual((entry['port'], entry['any_wrapped']), (port, entry['unit'] != 'telemetry'))
-            header, hexfile = entry['files']
-            self.assertEqual(os.path.dirname(header), os.path.join(self.tmp, 'packets', entry['unit'], 'packets'))
-            self.assertTrue(os.path.basename(header).endswith('_%s.h' % entry['expect']), header)
+            arrays, hexfile = entry['files']
+            packets_dir = os.path.join(self.tmp, 'packets', entry['unit'], 'packets')
+            self.assertEqual(arrays, os.path.join(packets_dir, 'c_arrays', 'c_arrays_%s.txt' % entry['expect']))
+            self.assertEqual(hexfile, os.path.join(packets_dir, 'raw_data', '%s_%s.txt'
+                                                   % (entry['message'].replace('.', '_'), entry['expect'])))
             with open(hexfile) as handle:
-                self.assertEqual(handle.read().strip(), entry['hex'])
-            with open(header) as handle:
-                self.assertIn('_DATA_SIZE %du' % entry['size'], handle.read())
+                self.assertIn(entry['hex'], handle.read().split())
+            with open(arrays) as handle:
+                self.assertIn('packet_%03d_%s_%s[%d]' % (entry['frame'], entry['message'].replace('.', '_'),
+                                                        entry['expect'], entry['size']), handle.read())
+        for unit in ('envelope', 'telemetry'):
+            raw = os.listdir(os.path.join(self.tmp, 'packets', unit, 'packets', 'raw_data'))
+            for name in raw:
+                other = name.replace('_passed.txt', '_dropped.txt') if name.endswith('_passed.txt') \
+                    else name.replace('_dropped.txt', '_passed.txt')
+                self.assertIn(other, raw, 'every message has a passed and a dropped file')
         with open(os.path.join(self.tmp, 'plugins', 'nanopb', 'schema.luadata')) as handle:
             schema = handle.read()
         self.assertRegex(schema, r'protocols = \{\n    \["envelope"\] = \{[^}]*"demo\.envelope\.Envelope"')
@@ -341,12 +350,12 @@ class BackendTests(unittest.TestCase):
             unit_dir = os.path.join(out, unit)
             lines = ['#include <stdio.h>', '#include "%s.pb.h"' % unit]
             checks = []
+            for path in sorted(set(entry['files'][0] for entry in entries)):
+                lines.append('#include "%s"' % path.replace('\\', '/'))
             for entry in entries:
-                header = entry['files'][0]
-                ident = os.path.splitext(os.path.basename(header))[0] + '_data'
-                lines.append('#include "%s"' % header.replace('\\', '/'))
-                checks.append('    printf("%%d %%d\\n", %d, %s_filter_udp(NULL, %s, %s_SIZE));'
-                              % (entry['frame'], unit, ident, ident.upper()))
+                ident = 'packet_%03d_%s_%s' % (entry['frame'], entry['message'].replace('.', '_'), entry['expect'])
+                checks.append('    printf("%%d %%d\\n", %d, %s_filter_udp(NULL, %s, sizeof(%s)));'
+                              % (entry['frame'], unit, ident, ident))
             lines += ['int main(void) {'] + checks + ['    return 0;', '}', '']
             main = os.path.join(unit_dir, 'main_protocol.c')
             with open(main, 'w') as handle:
@@ -367,28 +376,23 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         units = dict((u['unit'], u) for u in result['units'])
         # No port map: the roots no other message of the unit refers to.
-        self.assertEqual(units['envelope']['filters'], ['demo_envelope_Envelope_filter_udp'])
-        self.assertEqual(units['envelope']['filter_entrypoints'],
-                         {'from': 'auto', 'modes': {'demo.envelope.Envelope': 'auto'}})
+        # envelope uses Any: only its protocol filter. telemetry does not: its root message gets one.
+        self.assertEqual(units['envelope']['filters'], [])
+        self.assertEqual(units['envelope']['protocol_filter'], 'envelope_filter_udp')
+        self.assertNotIn('filter_entrypoints', units['envelope'])
         self.assertEqual(units['telemetry']['filters'], ['demo_telemetry_Telemetry_filter_udp'])
-        self.assertIn('int demo_envelope_Envelope_filter_tcp(void *ctx, const uint8_t *packet, '
+        self.assertIn('int envelope_filter_tcp(void *ctx, const uint8_t *packet, '
                       'size_t packet_size, bool is_to_server);', self.read('envelope', 'envelope.pb.h'))
-        self.assertIn('static int demo_envelope_Envelope_filter_core(', self.read('envelope', 'envelope.pb.c'))
+        self.assertNotIn('demo_envelope_Envelope_filter_', self.read('envelope', 'envelope.pb.c'))
 
     def test_gen_c_filters_from_port_map(self):
         status, result, err = run_backend('gen-c', '--protos-root', STRESS_PROTOS, '--unit', 'fleet',
                                           '--out', self.tmp, '--port-map', STRESS_PORTS)
         self.assertEqual(status, 0, err)
         unit = result['units'][0]
-        self.assertEqual(sorted(unit['filters']), ['fleet_envelope_Envelope_filter_udp',
-                                                   'fleet_status_Status_filter_udp',
-                                                   'fleet_telemetry_Frame_filter_udp'])
-        # Envelope (Any + oneof) and Frame (two Any) are ambiguous for dispatch,
-        # so they fall back to decoding and validating the entrypoint itself.
-        self.assertEqual(unit['filter_entrypoints'],
-                         {'from': 'port map', 'modes': {'fleet.envelope.Envelope': 'single',
-                                                        'fleet.telemetry.Frame': 'single',
-                                                        'fleet.status.Status': 'auto'}})
+        # fleet uses Any: one protocol filter, whatever the port map says (the port map is for Wireshark).
+        self.assertEqual(unit['filters'], [])
+        self.assertEqual(unit['protocol_filter'], 'fleet_filter_udp')
         self.assertNotIn('filter_errors', unit)
         # A path is a field name plus an array index ("readings[65535]").
         self.assertEqual(unit['recommended_defines'], {'PB_VALIDATE_MAX_PATH_DEPTH': 2,
@@ -734,19 +738,24 @@ class BackendTests(unittest.TestCase):
                 self.compile_each(cc, ['-std=c99', '-Wall', '-Wextra', '-Wdeclaration-after-statement',
                                        '-Werror', '-I', unit_dir], sources)
 
-    def test_filter_name_callbacks_and_drop_logs(self):
+    def test_filter_name_and_drop_logs(self):
         out = os.path.join(self.tmp, 'out')
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
                                           '--unit', 'envelope', '--filter-name', 'net_{unit}')
         self.assertEqual(status, 0, err)
-        self.assertEqual(result['units'][0]['protocol_filter'], 'net_envelope_udp')
+        self.assertEqual(result['units'][0]['protocol_filter'], 'net_envelope_filter_udp')
         unit_dir = os.path.join(out, 'envelope')
         header = self.read('out', 'envelope', 'envelope.pb.h')
-        for decl in ('int net_envelope_udp(void *ctx, const uint8_t *packet, size_t packet_size);',
-                     'int net_envelope_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);',
-                     'extern const pb_filter_t net_envelope_callbacks;'):
+        for decl in ('int net_envelope_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);',
+                     'int net_envelope_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, '
+                     'bool is_to_server);'):
             self.assertIn(decl, header)
-        self.assertNotIn('envelope_filter_udp(', header)
+        self.assertNotIn('int envelope_filter_udp(', header)
+        self.assertNotIn('pb_filter_t', header)
+        # One filter per protocol: no per-message demo_envelope_Envelope_filter_*.
+        self.assertNotIn('demo_envelope_Envelope_filter_', header)
+        self.assertIn('@file envelope.pb.h', header)
+        self.assertIn('@author Generated by nanopb validate', header)
         status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--unit', 'envelope',
                                      '--filter-name', '9{unit}')
         self.assertEqual(status, 1)
@@ -761,9 +770,8 @@ class BackendTests(unittest.TestCase):
                          '#include "envelope.pb.h"\n'
                          'int main(void) {\n'
                          '    static const uint8_t garbage[] = { 0xff, 0xff, 0xff };\n'
-                         '    const pb_filter_t *f = &net_envelope_callbacks;\n'
-                         '    printf("name=%s udp=%d tcp=%d\\n", f->name, f->udp(NULL, garbage, sizeof(garbage)),\n'
-                         '           f->tcp(NULL, garbage, sizeof(garbage), true));\n'
+                         '    printf("udp=%d tcp=%d\\n", net_envelope_filter_udp(NULL, garbage, sizeof(garbage)),\n'
+                         '           net_envelope_filter_tcp(NULL, garbage, sizeof(garbage), true));\n'
                          '    return 0;\n'
                          '}\n')
         exe = os.path.join(unit_dir, 'drop.exe')
@@ -774,9 +782,9 @@ class BackendTests(unittest.TestCase):
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertEqual(build.returncode, 0, build.stdout[-3000:])
         run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
-        self.assertIn('net_envelope: drop: packet is not a google.protobuf.Any', run.stdout)
+        self.assertIn('net_envelope_filter: drop: packet is not a google.protobuf.Any', run.stdout)
         self.assertEqual(run.stdout.count(': drop: '), 2, run.stdout)
-        self.assertIn('name=net_envelope udp=-1 tcp=-1', run.stdout)
+        self.assertIn('udp=-1 tcp=-1', run.stdout)
 
     def test_refresh_schema_after_proto_edit(self):
         root = os.path.join(self.tmp, 'protos')
