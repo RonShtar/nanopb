@@ -38,6 +38,8 @@ from helpers import REPO_ROOT, run_backend, varint  # noqa: E402
 from cases import Case  # noqa: E402
 import live_test  # noqa: E402
 import backend  # noqa: E402
+import protos  # noqa: E402
+import wireshark  # noqa: E402
 
 PROTOS = os.path.join(STRESS_DIR, 'protos')
 UNIT = 'fleet'
@@ -117,7 +119,7 @@ def roundtrip_source(samples, header_text):
     lines += ['', 'static uint8_t out_buf[16384];', 'static pb_violations_t violations;', '']
     calls = []
     for msg, ident, _ in samples:
-        ctype = backend.c_identifier(msg.replace('.', '_'))
+        ctype = protos.c_identifier(msg.replace('.', '_'))
         size = ident.upper() + '_DATA_SIZE'
         lines += [
             'static int check_%s(void)' % ident,
@@ -213,8 +215,8 @@ def showcase_cases(out):
     """Hand-made packets that combine every feature, with exact expectations."""
 
     from datagen import DataGenerator
-    unit = backend.Unit(PROTOS, UNIT, [])
-    gen = backend.unit_data_generator(unit, DataGenerator)
+    unit = protos.Unit(PROTOS, UNIT, [])
+    gen = protos.unit_data_generator(unit, DataGenerator)
 
     def new(_type, **fields):
         msg = gen.registry.get_message_class(_type)()
@@ -372,7 +374,7 @@ def run_tshark(pcap, cases, installed):
 
 def install(out):
     step('install stress schema into your Wireshark')
-    plugins = backend.default_plugins_dir()
+    plugins = wireshark.default_plugins_dir()
     status, result, err = run_backend('install-studio', '--plugins-dir', plugins)
     if status:
         raise SystemExit(err)
@@ -381,7 +383,7 @@ def install(out):
     if status:
         raise SystemExit(err)
     config = os.path.join(plugins, 'nanopb', 'studio_config.luadata')
-    lua = backend.lua_str
+    lua = wireshark.lua_str
     with open(config, 'w', newline='\n') as handle:
         handle.write('-- written by validate/examples/stress/stress_test.py --install\nreturn {\n')
         for key, value in (('python', sys.executable), ('nanopb_root', REPO_ROOT), ('protos_root', PROTOS),

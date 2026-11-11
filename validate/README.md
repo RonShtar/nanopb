@@ -93,7 +93,11 @@ validate/
   runtime/             pb_validate.c/.h, pb_filter_macros.h (C runtime)
   nanopb_validate/     Python package: python -m nanopb_validate
     cli.py             the commands above
-    backend.py         engine: protocols, merged C, captures, dissector schema
+    backend.py         engine entry point (command parser) behind cli.py
+    protos.py          protocols of a protos directory, nested folders, descriptors
+    gen.py             merged C per protocol, PB_FIELD_32BIT hints
+    traffic.py         sample messages, captures (pcap/pcapng), C arrays
+    wireshark.py       dissector schema, install / load / refresh
     validator.py       validate.proto rules -> C validators
     filters.py         protoc plugin: validators + packet filters
     datagen.py         valid / invalid sample messages

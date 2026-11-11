@@ -37,6 +37,8 @@ sys.path.insert(0, os.path.dirname(LIVE_DIR))  # helpers.py
 from cases import DECODE_AS_MESSAGE, DECODE_AS_PORT, PORT_MAP, all_cases  # noqa: E402
 from helpers import FIXTURES, REPO_ROOT, TOOL_DIR, run_backend  # noqa: E402
 import backend  # noqa: E402
+import traffic  # noqa: E402
+import wireshark  # noqa: E402
 
 SRC_PORT_BASE = 40000
 
@@ -55,16 +57,16 @@ LOOPBACK = socket.inet_aton('127.0.0.1')
 # ---------------------------------------------------------------------------
 
 
-ip_checksum = backend.ip_checksum
+ip_checksum = traffic.ip_checksum
 
 
 def frame(case, index):
-    return backend.ethernet_frame(case.transport, case.port, case.payload, index)
+    return traffic.ethernet_frame(case.transport, case.port, case.payload, index)
 
 
 def write_pcap(path, cases):
-    packets = [backend.Packet(c.transport, c.port, c.payload) for c in cases]
-    backend.write_pcap(path, packets, start=int(time.time()))
+    packets = [traffic.Packet(c.transport, c.port, c.payload) for c in cases]
+    traffic.write_pcap(path, packets, start=int(time.time()))
 
 
 LINK_HEADER = {0: 4, 1: 14, 101: 0, 113: 16, 228: 0}  # NULL, Ethernet, RAW, Linux SLL, IPv4
@@ -225,9 +227,9 @@ def send(cases, host, repeat, interval):
 
 
 def setup(plugins_dir, reset_config, out_dir):
-    plugins = plugins_dir or backend.default_plugins_dir()
+    plugins = plugins_dir or wireshark.default_plugins_dir()
     config = os.path.join(plugins, 'nanopb', 'studio_config.luadata')
-    lua = backend.lua_str
+    lua = wireshark.lua_str
     if reset_config or not os.path.exists(config):
         os.makedirs(os.path.dirname(config), exist_ok=True)
         with open(config, 'w', newline='\n') as handle:
@@ -340,7 +342,7 @@ def find_tshark():
 
 
 def installed_dissector():
-    path = os.path.join(backend.default_plugins_dir(), 'nanopb_any_dissector.lua')
+    path = os.path.join(wireshark.default_plugins_dir(), 'nanopb_any_dissector.lua')
     return path if os.path.isfile(path) else None
 
 
