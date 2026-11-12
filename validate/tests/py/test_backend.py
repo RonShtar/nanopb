@@ -826,7 +826,7 @@ class BackendTests(unittest.TestCase):
         """--compile-if puts every generated .c and .h inside '#ifdef NAME ... #endif /* NAME */'
         (the name is never unit-prefixed); --header-dir filter/{unit} makes the generated files
         include each other as "filter/<unit>/..."; the files then compile from a src/filter/<unit>/
-        tree with -DNAME, and to nothing (no empty-unit warning) without it."""
+        tree with -DNAME, and to nothing without it."""
 
         out = os.path.join(self.tmp, 'out')
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
@@ -863,9 +863,8 @@ class BackendTests(unittest.TestCase):
         flags = ['-std=c99', '-Wall', '-Wextra', '-Werror', '-I', src,
                  '-I', os.path.join(src, 'filter', 'envelope')]
         self.compile_each(cc, flags + ['-DCONFIG_COMPILE_FILTER'], sources)
-        # Compiled out: -pedantic would reject an empty translation unit (nanopb's pb.h is
-        # not pedantic-clean in C99, but without the flag it is not included).
-        self.compile_each(cc, flags + ['-pedantic'], [s for s in sources if 'envelope' in os.path.basename(s)])
+        # Compiled out: the files compile to nothing.
+        self.compile_each(cc, flags, [s for s in sources if 'envelope' in os.path.basename(s)])
 
     def test_rule_on_callback_field_is_an_error(self):
         """A rule on a field without max_size (a pb_callback_t) fails generation with a

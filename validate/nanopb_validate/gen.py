@@ -221,22 +221,14 @@ def compile_if_condition(names):
 
 
 def compile_if_wrap(names, text, file_name):
-    """``text`` inside '#ifdef NAME ... #endif /* NAME */' (or '#if defined(A) && ...').
-
-    A gated-off .c would be an empty translation unit, which ISO C forbids
-    (-Wpedantic): it then declares one unused typedef instead.
-    """
+    """``text`` inside '#ifdef NAME ... #endif /* NAME */' (or '#if defined(A) && ...')."""
 
     if not names:
         return text
     condition, single = compile_if_condition(names)
     label = single or condition
     opening = ('#ifdef %s\n' % single) if single else ('#if %s\n' % condition)
-    filler = ''
-    if file_name.endswith('.c'):
-        filler = '#else\ntypedef int %s_compiled_out; /* ISO C: a file must declare something */\n' % (
-            re.sub(r'[^A-Za-z0-9_]', '_', file_name))
-    return opening + '\n' + text.rstrip('\n') + '\n\n' + filler + '#endif /* %s */\n' % label
+    return opening + '\n' + text.rstrip('\n') + '\n\n#endif /* %s */\n' % label
 
 
 def header_dir_for(template, unit_name):

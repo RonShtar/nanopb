@@ -5,6 +5,7 @@ nanopb's .pb.c/.h) and protocol filters (ProtocolFilterEmitter, <name>_filter.c/
 from __future__ import unicode_literals
 
 import os
+import re
 import sys
 
 from collections import OrderedDict
@@ -535,13 +536,32 @@ class ProtocolFilterEmitter(object):
         for fqn, msg in self._protocol_irs():
             cases.setdefault(type_url_hash(fqn), []).append((fqn, msg))
 
+        # A named constant per message hash, so the switch reads
+        # "case CAMERA_HASH_CAMERA_FRAME:" (same code as a bare number).
+        hash_names, used = {}, set()
+        for value, entries in cases.items():
+            for fqn, _ in entries:
+                base = '%s_HASH_%s' % (name.upper(), re.sub(r'[^A-Za-z0-9]', '_', fqn).upper())
+                label, n = base, 2
+                while label in used:
+                    label, n = '%s_%d' % (base, n), n + 1
+                used.add(label)
+                hash_names[fqn] = label
+        width = max(len(label) for label in used) + 1
+        yield '/* Hash of each message name in the type_url (the switch below). */\n'
+        for value, entries in cases.items():
+            for fqn, _ in entries:
+                yield '#define %s0x%08xu /* "%s" */\n' % (hash_names[fqn].ljust(width), value, fqn)
+        yield '\n'
+
         # One macro for every message: decode the Any's value as TYPE, validate it,
-        # then return NEXT (allow, or the walker of its own Any fields).
+        # then return NEXT (allow, or the walker of its own Any fields). The name is
+        # compared by length + memcmp: the length is known from the hash loop.
         macro = '%s_FILTER_MESSAGE' % name.upper()
         drop = 'PB_VALIDATE_FILTER_DROP("%s", ' % self.public_name.replace('"', "'")
         body = [
             'do {',
-            '    if (strcmp(type_name, NAME) == 0) {',
+            '    if (name_size == sizeof(NAME) - 1 && memcmp(type_name, NAME, sizeof(NAME) - 1) == 0) {',
             '        TYPE payload;',
             '        pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);',
             '        if (!pb_decode(&stream, &TYPE##_msg, &payload)) {',
@@ -567,20 +587,28 @@ class ProtocolFilterEmitter(object):
 
         yield '/* The type_url is the opcode: it selects the message to decode and validate. */\n'
         yield 'static int %s_check_any(const %s *any, int depth)\n{\n' % (name, any_ctype)
-        yield '    const char *type_name = strrchr(any->type_url, \'/\');\n'
+        yield '    const char *type_name = any->type_url;\n'
         yield '    const char *cursor;\n'
+        yield '    size_t name_size;\n'
         yield '    uint32_t hash = 0;\n\n'
         yield '    if (depth >= PB_VALIDATE_FILTER_MAX_ANY_DEPTH) {\n'
         for line in self._reject('        ', 'google.protobuf.Any nested too deep'):
             yield line
         yield '    }\n'
-        yield '    /* "type.googleapis.com/pkg.Msg" -> "pkg.Msg"; any host prefix is accepted. */\n'
-        yield '    type_name = type_name ? type_name + 1 : any->type_url;\n'
-        yield '    for (cursor = type_name; *cursor != \'\\0\'; cursor++)\n'
-        yield '        hash = hash * 31u + (uint32_t)(uint8_t)*cursor;\n\n'
+        yield '    /* One pass: "type.googleapis.com/pkg.Msg" -> hash and length of "pkg.Msg"\n'
+        yield '     * (the hash restarts after every \'/\'; any host prefix is accepted). */\n'
+        yield '    for (cursor = type_name; *cursor != \'\\0\'; cursor++) {\n'
+        yield '        if (*cursor == \'/\') {\n'
+        yield '            type_name = cursor + 1;\n'
+        yield '            hash = 0;\n'
+        yield '        } else {\n'
+        yield '            hash = hash * 31u + (uint32_t)(uint8_t)*cursor;\n'
+        yield '        }\n'
+        yield '    }\n'
+        yield '    name_size = (size_t)(cursor - type_name);\n\n'
         yield '    switch (hash) {\n'
         for value, entries in cases.items():
-            yield '        case 0x%08xu:\n' % value
+            yield '        case %s:\n' % hash_names[entries[0][0]]
             for fqn, msg in entries:
                 after = ('%s(&payload, depth + 1)' % self.check_func(msg)) if str(msg.name) in seen else RET_ALLOW
                 yield '            %s("%s", %s, %s, %s);\n' % (
