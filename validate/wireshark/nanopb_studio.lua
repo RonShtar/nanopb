@@ -495,8 +495,10 @@ local function gen_c()
                 "<unit>.pb.c/.h: all messages, PB_BINDs and the packet filters (_udp/_tcp).\n" ..
                 "<unit>_validate.c/.h: all pb_validate_* validators.\n" ..
                 "Add all four to your project, next to the nanopb runtime.\n" ..
-                "Several protocols: their shared types (google/protobuf/*, common imports) are\n" ..
-                "in common/ once; add -I <output>/common and compile common/*.c once.\n" ..
+                "Each protocol is self-contained: imports from outside its folder\n" ..
+                "(google/protobuf/*, shared protos) carry its prefix (camera_google_protobuf_Any),\n" ..
+                "so any protocols link together. Filter: <protocol>_udp / <protocol>_tcp.\n" ..
+                "Compile the nanopb runtime once (common/ when generated together).\n" ..
                 "The -D values are optional: they shrink the validation buffers to what this\n" ..
                 "schema needs (docs/validation_performance.md)."
         end)

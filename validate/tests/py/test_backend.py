@@ -107,10 +107,11 @@ class BackendTests(unittest.TestCase):
 
         header = self.read('envelope', 'envelope.pb.h')
         # Dependency (Any) comes before its user, and storage is static.
-        self.assertLess(header.index('} google_protobuf_Any;'), header.index('} demo_envelope_Envelope;'))
+        # Imports from outside the protocol folder carry the protocol's prefix.
+        self.assertLess(header.index('} envelope_google_protobuf_Any;'), header.index('} demo_envelope_Envelope;'))
         self.assertNotIn('pb_callback_t', header)
         self.assertIn('demo_envelope_Envelope_size', header)
-        for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(google_protobuf_Any'):
+        for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(envelope_google_protobuf_Any'):
             self.assertIn(symbol, self.read('envelope', 'envelope.pb.c'))
         self.assertIn('bool pb_validate_demo_envelope_Envelope(', self.read('envelope', 'envelope_validate.c'))
 
@@ -325,7 +326,7 @@ class BackendTests(unittest.TestCase):
 
     @unittest.skipIf(find_cc() is None, 'no C compiler (gcc/clang/cc, CC, or pip install ziglang)')
     def test_protocol_packets_match_c_protocol_filter(self):
-        """Protocol mode: every packet's .h array through <unit>_filter_udp gives the manifest verdict."""
+        """Protocol mode: every packet's .h array through <unit>_udp gives the manifest verdict."""
 
         for root in (RULES_PROTOS, FIXTURES, STRESS_PROTOS):
             with self.subTest(root=os.path.basename(os.path.dirname(root)) + '/' + os.path.basename(root)):
@@ -347,7 +348,7 @@ class BackendTests(unittest.TestCase):
                 # The C protocol filter needs the unit to use google.protobuf.Any.
                 self.assertIn('google.protobuf.Any', result['units'][0]['protocol_filter_error'])
                 continue
-            self.assertEqual(result['units'][0]['protocol_filter'], unit + '_filter_udp')
+            self.assertEqual(result['units'][0]['protocol_filter'], unit + '_udp')
             unit_dir = os.path.join(out, unit)
             lines = ['#include <stdio.h>', '#include "%s.pb.h"' % unit]
             checks = []
@@ -355,7 +356,7 @@ class BackendTests(unittest.TestCase):
                 lines.append('#include "%s"' % path.replace('\\', '/'))
             for entry in entries:
                 ident = 'packet_%03d_%s_%s' % (entry['frame'], entry['message'].replace('.', '_'), entry['expect'])
-                checks.append('    printf("%%d %%d\\n", %d, %s_filter_udp(NULL, %s, sizeof(%s)));'
+                checks.append('    printf("%%d %%d\\n", %d, %s_udp(NULL, %s, sizeof(%s)));'
                               % (entry['frame'], unit, ident, ident))
             lines += ['int main(void) {'] + checks + ['    return 0;', '}', '']
             main = os.path.join(unit_dir, 'main_protocol.c')
@@ -379,10 +380,10 @@ class BackendTests(unittest.TestCase):
         # No port map: the roots no other message of the unit refers to.
         # envelope uses Any: only its protocol filter. telemetry does not: its root message gets one.
         self.assertEqual(units['envelope']['filters'], [])
-        self.assertEqual(units['envelope']['protocol_filter'], 'envelope_filter_udp')
+        self.assertEqual(units['envelope']['protocol_filter'], 'envelope_udp')
         self.assertNotIn('filter_entrypoints', units['envelope'])
-        self.assertEqual(units['telemetry']['filters'], ['demo_telemetry_Telemetry_filter_udp'])
-        self.assertIn('int envelope_filter_tcp(void *ctx, const uint8_t *packet, '
+        self.assertEqual(units['telemetry']['filters'], ['telemetry_udp'])
+        self.assertIn('int envelope_tcp(void *ctx, const uint8_t *packet, '
                       'size_t packet_size, bool is_to_server);', self.read('envelope', 'envelope.pb.h'))
         self.assertNotIn('demo_envelope_Envelope_filter_', self.read('envelope', 'envelope.pb.c'))
 
@@ -393,7 +394,7 @@ class BackendTests(unittest.TestCase):
         unit = result['units'][0]
         # fleet uses Any: one protocol filter, whatever the port map says (the port map is for Wireshark).
         self.assertEqual(unit['filters'], [])
-        self.assertEqual(unit['protocol_filter'], 'fleet_filter_udp')
+        self.assertEqual(unit['protocol_filter'], 'fleet_udp')
         self.assertNotIn('filter_errors', unit)
         # A path is a field name plus an array index ("readings[65535]").
         self.assertEqual(unit['recommended_defines'], {'PB_VALIDATE_MAX_PATH_DEPTH': 2,
@@ -424,8 +425,8 @@ class BackendTests(unittest.TestCase):
                 'static const uint8_t good[] = {%s};' % ', '.join(str(b) for b in good),
                 'static const uint8_t bad[] = {%s};' % ', '.join(str(b) for b in bad),
                 'int main(void) {',
-                '    printf("%d %d\\n", demo_telemetry_Telemetry_filter_udp(NULL, good, sizeof(good)),',
-                '           demo_telemetry_Telemetry_filter_udp(NULL, bad, sizeof(bad)));',
+                '    printf("%d %d\\n", telemetry_udp(NULL, good, sizeof(good)),',
+                '           telemetry_udp(NULL, bad, sizeof(bad)));',
                 '    return 0;',
                 '}', '']))
         exe = os.path.join(unit_dir, 'check.exe')
@@ -568,7 +569,7 @@ class BackendTests(unittest.TestCase):
     def assert_only_ron_generated(self, status, result, err):
         self.assertEqual(status, 0, err)
         self.assertEqual([r['unit'] for r in result['units']], ['protocolvalid'])
-        self.assertEqual(result['units'][0]['filters'], ['ron_Ron_filter_udp'])
+        self.assertEqual(result['units'][0]['filters'], ['protocolvalid_udp'])
         out = os.path.join(self.tmp, 'out', 'protocolvalid')
         with open(os.path.join(out, 'protocolvalid.pb.h')) as handle:
             header = handle.read()
@@ -661,7 +662,7 @@ class BackendTests(unittest.TestCase):
         out = os.path.join(self.tmp, 'out')
         status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
         self.assertEqual(status, 0, err)
-        self.assertEqual(result['units'][0]['filters'], ['pa_Msg_filter_udp'])
+        self.assertEqual(result['units'][0]['filters'], ['protocol_A_udp'])
         self.assertNotIn('needs_field_32bit', result['units'][0])
         unit_dir = os.path.join(out, 'protocol_A')
         with open(os.path.join(unit_dir, 'protocol_A.pb.h')) as handle:
@@ -743,32 +744,42 @@ class BackendTests(unittest.TestCase):
 
     def test_protocols_sharing_imports_link_into_one_program(self):
         """Two protocols importing google/protobuf/timestamp.proto and the same local
-        .proto: the shared types and the runtime go once into common/, and every
-        protocol links into one program without duplicate symbols."""
+        .proto, generated in SEPARATE runs and with different .options for the shared
+        file: each carries the imports under its own prefix (alpha_shared_Point,
+        beta_shared_Point), the filters are <folder>_udp, and both link into one program."""
 
         root = os.path.join(self.tmp, 'protos')
         unit = ('syntax = "proto3";\npackage %(p)s;\nimport "google/protobuf/timestamp.proto";\n'
                 'import "shared.proto";\nmessage %(m)s { google.protobuf.Timestamp at = 1; '
                 'shared.Point where = 2; uint32 id = 3; }\n')
         self.write_tree(root, {
-            'shared.proto': 'syntax = "proto3";\npackage shared;\nmessage Point { int32 x = 1; int32 y = 2; }\n',
+            'shared.proto': 'syntax = "proto3";\npackage shared;\nmessage Point { int32 x = 1; string tag = 2; }\n',
+            'shared.options': 'shared.Point.tag max_size:8\n',
             'alpha/alpha.proto': unit % {'p': 'alpha', 'm': 'A'},
             'beta/beta.proto': unit % {'p': 'beta', 'm': 'B'},
         })
-        out = os.path.join(self.tmp, 'out')
-        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
-        self.assertEqual(status, 0, err)
-        self.assertEqual(sorted(result['common']['shared']), ['google/protobuf/timestamp.proto', 'shared.proto'])
-        self.assertEqual(sorted(os.listdir(out)), ['alpha', 'beta', 'common'])
+        outs = {}
         for name in ('alpha', 'beta'):
-            files = sorted(os.listdir(os.path.join(out, name)))
-            self.assertEqual(files, [name + '.pb.c', name + '.pb.h', name + '_validate.c', name + '_validate.h'])
-            with open(os.path.join(out, name, name + '.pb.h')) as handle:
+            if name == 'beta':  # beta sees the shared file with another size
+                with open(os.path.join(root, 'shared.options'), 'w') as handle:
+                    handle.write('shared.Point.tag max_size:16\n')
+            outs[name] = os.path.join(self.tmp, 'out_' + name)
+            status, result, err = run_backend('gen-c', '--protos-root', root, '--out', outs[name],
+                                              '--with-runtime', '--unit', name)
+            self.assertEqual(status, 0, err)
+            self.assertEqual(sorted(result['units'][0]['prefixed_imports']),
+                             ['google/protobuf/timestamp.proto', 'shared.proto'])
+            self.assertNotIn('common', result)
+            with open(os.path.join(outs[name], name, name + '.pb.h')) as handle:
                 text = handle.read()
-            self.assertIn('#include "common.pb.h"', text)
-            self.assertNotIn('google_protobuf_Timestamp_msg', text.split('#include "common.pb.h"')[1].split('extern')[0])
-        with open(os.path.join(out, 'common', 'common.pb.c')) as handle:
-            self.assertIn('PB_BIND(google_protobuf_Timestamp', handle.read())
+            self.assertIn('%s_google_protobuf_Timestamp_msg' % name, text)
+            self.assertIn('%s_shared_Point where;' % name, text)
+            self.assertNotIn(' google_protobuf_Timestamp_msg', text)
+        with open(os.path.join(outs['alpha'], 'alpha', 'alpha.pb.h')) as handle:
+            self.assertIn('char tag[8];', handle.read())
+        with open(os.path.join(outs['beta'], 'beta', 'beta.pb.h')) as handle:
+            self.assertIn('char tag[16];', handle.read())
+
         cc = find_cc()
         if not cc:
             return
@@ -777,16 +788,15 @@ class BackendTests(unittest.TestCase):
             handle.write('#include "alpha_validate.h"\n#include "beta_validate.h"\n#include <stdio.h>\n'
                          'int main(void) {\n    alpha_A a = alpha_A_init_zero;\n    beta_B b = beta_B_init_zero;\n'
                          '    printf("%d %d\\n", (int)(alpha_A_msg.field_count + beta_B_msg.field_count),'
-                         ' (int)(google_protobuf_Timestamp_msg.field_count + a.id + b.id));\n'
+                         ' (int)(alpha_google_protobuf_Timestamp_msg.field_count +'
+                         ' beta_google_protobuf_Timestamp_msg.field_count + a.id + b.id));\n'
                          '    return 0;\n}\n')
-        sources = [main]
-        include = []
-        for name in ('alpha', 'beta'):
-            unit_dir = os.path.join(out, name)
-            flags, common = unit_build(unit_dir)
-            include += flags
-            sources += [os.path.join(unit_dir, f) for f in os.listdir(unit_dir) if f.endswith('.c')]
-        sources += common
+        alpha_dir, beta_dir = os.path.join(outs['alpha'], 'alpha'), os.path.join(outs['beta'], 'beta')
+        # The runtime once (alpha's copy); beta contributes only its own files.
+        sources = [main] + [os.path.join(alpha_dir, f) for f in os.listdir(alpha_dir) if f.endswith('.c')]
+        sources += [os.path.join(beta_dir, f) for f in os.listdir(beta_dir)
+                    if f.endswith('.c') and f.startswith('beta')]
+        include = ['-I', alpha_dir, '-I', beta_dir]
         objects = []
         for index, source in enumerate(sources):
             obj = os.path.join(self.tmp, 'o%d.o' % index)
@@ -800,7 +810,17 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(link.returncode, 0, link.stdout[-3000:])
         run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
         self.assertEqual(run.returncode, 0)
-        self.assertEqual(run.stdout.split(), ['6', '2'])
+        self.assertEqual(run.stdout.split(), ['6', '4'])
+
+    def test_one_run_puts_the_runtime_once_in_common(self):
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime')
+        self.assertEqual(status, 0, err)
+        self.assertIn('pb_decode.c', result['common']['files'])
+        for unit in result['units']:
+            self.assertFalse(any(f.startswith('pb_') or f == 'pb.h' for f in os.listdir(unit['dir'])), unit['dir'])
+        envelope = next(u for u in result['units'] if u['unit'] == 'envelope')
+        self.assertEqual(envelope['protocol_filter'], 'envelope_udp')
 
     def test_rule_on_callback_field_is_an_error(self):
         """A rule on a field without max_size (a pb_callback_t) fails generation with a
@@ -862,14 +882,15 @@ class BackendTests(unittest.TestCase):
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
                                           '--unit', 'envelope', '--filter-name', 'net_{unit}')
         self.assertEqual(status, 0, err)
-        self.assertEqual(result['units'][0]['protocol_filter'], 'net_envelope_filter_udp')
+        self.assertEqual(result['units'][0]['protocol_filter'], 'net_envelope_udp')
         unit_dir = os.path.join(out, 'envelope')
         header = self.read('out', 'envelope', 'envelope.pb.h')
-        for decl in ('int net_envelope_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);',
-                     'int net_envelope_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, '
+        for decl in ('int net_envelope_udp(void *ctx, const uint8_t *packet, size_t packet_size);',
+                     'int net_envelope_tcp(void *ctx, const uint8_t *packet, size_t packet_size, '
                      'bool is_to_server);'):
             self.assertIn(decl, header)
-        self.assertNotIn('int envelope_filter_udp(', header)
+        self.assertNotIn('int envelope_udp(', header)
+        self.assertNotIn('_filter_udp(', header)
         self.assertNotIn('pb_filter_t', header)
         # One filter per protocol: no per-message demo_envelope_Envelope_filter_*.
         self.assertNotIn('demo_envelope_Envelope_filter_', header)
@@ -889,8 +910,8 @@ class BackendTests(unittest.TestCase):
                          '#include "envelope.pb.h"\n'
                          'int main(void) {\n'
                          '    static const uint8_t garbage[] = { 0xff, 0xff, 0xff };\n'
-                         '    printf("udp=%d tcp=%d\\n", net_envelope_filter_udp(NULL, garbage, sizeof(garbage)),\n'
-                         '           net_envelope_filter_tcp(NULL, garbage, sizeof(garbage), true));\n'
+                         '    printf("udp=%d tcp=%d\\n", net_envelope_udp(NULL, garbage, sizeof(garbage)),\n'
+                         '           net_envelope_tcp(NULL, garbage, sizeof(garbage), true));\n'
                          '    return 0;\n'
                          '}\n')
         exe = os.path.join(unit_dir, 'drop.exe')
@@ -901,7 +922,7 @@ class BackendTests(unittest.TestCase):
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertEqual(build.returncode, 0, build.stdout[-3000:])
         run = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
-        self.assertIn('net_envelope_filter: drop: packet is not a google.protobuf.Any', run.stdout)
+        self.assertIn('net_envelope: drop: packet is not a google.protobuf.Any', run.stdout)
         self.assertEqual(run.stdout.count(': drop: '), 2, run.stdout)
         self.assertIn('udp=-1 tcp=-1', run.stdout)
 

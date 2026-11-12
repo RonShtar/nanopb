@@ -94,9 +94,9 @@ the includes between them removed:
 
 | file | contents |
 |------|----------|
-| `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the protocol filter `<unit>_filter_udp` / `_tcp`, the per-message packet filters `<Msg>_filter_udp` / `_tcp`, and their core |
+| `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the protocol filter `<unit>_udp` / `_tcp` (one per unit, named after its folder) and its core |
 | `<unit>_validate.h` / `<unit>_validate.c` | every validator `pb_validate_<msg>()` (all `_validate.h`/`_validate.c` from the validate plugin, see `docs/validation.md`) |
-| `common/common.pb.*`, `common/common_validate.*` | when several units are generated together: the types they share (e.g. `google/protobuf/any.proto`), once; the units include them. Add `-I <output>/common` and compile `common/*.c` once |
+| `common/` | when several units are generated together with the runtime: the nanopb runtime, once. Imports from outside a unit folder carry the unit's prefix (`<unit>_google_protobuf_Any`), so units never clash |
 
 `<unit>_validate.h` includes `<unit>.pb.h`; `<unit>.pb.c` includes
 `<unit>_validate.h` because the filters call the validators. Without
@@ -122,8 +122,8 @@ and `<unit>.pb.h` exports packet filters that decode, validate and return `0`
 `google.protobuf.Any` gets
 
 ```c
-int <unit>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
-int <unit>_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+int <unit>_udp(void *ctx, const uint8_t *packet, size_t packet_size);
+int <unit>_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
 ```
 
 Every packet is a `google.protobuf.Any`, and its `type_url` is the opcode: a
@@ -139,8 +139,8 @@ protocol filter, and the result window says so.
 no protocol filter): its root message gets a filter whose packet is that message itself:
 
 ```c
-int <Msg>_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
-int <Msg>_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+int <unit>_udp(void *ctx, const uint8_t *packet, size_t packet_size);
+int <unit>_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
 ```
 
 The entrypoints are the messages of the port map (the one the dissector uses);
@@ -182,10 +182,10 @@ validator, not by a decode error. Rules that cannot be broken with decodable
 data, or that the C validator does not enforce, are listed as not generated.
 
 Every message is wrapped in a `google.protobuf.Any` (its `type_url` is the
-opcode, as for `<unit>_filter_udp`), and sent on its protocol's own UDP port:
+opcode, as for `<unit>_udp`), and sent on its protocol's own UDP port:
 the first selected protocol on `udp/16000`, the next on 16001, and so on. That port
 is mapped to the protocol, as a **Decode As** would (see [Protocols and Decode
-As](#protocols-and-decode-as)). The verdicts are what `<unit>_filter_udp`
+As](#protocols-and-decode-as)). The verdicts are what `<unit>_udp`
 decides. Protocols without `Any` are skipped. On the command line,
 `gen-packets --mode ports` gives the older layout instead. In that layout,
 root messages are sent raw on their own port (from 15000), and the others are
@@ -198,7 +198,7 @@ window has **Show dropped only** (filter `nanopb.validation == "dropped"`),
 
 - `nanopb_test_packets.json`: per frame the message, port, expected verdict, violated field and rule, seed and bytes;
 - `nanopb_test_packets.txt`: the same as a table, plus what was not generated;
-- `<unit>/packets/c_arrays/c_arrays_passed.txt` and `c_arrays_dropped.txt`: every packet of that verdict as a C array (`static const uint8_t packet_<frame>_<Message>_<verdict>[]`, with a comment naming the broken rule), ready to feed to `<unit>_filter_udp` in a unit test;
+- `<unit>/packets/c_arrays/c_arrays_passed.txt` and `c_arrays_dropped.txt`: every packet of that verdict as a C array (`static const uint8_t packet_<frame>_<Message>_<verdict>[]`, with a comment naming the broken rule), ready to feed to `<unit>_udp` in a unit test;
 - `<unit>/packets/raw_data/<Message>_passed.txt` and `<Message>_dropped.txt`: one hex stream per line, for every message (empty when it has no packet of that verdict).
 
 Each packet also carries its expectation as a packet comment
@@ -239,7 +239,7 @@ Every folder of the protos directory with messages of its own is also a
 protocol, named after the folder (`fleet` -> **FLEET**, `shared` -> **SHARED**),
 and all of them are loaded; Set protos directory lists them. A
 folder does not have to import `google/protobuf/any.proto` for this. Only the C
-`<unit>_filter_udp` needs that, so Generate C makes it only for such folders.
+`<unit>_udp` needs that, so Generate C makes it only for such folders.
 There are two ways to choose one:
 
 - **The primary protocol, for all NANOPB traffic:** **Edit > Preferences >
@@ -255,7 +255,7 @@ There are two ways to choose one:
 If Wireshark already has a protocol with the folder's name, it is called
 `NANOPB_<FOLDER>` instead.
 
-A port decoded as a protocol works like `<protocol>_filter_udp`. The packet is
+A port decoded as a protocol works like `<protocol>_udp`. The packet is
 a `google.protobuf.Any`, and its `type_url` must name a message of that
 protocol: otherwise it gets `filter.unknown_type`. Nested `Any` fields are
 always validated, and more than 4 levels give `filter.depth`. The Protocol column shows

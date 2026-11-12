@@ -58,7 +58,7 @@ same way, at most 4 levels deep. Oneofs are ordinary fields.
 A protocol with one root message (one that no other message uses) doesn't need
 an `Any`: a packet that isn't an `Any` of a known message is decoded as that
 message. If the folder never uses `Any`, generated test packets are that plain
-message, matching its `<package>_<Message>_filter_udp`. A folder with several
+message, matching its `<folder>_udp`. A folder with several
 unrelated root messages and no `Any` can't tell them apart from the bytes: map
 each port to its message with the port map.
 
@@ -261,15 +261,13 @@ example:
 #include "fleet.pb.h"
 
 /* 0 = accept, -1 = drop */
-int fleet_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
-int fleet_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
+int fleet_udp(void *ctx, const uint8_t *packet, size_t packet_size);
+int fleet_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
 ```
 
 The filter decodes the packet as an `Any` and switches on its `type_url` to
 the message. It then decodes and validates that message, and checks nested
-`Any` fields the same way. Each message also has its own filter
-(`fleet_envelope_Envelope_filter_udp`, ...) for packets that are that message
-itself, and you can call a validator directly:
+`Any` fields the same way. You can also call a validator directly:
 
 ```c
 #include "fleet_validate.h"
@@ -282,11 +280,19 @@ Build switches such as `PB_VALIDATE_MAX_PATH_DEPTH` or
 build. For what each one costs, see [Validation performance](validation_performance.md);
 for the rules, see [Validation](validation.md).
 
-Generate C makes one filter per protocol: `<protocol>_filter_udp` / `_tcp`
+Generate C makes one filter per protocol, named after its folder: `<protocol>_udp` / `_tcp`
 (a protocol without `Any` gets one for its root message instead). To choose
 the name, pass `gen --filter-name <name>`: `{unit}` stands for the protocol
-folder, so `--filter-name net_{unit}` gives `net_fleet_filter_udp` /
-`net_fleet_filter_tcp`. Dropped packets are logged in every build; see
+folder, so `--filter-name net_{unit}` gives `net_fleet_udp` /
+`net_fleet_tcp`.
+
+Each protocol is self-contained. Files it imports from outside its folder
+(`google/protobuf/any.proto`, a shared `common.proto`, ...) are generated under the
+protocol's name: `camera_google_protobuf_Any`, `camera_shared_Point`,
+`pb_validate_camera_google_protobuf_Any()`. This uses nanopb's own `package` file
+option; the files' `.options` still apply. Protocols generated separately, or with
+different `.options` for the same import, therefore link into one program, and
+their headers can be included in one file. Wire format and `type_url`s do not change. Dropped packets are logged in every build; see
 [Validation](validation.md#calling-a-filter-and-drop-logs).
 
 A message of 64 kB or more (large `max_size` / `max_count`), or a field tag

@@ -323,7 +323,7 @@ def process_file(filename, fdesc, options, filter_options, index,
     #    namespaced by its entrypoint, so several filters share a file safely.
     if filter_options.filter_name and not filter_options.protocol_filter:
         for spec in specs:
-            spec.public_name = filter_options.filter_name + '_filter'
+            spec.public_name = filter_options.filter_name
     for spec in specs:
         emitter = FilterEmitter(spec)
         outputs.append((headername, 'eof', ''.join(emitter.header_lines())))

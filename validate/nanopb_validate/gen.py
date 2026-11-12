@@ -24,9 +24,10 @@ def generator_env():
 
 
 def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None, filter_name=None):
-    common = ['-I' + p for p in unit.includes if os.path.isdir(p)]
-    # e.g. -L'#include <NanoPB/%s>' (gen --include-prefix): reaches both plugins.
-    common += getattr(unit, 'nanopb_opts', [])
+    # First: e.g. -I<prefixing .options> (searched before the include paths) and
+    # -L'#include <NanoPB/%s>' (gen --include-prefix); they reach both plugins.
+    common = list(getattr(unit, 'nanopb_opts', []))
+    common += ['-I' + p for p in unit.includes if os.path.isdir(p)]
     # As imported: validate.proto, or validate/validate.proto in a subfolder.
     for name in sorted(set(OPTION_PROTOS) | set(f.name for f in unit.fds.file if is_option_proto(f.name))):
         common += ['-x', name]
@@ -37,8 +38,8 @@ def run_generator(nanopb_root, unit, outdir, validate, filters=(), protocol=None
         validate_opts = common + (['--filter=' + ';'.join(filters)] if filters else [])
         if protocol:
             validate_opts.append('--protocol-filter=' + protocol)
-            if filter_name:
-                validate_opts.append('--filter-name=' + filter_name)
+        if filter_name and (protocol or len(filters) == 1):
+            validate_opts.append('--filter-name=' + filter_name)
         cmd += ['--nanopb-validate_opt=' + o for o in validate_opts] + ['--nanopb-validate_out=' + outdir]
     cmd += unit.generated_files()
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -168,20 +169,56 @@ def file_header(name, brief, sources, author=None):
             ' */\n' % (name, brief, time.strftime('%Y-%m-%d'), author or DEFAULT_AUTHOR, ', '.join(sources)))
 
 
-def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, public=None,
-               shared=(), common=None, users=None):
+#: nanopb's alias for a prefixed name: '#define shared_Unit fleet_shared_Unit' and
+#: '#define _shared_Unit_MIN _fleet_shared_Unit_MIN'.
+ALIAS_RE = r'^#define (_*)(\w+) \1%s_\2[ \t]*$'
+
+
+def alias_names(text, ident):
+    """Old C names nanopb aliases to the protocol-prefixed ones: google_protobuf_Any, ..."""
+
+    return [old for _, old in re.findall(ALIAS_RE % re.escape(ident), text, re.M)]
+
+
+def scope_to_unit(text, ident, aliases):
+    """Make a merged file safe to include next to other protocols' files.
+
+    - inner header guards and nanopb's <FILE>_PB_H_MAX_SIZE macros get the
+      protocol's name (two protocols both carry google/protobuf/any.pb.h's part);
+    - nanopb's compatibility aliases for the prefixed imports are dropped and
+      every use of an old name points at the prefixed one.
+    """
+
+    upper = ident.upper()
+    own = re.compile(r'(^|_)%s(_|$)' % re.escape(upper))
+    renames = {}
+    for guard in re.findall(r'^#ifndef (\w+)\n#define \1\n', text, re.M):
+        if not guard.startswith('NANOPB_UNIT_') and not own.search(guard):
+            renames[guard] = ('PB_%s_%s' % (upper, guard[3:])) if guard.startswith('PB_') else upper + '_' + guard
+    for macro in re.findall(r'^#define (\w+_PB_H_MAX_SIZE)\b', text, re.M):
+        if not own.search(macro):
+            renames[macro] = upper + '_' + macro
+    for old, new in renames.items():
+        text = re.sub(r'\b%s\b' % old, new, text)
+    text = re.sub(ALIAS_RE % re.escape(ident) + r'\n?', '', text, flags=re.M)
+    if aliases:
+        names = '|'.join(re.escape(a) for a in sorted(set(aliases), key=len, reverse=True))
+        text = re.sub(r'(?<![A-Za-z0-9_])(_*|pb_validate_)(%s)(?![A-Za-z0-9])' % names,
+                      lambda m: m.group(1) + ident + '_' + m.group(2), text)
+    return text
+
+
+def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, public=None):
     """Merge the unit's generated files into <unit>.pb.c/.h and <unit>_validate.c/.h.
 
     <unit>.pb.*: every .pb.c/.pb.h of the unit and its imports (types,
     descriptors, PB_BINDs) plus the packet filters, which nanopb-validate
     injects there. <unit>_validate.*: every validator. Includes between the
     merged files are replaced by one include of the right merged header.
-    Proto files in ``shared`` (bases such as 'google/protobuf/any') are left out:
-    they are in the ``common`` unit, whose headers are included instead.
     Returns (files written, header with the filter declarations, merged-from list).
     """
 
-    bases = [b for b in (os.path.splitext(n)[0] for n in unit.generated_files()) if b not in shared]
+    bases = [os.path.splitext(n)[0] for n in unit.generated_files()]
 
     def existing(names):
         return [n for n in names if os.path.isfile(os.path.join(gendir, n))]
@@ -192,18 +229,10 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
     validate_headers = existing([b + '_validate.h' for b in bases]) if validate else []
     validate_sources = existing([b + '_validate.c' for b in bases]) if validate else []
     internal = set(pb_headers + validate_headers)
-    internal.update(b + suffix for b in shared for suffix in ('.pb.h', '_validate.h'))
-    common_pb_h = [common + '.pb.h'] if common else []
-    common_validate_h = [common + '_validate.h'] if common and validate else []
 
     ident = c_identifier(unit.name).upper()
     filter_note = (' and packet filter %s_udp/_tcp' % public) if public else ''
     briefs = {
-        '.pb.h': 'Types shared by protocols %s: messages, descriptors.' % ', '.join(users),
-        '.pb.c': 'Types shared by protocols %s: message descriptors.' % ', '.join(users),
-        '_validate.h': 'Types shared by protocols %s: validators.' % ', '.join(users),
-        '_validate.c': 'Types shared by protocols %s: validator implementations.' % ', '.join(users),
-    } if users else {
         '.pb.h': 'Protocol %s: message types, descriptors%s.' % (unit.name, filter_note),
         '.pb.c': 'Protocol %s: message descriptors%s.' % (unit.name, filter_note),
         '_validate.h': 'Protocol %s: validators, one pb_validate_<Message>() per message.' % unit.name,
@@ -248,7 +277,13 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
     def write(name, text):
         from c_layout import tidy_c
         with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
-            handle.write(tidy_c(text))
+            handle.write(tidy_c(scope_to_unit(text, c_identifier(unit.name), aliases)))
+
+    # nanopb's aliases for the prefixed imports (#define google_protobuf_Any camera_google_protobuf_Any).
+    aliases = []
+    for name in pb_headers:
+        with open(os.path.join(gendir, name)) as handle:
+            aliases += alias_names(handle.read(), c_identifier(unit.name))
 
     def write_header(name, guard, includes, parts):
         del lib_includes[:], had_version_check[:], had_runtime_check[:]
@@ -276,56 +311,71 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
         with open(os.path.join(gendir, name)) as handle:
             has_filters = has_filters or '_filter_core(' in handle.read()
 
-    write_header(pb_h, 'NANOPB_UNIT_%s_PB_H_INCLUDED' % ident, common_pb_h, pb_headers)
+    write_header(pb_h, 'NANOPB_UNIT_%s_PB_H_INCLUDED' % ident, [], pb_headers)
     write_source(pb_c, [pb_h] + ([validate_h] if has_filters and validate_headers else []), pb_sources)
     files = [pb_h, pb_c]
     if validate_headers or validate_sources:
-        write_header(validate_h, 'NANOPB_UNIT_%s_VALIDATE_H_INCLUDED' % ident, [pb_h] + common_validate_h,
-                     validate_headers)
+        write_header(validate_h, 'NANOPB_UNIT_%s_VALIDATE_H_INCLUDED' % ident, [pb_h], validate_headers)
         write_source(validate_c, [validate_h], validate_sources)
         files += [validate_h, validate_c]
     return files, pb_h, pb_headers + pb_sources + validate_headers + validate_sources
 
 
-#: Output folder (and file prefix) for the types several protocols share.
+#: Output folder for the one runtime copy of a gen run with several protocols.
 COMMON_UNIT = 'common'
-GENERATED_SUFFIXES = ('.pb.h', '.pb.c', '_validate.h', '_validate.c')
+#: Files an older version wrote to common/ (shared types); removed so they are not linked by mistake.
+OLD_COMMON_FILES = ('common.pb.h', 'common.pb.c', 'common_validate.h', 'common_validate.c')
 
 
-def shared_bases(units, gendirs):
-    """Proto files (bases) that two or more units generate identically, and who uses each.
+def renamed_option_lines(text, old_package, new_package):
+    """The .options text plus, for every line naming the old package (google.protobuf.Any.value
+    max_size:256), the same line under the new one: nanopb matches the renamed names."""
 
-    A file goes to the common unit only when its generated code is byte-identical in
-    every unit that has it (same .options) and every file it imports is shared too,
-    so the common files compile on their own. Linking one copy instead of one per
-    protocol is what lets several protocols live in one program.
+    old = (old_package + '.') if old_package else ''
+    out = []
+    for line in text.splitlines():
+        out.append(line)
+        parts = line.split(None, 1)
+        if len(parts) == 2 and not parts[0].startswith('#') and '/' not in parts[0] and \
+                parts[0].startswith(old) and not parts[0].startswith('*'):
+            out.append(new_package + '.' + parts[0][len(old):] + ' ' + parts[1])
+    return ''.join(line + '\n' for line in out)
+
+
+def prefix_imports(unit, optdir):
+    """Give every file the unit imports from outside its folder (google/protobuf/any.proto,
+    a shared common.proto, ...) the unit's name as C prefix: camera_google_protobuf_Any.
+
+    Each protocol then carries its own copy under its own names, so protocols
+    generated separately (or with different .options for the same import) link
+    into one program. It uses nanopb's own `package` file option, written into a
+    .options file in ``optdir`` (searched first) together with the options that
+    file already had. Returns {proto file: new C prefix}.
     """
 
-    def generated(gendir, base):
-        texts = []
-        for suffix in GENERATED_SUFFIXES:
-            path = os.path.join(gendir, base + suffix)
-            texts.append(open(path).read() if os.path.isfile(path) else None)
-        return tuple(texts)
-
-    seen, deps = {}, {}
-    for unit, gendir in zip(units, gendirs):
-        for fdesc in unit.fds.file:
-            if is_option_proto(fdesc.name):
-                continue
-            base = os.path.splitext(fdesc.name)[0]
-            deps[base] = [os.path.splitext(d)[0] for d in fdesc.dependency if not is_option_proto(d)]
-            seen.setdefault(base, []).append((unit.name, generated(gendir, base)))
-    shared = {base: [name for name, _ in uses] for base, uses in seen.items()
-              if len(uses) > 1 and len(set(text for _, text in uses)) == 1}
-    changed = True
-    while changed:
-        changed = False
-        for base in list(shared):
-            if any(dep not in shared for dep in deps.get(base, [])):
-                del shared[base]
-                changed = True
-    return shared
+    ident = c_identifier(unit.name)
+    renamed = {}
+    own = set(unit.names)
+    for fdesc in unit.fds.file:
+        if is_option_proto(fdesc.name) or fdesc.name in own:
+            continue
+        base = os.path.splitext(fdesc.name)[0]
+        existing = ''
+        for include in unit.includes:
+            path = os.path.join(include, base + '.options')
+            if os.path.isfile(path):
+                with open(path, encoding='utf-8') as handle:
+                    existing = handle.read().rstrip('\n') + '\n'
+                break
+        package = ident + ('.' + fdesc.package if fdesc.package else '')
+        existing = renamed_option_lines(existing, fdesc.package, package)
+        target = os.path.join(optdir, base + '.options')
+        if not os.path.isdir(os.path.dirname(target)):
+            os.makedirs(os.path.dirname(target))
+        with open(target, 'w', encoding='utf-8', newline='\n') as handle:
+            handle.write(existing + '%s package:"%s"\n' % (fdesc.name, package))
+        renamed[fdesc.name] = package.replace('.', '_')
+    return renamed
 
 
 def validation_defines(unit):
@@ -370,14 +420,13 @@ def gen_c_summary(results, common=None):
     if common:
         lines.append('%s -> %s' % (common['unit'], common['dir']))
         lines.append('  ' + ', '.join(common['files']))
-        if common['shared']:
-            lines.append('  shared by several protocols, once for the whole program (add -I%s): %s'
-                         % (common['dir'], ', '.join(common['shared'])))
-        else:
-            lines.append('  the nanopb runtime, once for every protocol (add -I%s)' % common['dir'])
+        lines.append('  the nanopb runtime, once for every protocol (add -I%s)' % common['dir'])
     for r in results:
         lines.append('%s -> %s' % (r['unit'], r['dir']))
         lines.append('  ' + ', '.join(r['files']))
+        if r.get('prefixed_imports'):
+            lines.append('  imports under the protocol\'s prefix: ' + ', '.join(
+                '%s -> %s_*' % kv for kv in sorted(r['prefixed_imports'].items())))
         if r.get('protocol_filter'):
             lines.append('  protocol filter (Any type_url = opcode, every message): %s/_tcp'
                          % r['protocol_filter'])
@@ -446,7 +495,7 @@ def enable_field_32bit(pb_h):
 
 
 def public_filter_name(template, protocol):
-    """The protocol filter's name: entry points <name>_filter_udp / <name>_filter_tcp."""
+    """The protocol's filter name: entry points <name>_udp / <name>_tcp (default: the folder name)."""
 
     name = (template or '{unit}').replace('{unit}', protocol)
     if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name):
@@ -469,23 +518,35 @@ def include_format_opts(prefix):
 
 def cmd_gen_c(args):
     validate = not args.no_validate
+    tempdirs = []
 
     # Descriptors and filter entrypoints first, one unit after the other: they
     # use protoc and protobuf in this process.
     jobs = []
-    for name in select_units(args):
-        unit = Unit(args.protos_root, name, args.include)
-        unit.nanopb_opts = include_format_opts(getattr(args, 'include_prefix', None))
-        entries, source_of_entries = [], None
-        protocol = protocol_name(unit) if validate and not args.no_filter else None
-        # One filter per protocol: with a protocol filter (<unit>_filter_udp/_tcp, any message of the
-        # unit via Any) no per-message filters are generated; without Any, the root message gets one.
-        if validate and not args.no_filter and not protocol:
-            entries, source_of_entries = unit_entrypoints(unit, args.port_map)
-        specs = [e + (':single' if predicted_mode(unit, e) == 'single' else '') for e in entries]
-        public = public_filter_name(args.filter_name, protocol) if protocol else None
-        jobs.append((name, unit, entries, source_of_entries, specs, protocol, public))
+    try:
+        for name in select_units(args):
+            unit = Unit(args.protos_root, name, args.include)
+            optdir = tempfile.mkdtemp(prefix='nanopb_ws_opt_')
+            tempdirs.append(optdir)
+            renamed = prefix_imports(unit, optdir)
+            # nanopb's -I is its .options search path: the prefixing options come first.
+            unit.nanopb_opts = ['-I' + optdir] + include_format_opts(getattr(args, 'include_prefix', None))
+            entries, source_of_entries = [], None
+            protocol = protocol_name(unit) if validate and not args.no_filter else None
+            # One filter per protocol, <name>_udp/_tcp (name = protocol folder or --filter-name):
+            # with Any it takes any message of the protocol; without, the root message.
+            if validate and not args.no_filter and not protocol:
+                entries, source_of_entries = unit_entrypoints(unit, args.port_map)
+            specs = [e + (':single' if predicted_mode(unit, e) == 'single' else '') for e in entries]
+            public = public_filter_name(args.filter_name, c_identifier(name)) if (protocol or len(entries) == 1) else None
+            jobs.append((name, unit, entries, source_of_entries, specs, protocol, public, renamed))
+        return _gen_jobs(args, validate, jobs, tempdirs)
+    finally:
+        for path in tempdirs:
+            shutil.rmtree(path, ignore_errors=True)
 
+
+def _gen_jobs(args, validate, jobs, tempdirs):
     names = [job[0] for job in jobs]
     common = COMMON_UNIT
     while common in names:
@@ -507,9 +568,9 @@ def cmd_gen_c(args):
 
     def run(job):
         # Only subprocesses and file I/O: safe to run for several units at once.
-        name, unit, entries, source_of_entries, specs, protocol, public = job
+        name, unit, entries, source_of_entries, specs, protocol, public, _ = job
         gendir = tempfile.mkdtemp(prefix='nanopb_ws_gen_')
-        gendirs.append(gendir)
+        tempdirs.append(gendir)
         protocol_error = None
         try:
             log, modes, filter_errors = run_generator_with_filters(args.nanopb_root, unit, gendir,
@@ -526,19 +587,18 @@ def cmd_gen_c(args):
                                                                    validate, specs)
         return gendir, protocol, protocol_error, log, modes, filter_errors
 
-    def generate(job, ran, shared, shared_runtime):
-        name, unit, entries, source_of_entries, specs, _, public = job
+    def generate(job, ran, shared_runtime):
+        name, unit, entries, source_of_entries, specs, _, public, renamed = job
         gendir, protocol, protocol_error, log, modes, filter_errors = ran
         outdir = os.path.join(args.out, name)
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
         files, header, parts = merge_unit(unit, gendir, outdir, validate, protocol,
-                                          getattr(args, 'author', None), (public + '_filter') if protocol else None,
-                                          shared, common if shared else None)
+                                          getattr(args, 'author', None), public)
         with open(os.path.join(outdir, header)) as handle:
             header_text = handle.read()
         filters = re.findall(r'^int (\w+_udp)\(void \*ctx', header_text, re.M)
-        protocol_filter = public + '_filter_udp' if protocol and public + '_filter_udp' in filters else None
+        protocol_filter = public + '_udp' if protocol and public + '_udp' in filters else None
         filters = [f for f in filters if f != protocol_filter]
         # The generator puts its '#error Enable PB_FIELD_32BIT' in the .pb.c.
         with open(os.path.join(outdir, name + '.pb.c')) as handle:
@@ -547,6 +607,8 @@ def cmd_gen_c(args):
             copy_runtime(outdir, files, field_32bit)
         result = {'unit': name, 'dir': outdir, 'files': files, 'merged_from': parts, 'unit_object': unit,
                   'protocol_filter': protocol_filter, 'filters': filters, 'generator_log': log.strip()}
+        if renamed:
+            result['prefixed_imports'] = renamed
         if field_32bit:
             result['needs_field_32bit'] = field_32bit
             result['field_32bit_enabled_in_pb_h'] = bool(args.with_runtime)
@@ -563,56 +625,23 @@ def cmd_gen_c(args):
         return result
 
     # The generator run (protoc + two plugin processes) is most of the time.
-    gendirs = []
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(len(jobs), os.cpu_count() or 1))) as pool:
-            ran = list(pool.map(run, jobs))
-        shared = shared_bases([job[1] for job in jobs], [r[0] for r in ran])
-        # Several protocols in one run: one runtime copy, next to the shared types, so
-        # a program that links them all has each symbol once.
-        shared_runtime = bool(args.with_runtime and len(jobs) > 1)
-        results = [generate(job, r, shared, shared_runtime) for job, r in zip(jobs, ran)]
-        common_result = None
-        if shared or shared_runtime:
-            common_dir = os.path.join(args.out, common)
-            if not os.path.isdir(common_dir):
-                os.makedirs(common_dir)
-            # Files of an earlier run that this one does not write must not be linked by mistake.
-            for suffix in GENERATED_SUFFIXES:
-                stale = os.path.join(common_dir, common + suffix)
-                if os.path.isfile(stale):
-                    os.remove(stale)
-            files, parts = [], []
-            if shared:
-                users = sorted(set(u for us in shared.values() for u in us))
-                # Dependencies first, as each unit lists them.
-                order = []
-                for job in jobs:
-                    for n in job[1].generated_files():
-                        if os.path.splitext(n)[0] in shared and n not in order:
-                            order.append(n)
-                # Every shared file is generated identically everywhere: take each from a unit that has it.
-                gendir = tempfile.mkdtemp(prefix='nanopb_ws_common_')
-                gendirs.append(gendir)
-                for base, unit_names in shared.items():
-                    src = ran[names.index(unit_names[0])][0]
-                    for suffix in GENERATED_SUFFIXES:
-                        path = os.path.join(src, base + suffix)
-                        if os.path.isfile(path):
-                            dest = os.path.join(gendir, base + suffix)
-                            if not os.path.isdir(os.path.dirname(dest)):
-                                os.makedirs(os.path.dirname(dest))
-                            shutil.copy(path, dest)
-                common_unit = CommonUnit(common, order)
-                files, _, parts = merge_unit(common_unit, gendir, common_dir, validate,
-                                             author=getattr(args, 'author', None), users=users)
-            if shared_runtime:
-                copy_runtime(common_dir, files, any(r.get('needs_field_32bit') for r in results))
-            common_result = {'unit': common, 'dir': common_dir, 'files': files, 'merged_from': parts,
-                             'shared': {b + '.proto': us for b, us in sorted(shared.items())}}
-    finally:
-        for gendir in gendirs:
-            shutil.rmtree(gendir, ignore_errors=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(len(jobs), os.cpu_count() or 1))) as pool:
+        ran = list(pool.map(run, jobs))
+    # Several protocols in one run: one runtime copy, so a program that links them all
+    # has each runtime symbol once. Their types never clash: imports carry the protocol prefix.
+    shared_runtime = bool(args.with_runtime and len(jobs) > 1)
+    results = [generate(job, r, shared_runtime) for job, r in zip(jobs, ran)]
+    common_result = None
+    if shared_runtime:
+        common_dir = os.path.join(args.out, common)
+        if not os.path.isdir(common_dir):
+            os.makedirs(common_dir)
+        for old in OLD_COMMON_FILES:
+            if os.path.isfile(os.path.join(common_dir, old)):
+                os.remove(os.path.join(common_dir, old))
+        files = []
+        copy_runtime(common_dir, files, any(r.get('needs_field_32bit') for r in results))
+        common_result = {'unit': common, 'dir': common_dir, 'files': files}
     if validate:
         for result in results:
             result['recommended_defines'] = validation_defines(result['unit_object'])
@@ -622,14 +651,3 @@ def cmd_gen_c(args):
     if common_result:
         out['common'] = common_result
     return out
-
-
-class CommonUnit(object):
-    """The shared types as a unit for merge_unit(): a name and its proto files."""
-
-    def __init__(self, name, proto_names):
-        self.name = name
-        self.names = proto_names
-
-    def generated_files(self):
-        return list(self.names)

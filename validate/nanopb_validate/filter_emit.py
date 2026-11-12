@@ -315,7 +315,8 @@ class ProtocolFilterEmitter(object):
 
     def __init__(self, name, hub, index, messages, pb_headers, validate_headers, public_name=None):
         self.name = name
-        self.public_name = (public_name or name) + '_filter'   # <name>_filter_udp / _tcp
+        # --filter-name NAME: exactly NAME_udp / _tcp; without it <name>_filter_udp / _tcp.
+        self.public_name = public_name or (name + '_filter')
         self.hub = hub                  # ProtoFile that knows every message of the request
         self.index = index              # DescriptorIndex
         self.messages = messages        # protocol message FQNs, in declaration order

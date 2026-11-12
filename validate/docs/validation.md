@@ -36,13 +36,15 @@ writes one merged `<protocol>.pb.c/.h` and `<protocol>_validate.c/.h` per
 protocol (see the [README](../README.md)). Compile with `-I validate/runtime`
 and link `validate/runtime/pb_validate.c`.
 
-Protocols generated in the same run share their common imports
-(`google/protobuf/*.proto` and any `.proto` two protocols import, when its
-generated code is identical): those go once to `<out>/common/common.pb.c/.h`
-and `common_validate.c/.h`, which the protocols' headers include. Add
-`-I <out>/common` and compile `common/*.c` once; every protocol then links into
-the same program. With `--with-runtime` the runtime is copied there once, too.
-A run with a single protocol keeps everything in its own folder.
+Each protocol is self-contained. Files it imports from outside its folder
+(`google/protobuf/any.proto`, a shared `common.proto`, ...) are generated under the
+protocol's name: `camera_google_protobuf_Any`, `camera_shared_Point`,
+`pb_validate_camera_google_protobuf_Any()`. This uses nanopb's own `package` file
+option; the files' `.options` still apply. Protocols generated separately, or with
+different `.options` for the same import, therefore link into one program, and
+their headers can be included in one file. Wire format and `type_url`s do not change.
+With several protocols in one run and `--with-runtime`, the runtime is copied
+once to `<out>/common/` (add `-I <out>/common`, compile it once).
 
 ### With protoc directly
 
@@ -391,15 +393,16 @@ Passed via `--nanopb-validate_opt=` (or before the `:` in
   because protoc already uses it to separate plugin options.)
 - `--protocol-filter=NAME`: one filter for a whole protocol, see
   [Protocol filter](#protocol-filter). Independent of `--filter`.
-- `--filter-name=NAME`: the entry points become `NAME_filter_udp` and
-  `NAME_filter_tcp`. Applies to the protocol filter, or to the single
-  `--filter` entrypoint. Default: the protocol name for a protocol filter,
-  `pkg_Msg` for an entrypoint.
+- `--filter-name=NAME`: the entry points become exactly `NAME_udp` and
+  `NAME_tcp`. Applies to the protocol filter, or to the single
+  `--filter` entrypoint. Without it: `<protocol-filter name>_filter_udp`, or
+  `pkg_Msg_filter_udp` for an entrypoint. `gen PROTOS_DIR` always passes it:
+  `<protocol folder>_udp`.
 
 #### Calling a filter, and drop logs
 
 ```c
-if (NAME_filter_udp(NULL, packet, packet_size) != 0) {
+if (NAME_udp(NULL, packet, packet_size) != 0) {
     /* dropped */
 }
 ```
@@ -437,7 +440,7 @@ int NAME_filter_udp(void *ctx, const uint8_t *packet, size_t packet_size);
 int NAME_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
 ```
 
-(`--filter-name=OTHER` renames them `OTHER_filter_udp` / `OTHER_filter_tcp`.)
+(`--filter-name=OTHER` renames them `OTHER_udp` / `OTHER_tcp`.)
 
 Every packet is a `google.protobuf.Any`. Its `type_url` is the opcode: a
 `switch` on it selects one of the protocol's messages (every message of the

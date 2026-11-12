@@ -50,7 +50,7 @@ class FilterOptions(object):
         # --protocol-filter=NAME: one Any-dispatched filter for every message.
         self.protocol_filter = protocol_filter
         self.protocol_messages = ()
-        # --filter-name=NAME: entry points NAME_filter_udp / NAME_filter_tcp.
+        # --filter-name=NAME: entry points exactly NAME_udp / NAME_tcp.
         self.filter_name = filter_name
 
     @property
@@ -193,7 +193,7 @@ def build_filter_options(raw):
     if filter_name is not None:
         if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', filter_name):
             raise GeneratorError("--filter-name=%s: the name must be a C identifier "
-                                 "(the entry points are <name>_filter_udp / <name>_filter_tcp)." % filter_name)
+                                 "(the entry points are <name>_udp / <name>_tcp)." % filter_name)
         if protocol_filter is None and len(messages) != 1:
             raise GeneratorError("--filter-name names one filter: give it with --protocol-filter, "
                                  "or with exactly one --filter entrypoint.")

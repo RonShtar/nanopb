@@ -80,7 +80,7 @@ def files_parser():
     p.add_argument('--filter', action='append', default=[], metavar='pkg.Msg',
                    help='also generate a packet filter with this entrypoint (repeatable)')
     p.add_argument('--protocol-filter', metavar='NAME', help='one Any-dispatched filter for every message')
-    p.add_argument('--filter-name', metavar='NAME', help='entry points NAME_filter_udp / NAME_filter_tcp')
+    p.add_argument('--filter-name', metavar='NAME', help='entry points NAME_udp / NAME_tcp (default: the protocol folder name)')
     p.add_argument('--nanopb-opt', action='append', default=[], metavar='OPT',
                    help='option for nanopb_generator (e.g. -q, -s, --c-style), passed to both plugins')
     p.add_argument('--validate-opt', action='append', default=[], metavar='OPT',

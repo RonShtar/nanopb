@@ -260,7 +260,7 @@ local protocol_choices = { { "none", "(none: decode by port map / Any)", 0 } }
 for i, name in ipairs(protocol_names) do protocol_choices[#protocol_choices + 1] = { name, name, i } end
 nanopb.prefs.protocol = Pref.enum("Protocol", 0,
     "Primary protocol: every NANOPB packet without a port map message is a google.protobuf.Any "
-        .. "whose type_url selects a message of this protocol, validated like <protocol>_filter_udp",
+        .. "whose type_url selects a message of this protocol, validated like <protocol>_udp",
     protocol_choices, false)
 
 local function primary_protocol()
@@ -730,7 +730,7 @@ end
 -- Collect the fields of message `msg_name` at offset/length into a state
 -- table; decode failures are appended to `errors` (with their path).
 -- `protocol` (protocol Decode As only): { name = ..., messages = set } plus the
--- current Any nesting level `any_depth`, checked like <protocol>_filter_udp.
+-- current Any nesting level `any_depth`, checked like <protocol>_udp.
 local MAX_ANY_DEPTH = 4  -- PB_VALIDATE_FILTER_MAX_ANY_DEPTH
 
 local function collect(tvb, offset, length, msg_name, depth, path, errors, with_any, protocol, any_depth)
@@ -1479,7 +1479,7 @@ end
 -- Each protocol is also a Wireshark protocol named after its folder: choose
 -- it with Analyze > Decode As > UDP/TCP port > FLEET (or set it as the NANOPB
 -- Protocol preference). Every packet is a google.protobuf.Any whose type_url
--- selects a message of that protocol, validated like <name>_filter_udp.
+-- selects a message of that protocol, validated like <name>_udp.
 for _, name in ipairs(protocol_names) do
     -- Wireshark wants a lowercase filter name; Decode As shows it uppercased.
     -- A name Wireshark already uses (e.g. a folder called "ip") gets a prefix.
