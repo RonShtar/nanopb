@@ -535,6 +535,36 @@ class ProtocolFilterEmitter(object):
         for fqn, msg in self._protocol_irs():
             cases.setdefault(type_url_hash(fqn), []).append((fqn, msg))
 
+        # One macro for every message: decode the Any's value as TYPE, validate it,
+        # then return NEXT (allow, or the walker of its own Any fields).
+        macro = '%s_FILTER_MESSAGE' % name.upper()
+        drop = 'PB_VALIDATE_FILTER_DROP("%s", ' % self.public_name.replace('"', "'")
+        body = [
+            'do {',
+            '    if (strcmp(type_name, NAME) == 0) {',
+            '        TYPE payload;',
+            '        pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);',
+            '        if (!pb_decode(&stream, &TYPE##_msg, &payload)) {',
+            '            %s"cannot decode " NAME);' % drop,
+            '            return %s;' % RET_REJECT,
+            '        }',
+            '        if (!VALIDATE(&payload, NULL)) {',
+            '            %sNAME " validation failed");' % drop,
+            '            return %s;' % RET_REJECT,
+            '        }',
+            '        return NEXT;',
+            '    }',
+            '} while (0)',
+        ]
+        width = max(len(line) for line in body) + 5
+        yield '/* Decode the Any\'s value as TYPE (type_url name NAME), validate it with\n'
+        yield ' * VALIDATE, then return NEXT. One line per message in the switch below. */\n'
+        yield '#define %s(NAME, TYPE, VALIDATE, NEXT) \\\n' % macro
+        for i, line in enumerate(body):
+            last = i == len(body) - 1
+            yield '    ' + (line if last else (line.ljust(width) + '\\')) + '\n'
+        yield '\n'
+
         yield '/* The type_url is the opcode: it selects the message to decode and validate. */\n'
         yield 'static int %s_check_any(const %s *any, int depth)\n{\n' % (name, any_ctype)
         yield '    const char *type_name = strrchr(any->type_url, \'/\');\n'
@@ -552,28 +582,14 @@ class ProtocolFilterEmitter(object):
         for value, entries in cases.items():
             yield '        case 0x%08xu:\n' % value
             for fqn, msg in entries:
-                ctype = self.ctype(msg)
-                yield '            if (strcmp(type_name, "%s") == 0) {\n' % fqn
-                yield '                %s payload;\n' % ctype
-                yield '                pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);\n'
-                yield '                if (!pb_decode(&stream, &%s_msg, &payload)) {\n' % ctype
-                for line in self._reject('                    ', 'cannot decode %s' % fqn):
-                    yield line
-                yield '                }\n'
-                yield '                if (!%s(&payload, NULL)) {\n' % validator_func_name(msg)
-                for line in self._reject('                    ', '%s validation failed' % fqn):
-                    yield line
-                yield '                }\n'
-                if str(msg.name) in seen:
-                    yield '                return %s(&payload, depth + 1);\n' % self.check_func(msg)
-                else:
-                    yield '                return %s;\n' % RET_ALLOW
-                yield '            }\n'
+                after = ('%s(&payload, depth + 1)' % self.check_func(msg)) if str(msg.name) in seen else RET_ALLOW
+                yield '            %s("%s", %s, %s, %s);\n' % (
+                    macro, fqn, self.ctype(msg), validator_func_name(msg), after)
             yield '            break;\n'
         yield '        default:\n            break;\n    }\n'
         for line in self._reject('    ', 'type_url is not a message of this protocol'):
             yield line
-        yield '}\n\n'
+        yield '}\n\n#undef %s\n\n' % macro
 
         yield 'static int %s_filter_core(const uint8_t *packet, size_t packet_size)\n{\n' % name
         yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'

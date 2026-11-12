@@ -208,17 +208,35 @@ def scope_to_unit(text, ident, aliases):
     return text
 
 
-def c_define_lines(defines):
-    """'#ifndef NAME / #define NAME VALUE / #endif' for each NAME or NAME=VALUE (a -DNAME wins)."""
+def compile_if_condition(names):
+    """'defined(A) && defined(B)' for --compile-if A --compile-if B, '' without any."""
 
-    out = ''
-    for item in defines or ():
-        name, _, value = item.partition('=')
-        name = name.strip()
+    for name in names or ():
         if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', name):
-            raise BackendError('--c-define %s: "%s" is not a C identifier' % (item, name))
-        out += '#ifndef %s\n#define %s%s\n#endif\n' % (name, name, (' ' + value.strip()) if value.strip() else '')
-    return out
+            raise BackendError('--compile-if %s: not a C identifier' % name)
+    names = list(names or ())
+    if len(names) == 1:
+        return None, names[0]
+    return ' && '.join('defined(%s)' % n for n in names), None
+
+
+def compile_if_wrap(names, text, file_name):
+    """``text`` inside '#ifdef NAME ... #endif /* NAME */' (or '#if defined(A) && ...').
+
+    A gated-off .c would be an empty translation unit, which ISO C forbids
+    (-Wpedantic): it then declares one unused typedef instead.
+    """
+
+    if not names:
+        return text
+    condition, single = compile_if_condition(names)
+    label = single or condition
+    opening = ('#ifdef %s\n' % single) if single else ('#if %s\n' % condition)
+    filler = ''
+    if file_name.endswith('.c'):
+        filler = '#else\ntypedef int %s_compiled_out; /* ISO C: a file must declare something */\n' % (
+            re.sub(r'[^A-Za-z0-9_]', '_', file_name))
+    return opening + '\n' + text.rstrip('\n') + '\n\n' + filler + '#endif /* %s */\n' % label
 
 
 def header_dir_for(template, unit_name):
@@ -231,7 +249,7 @@ def header_dir_for(template, unit_name):
 
 
 def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, public=None,
-               header_dir='', defines=()):
+               header_dir='', compile_if=()):
     """Merge the unit's generated files into <unit>.pb.c/.h and <unit>_validate.c/.h.
 
     <unit>.pb.*: every .pb.c/.pb.h of the unit and its imports (types,
@@ -297,12 +315,13 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
         checks = (VERSION_CHECK if had_version_check else '') + (RUNTIME_CHECK if had_runtime_check else '')
         return ''.join(line + '\n' for line in lib_includes), bodies, checks
 
-    def write(name, text, top=''):
-        # ``top`` (the --c-define block) goes after the Doxygen banner and is not scoped
-        # to the unit: the user's #ifndef/#define pair must keep its name.
+    def write(name, text):
+        # --compile-if NAME: the whole file (after the Doxygen banner) inside #ifdef NAME;
+        # wrapped after scoping, so the user's NAME is never prefixed with the unit.
         from c_layout import tidy_c
+        body = scope_to_unit(text, c_identifier(unit.name), aliases)
         with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
-            handle.write(tidy_c(banner(name) + top + scope_to_unit(text, c_identifier(unit.name), aliases)))
+            handle.write(tidy_c(banner(name) + compile_if_wrap(compile_if, body, name)))
 
     # nanopb's aliases for the prefixed imports (#define google_protobuf_Any camera_google_protobuf_Any).
     aliases = []
@@ -324,9 +343,7 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
     def write_source(name, includes, parts):
         del lib_includes[:], had_version_check[:], had_runtime_check[:]
         head, bodies, checks = top(parts)
-        # --c-define NAME: before every include, so the headers see it too.
-        write(name, head + ''.join(local(include) for include in includes) + checks + bodies,
-              c_define_lines(defines))
+        write(name, head + ''.join(local(include) for include in includes) + checks + bodies)
 
     lib_includes = []
     had_version_check = []
@@ -549,6 +566,10 @@ def include_format_opts(prefix):
 def cmd_gen_c(args):
     validate = not args.no_validate
     tempdirs = []
+    # Bad option values fail before any file is written.
+    compile_if_condition(getattr(args, 'compile_if', None))
+    for name in select_units(args):
+        header_dir_for(getattr(args, 'header_dir', None), name)
 
     # Descriptors and filter entrypoints first, one unit after the other: they
     # use protoc and protobuf in this process.
@@ -626,7 +647,7 @@ def _gen_jobs(args, validate, jobs, tempdirs):
         files, header, parts = merge_unit(unit, gendir, outdir, validate, protocol,
                                           getattr(args, 'author', None), public,
                                           header_dir_for(getattr(args, 'header_dir', None), name),
-                                          getattr(args, 'c_define', None) or ())
+                                          getattr(args, 'compile_if', None) or ())
         with open(os.path.join(outdir, header)) as handle:
             header_text = handle.read()
         filters = re.findall(r'^int (\w+_udp)\(void \*ctx', header_text, re.M)

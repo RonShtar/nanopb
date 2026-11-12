@@ -37,7 +37,7 @@ works the same.
 | Command | What it does |
 |---|---|
 | `check PROTOS_DIR` | Compiles every protocol and reports errors (syntax, imports, rules the generator cannot honour) and warnings (fields without `max_size`/`max_count`, messages needing `PB_FIELD_32BIT`, filters that cannot be built). Exit 1 on errors. |
-| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (default `{unit}` = protocol folder); `--c-define CONFIG_COMPILE_FILTER` writes `#define CONFIG_COMPILE_FILTER` at the top of every generated `.c` (before its includes; repeatable, `NAME=VALUE` works); `--header-dir filter/{unit}` makes the generated files include each other as `"filter/camera/camera_validate.h"`; `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). Imports from outside a protocol folder get that protocol's prefix, so all protocols link into one program; with several protocols and `--with-runtime` the runtime goes once to `<out>/common/`. |
+| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (default `{unit}` = protocol folder); `--compile-if CONFIG_COMPILE_FILTER` wraps every generated `.c` and `.h` in `#ifdef CONFIG_COMPILE_FILTER ... #endif`, so they compile only when your build defines it; `--header-dir filter/{unit}` makes the generated files include each other as `"filter/camera/camera_validate.h"`; `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). Imports from outside a protocol folder get that protocol's prefix, so all protocols link into one program; with several protocols and `--with-runtime` the runtime goes once to `<out>/common/`. |
 | `gen FILE.proto ...` | Per file, like nanopb: `<f>.pb.c/.h` and `<f>_validate.c/.h`. `--filter pkg.Msg` adds a filter; `--nanopb-opt` passes nanopb options to both generators. |
 | `packets PROTOS_DIR --out DIR` | A capture of PASSED and DROPPED packets of every message, plus each packet as a C array and hex; installs the dissector schema. |
 | `wireshark install` | Installs the Lua plugins and a private copy of this tool into Wireshark (once). |
@@ -82,9 +82,9 @@ if (fleet_udp(NULL, data, size) != 0)
   Wireshark menu's include field, or `wireshark install --include-prefix NanoPB`)
   writes `#include <NanoPB/pb.h>`, `<NanoPB/pb_validate.h>`, ...; compile with `-I`
   on the folder that contains `NanoPB/`.
-- Match your project's tree: `gen --header-dir "filter/{unit}" --c-define CONFIG_COMPILE_FILTER`
-  writes `#define CONFIG_COMPILE_FILTER` at the top of every generated `.c` and
-  `#include "filter/camera/camera_validate.h"`. In Wireshark these are two fields of
+- Match your project's tree: `gen --header-dir "filter/{unit}" --compile-if CONFIG_COMPILE_FILTER`
+  puts every generated `.c` and `.h` inside `#ifdef CONFIG_COMPILE_FILTER ... #endif` (define it
+  in your build, e.g. `-DCONFIG_COMPILE_FILTER`) and writes `#include "filter/camera/camera_validate.h"`. In Wireshark these are two fields of
   Tools > nanopb > Set protos directory, saved for every Generate C; `wireshark install`
   takes the same two options only to pre-fill them. Nothing else needs them.
 - `--protos-root` is the folder *above* the protocol folders (`protocols/`, holding

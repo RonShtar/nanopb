@@ -822,32 +822,34 @@ class BackendTests(unittest.TestCase):
         envelope = next(u for u in result['units'] if u['unit'] == 'envelope')
         self.assertEqual(envelope['protocol_filter'], 'envelope_udp')
 
-    def test_c_define_and_header_dir(self):
-        """--c-define puts '#define NAME' (guarded) before the includes of every .c and keeps
-        its name; --header-dir filter/{unit} makes the generated files include each other as
-        "filter/<unit>/..."; the files then compile from a src/filter/<unit>/ tree."""
+    def test_compile_if_and_header_dir(self):
+        """--compile-if puts every generated .c and .h inside '#ifdef NAME ... #endif /* NAME */'
+        (the name is never unit-prefixed); --header-dir filter/{unit} makes the generated files
+        include each other as "filter/<unit>/..."; the files then compile from a src/filter/<unit>/
+        tree with -DNAME, and to nothing (no empty-unit warning) without it."""
 
         out = os.path.join(self.tmp, 'out')
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
                                           '--unit', 'envelope', '--header-dir', 'filter/{unit}',
-                                          '--c-define', 'CONFIG_COMPILE_FILTER', '--c-define', 'LEVEL=2')
+                                          '--compile-if', 'CONFIG_COMPILE_FILTER')
         self.assertEqual(status, 0, err)
         unit_dir = os.path.join(out, 'envelope')
-        top = '#ifndef CONFIG_COMPILE_FILTER\n#define CONFIG_COMPILE_FILTER\n#endif\n' \
-              '#ifndef LEVEL\n#define LEVEL 2\n#endif\n'
-        for name in ('envelope.pb.c', 'envelope_validate.c'):
+        for name in ('envelope.pb.c', 'envelope_validate.c', 'envelope.pb.h', 'envelope_validate.h'):
             with open(os.path.join(unit_dir, name)) as handle:
                 text = handle.read()
-            self.assertIn(' */\n' + top + '#include', text)
-            self.assertLess(text.index(top), text.index('#include'))
+            self.assertIn(' */\n#ifdef CONFIG_COMPILE_FILTER\n', text, name)
+            self.assertLess(text.index('#ifdef CONFIG_COMPILE_FILTER'), text.index('#include'), name)
+            self.assertTrue(text.endswith('#endif /* CONFIG_COMPILE_FILTER */\n'), name)
+            self.assertNotIn('#define CONFIG_COMPILE_FILTER', text, name)
         with open(os.path.join(unit_dir, 'envelope.pb.c')) as handle:
-            self.assertIn('#include "filter/envelope/envelope_validate.h"', handle.read())
-        with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
             text = handle.read()
-        self.assertIn('#include "filter/envelope/envelope.pb.h"', text)
-        self.assertNotIn('CONFIG_COMPILE_FILTER', text)
+        self.assertIn('#include "filter/envelope/envelope_validate.h"', text)
+        self.assertIn('#define ENVELOPE_FILTER_MESSAGE(NAME, TYPE, VALIDATE, NEXT)', text)
+        self.assertIn('#undef ENVELOPE_FILTER_MESSAGE', text)
+        with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
+            self.assertIn('#include "filter/envelope/envelope.pb.h"', handle.read())
         status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--unit', 'envelope',
-                                     '--c-define', '9X')
+                                     '--compile-if', '9X')
         self.assertEqual(status, 1)
         self.assertIn('not a C identifier', err)
 
@@ -858,8 +860,12 @@ class BackendTests(unittest.TestCase):
         shutil.copytree(unit_dir, os.path.join(src, 'filter', 'envelope'))
         sources = [os.path.join(src, 'filter', 'envelope', f)
                    for f in os.listdir(os.path.join(src, 'filter', 'envelope')) if f.endswith('.c')]
-        self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-I', src,
-                               '-I', os.path.join(src, 'filter', 'envelope')], sources)
+        flags = ['-std=c99', '-Wall', '-Wextra', '-Werror', '-I', src,
+                 '-I', os.path.join(src, 'filter', 'envelope')]
+        self.compile_each(cc, flags + ['-DCONFIG_COMPILE_FILTER'], sources)
+        # Compiled out: -pedantic would reject an empty translation unit (nanopb's pb.h is
+        # not pedantic-clean in C99, but without the flag it is not included).
+        self.compile_each(cc, flags + ['-pedantic'], [s for s in sources if 'envelope' in os.path.basename(s)])
 
     def test_rule_on_callback_field_is_an_error(self):
         """A rule on a field without max_size (a pb_callback_t) fails generation with a

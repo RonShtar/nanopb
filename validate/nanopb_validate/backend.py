@@ -88,9 +88,9 @@ def build_parser():
     p.add_argument('--header-dir', metavar='DIR', default=None,
                    help='folder the generated files include each other from: --header-dir filter/{unit} gives '
                         '#include "filter/camera/camera_validate.h" ({unit} = protocol folder). Default: none')
-    p.add_argument('--c-define', metavar='NAME[=VALUE]', action='append', default=None,
-                   help='#define NAME at the top of every generated .c file, before its includes '
-                        '(e.g. CONFIG_COMPILE_FILTER); repeat for more')
+    p.add_argument('--compile-if', metavar='NAME', action='append', default=None,
+                   help='wrap every generated .c and .h in #ifdef NAME ... #endif, so they compile only '
+                        'when the build defines NAME (e.g. CONFIG_COMPILE_FILTER); repeat: all must be defined')
     p.set_defaults(func=cmd_gen_c)
 
     p = sub.add_parser('gen-data', help='generate encoded sample messages')
@@ -164,8 +164,8 @@ def build_parser():
                    help='Generate C includes nanopb headers as <DIR/pb.h> (e.g. NanoPB); saved for the menu')
     p.add_argument('--header-dir', default=None, metavar='DIR',
                    help='Generate C: generated files include each other as "DIR/<file>" (filter/{unit}); saved')
-    p.add_argument('--c-define', default=None, metavar='NAMES',
-                   help='Generate C: #define these (space separated) at the top of every .c file; saved')
+    p.add_argument('--compile-if', default=None, metavar='NAMES',
+                   help='Generate C: wrap every .c/.h in #ifdef NAME ... #endif (space separated: all); saved')
     p.set_defaults(func=cmd_install_studio)
     return parser
 

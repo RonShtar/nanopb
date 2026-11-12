@@ -731,8 +731,12 @@ def cmd_install_studio(args):
         config['include_prefix'] = args.include_prefix.strip().strip('/\\')
     if getattr(args, 'header_dir', None) is not None:
         config['header_dir'] = args.header_dir.strip().strip('/\\')
-    if getattr(args, 'c_define', None) is not None:
-        config['c_defines'] = ' '.join(args.c_define.split())
+    # c_defines (the earlier #define option) became compile_if.
+    old = config.pop('c_defines', None)
+    if old and not config.get('compile_if'):
+        config['compile_if'] = old
+    if getattr(args, 'compile_if', None) is not None:
+        config['compile_if'] = ' '.join(args.compile_if.split())
     keys = ['python', 'project', 'nanopb_root', 'protos_root', 'output_dir', 'extra_includes', 'port_map']
     keys += sorted(k for k in config if k not in keys)
     with open(config_path, 'w', newline='\n') as handle:
