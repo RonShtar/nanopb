@@ -402,7 +402,7 @@ installed copy containing the tool).
     nanopb_validate gen       P --out O [--unit U] [--port-map MAP] [--no-filter] [--with-runtime] [--no-validate] [--filter-name NAME]
     nanopb_validate packets   P --out O [--unit U] [--mode ports|protocol] [--protocol-port 16000] [--port-map MAP] [--any-port 15999] [--valid 2] [--max-invalid 40] [--seed 1] [--format pcapng|pcap] [--plugins-dir D | --no-install]
     nanopb_validate wireshark load    --protos-root P [--plugins-dir D] [--port-map MAP]   (same as Set protos directory; also automatic at start) (Wireshark)
-    nanopb_validate wireshark install [--plugins-dir D] [--protos-root P] [--dev]
+    nanopb_validate wireshark install [--plugins-dir D] [--protos-root P] [--dev] [--include-prefix DIR] [--header-dir filter/{unit}] [--c-define "CONFIG_COMPILE_FILTER ..."]   (the last three are saved for Generate C; also in Set protos directory)
     nanopb_validate wireshark refresh [--plugins-dir D]                                    (run by the dissector at startup)
     nanopb_validate wireshark units   --protos-root P [--names-only]
 

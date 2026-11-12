@@ -634,13 +634,18 @@ class StudioTests(LuaTestCase):
         self.assertTrue(self.last_window().text.startswith('OK'), self.last_window().text)
         self.assertEqual(os.listdir(self.out), ['fleet'])
 
-    def test_unit_list_needs_no_python(self):
-        # The picker reads the protos directory itself; only Generate runs the backend.
-        self.lua.execute('io.popen = function() error("no process may be started for the unit list") end')
-        stress = STRESS_PROTOS
+    def test_unit_list_matches_the_dissector(self):
+        # The picker lists what the backend (and so the dissector's schema) sees as protocols,
+        # also one whose .proto files are only in subfolders.
+        root = os.path.join(self.tmp, 'nested_protos')
+        shutil.copytree(STRESS_PROTOS, root)
+        os.makedirs(os.path.join(root, 'radar', 'messages'))
+        with open(os.path.join(root, 'radar', 'messages', 'radar.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage radar;\nmessage Echo { uint32 range = 1; }\n')
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)',
-                             input_dir=stress)
+                             input_dir=root)
         self.assertIn('[x] fleet', picker.text)
+        self.assertIn('[x] radar', picker.text)
         self.assertIn('[ ] shared   (already merged into fleet)', picker.text)
 
     def test_generate_with_nothing_selected(self):

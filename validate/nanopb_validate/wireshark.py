@@ -729,6 +729,10 @@ def cmd_install_studio(args):
         config['port_map'] = loaded.get('port_map', config.get('port_map', ''))
     if getattr(args, 'include_prefix', None) is not None:
         config['include_prefix'] = args.include_prefix.strip().strip('/\\')
+    if getattr(args, 'header_dir', None) is not None:
+        config['header_dir'] = args.header_dir.strip().strip('/\\')
+    if getattr(args, 'c_define', None) is not None:
+        config['c_defines'] = ' '.join(args.c_define.split())
     keys = ['python', 'project', 'nanopb_root', 'protos_root', 'output_dir', 'extra_includes', 'port_map']
     keys += sorted(k for k in config if k not in keys)
     with open(config_path, 'w', newline='\n') as handle:

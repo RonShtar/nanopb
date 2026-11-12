@@ -822,6 +822,45 @@ class BackendTests(unittest.TestCase):
         envelope = next(u for u in result['units'] if u['unit'] == 'envelope')
         self.assertEqual(envelope['protocol_filter'], 'envelope_udp')
 
+    def test_c_define_and_header_dir(self):
+        """--c-define puts '#define NAME' (guarded) before the includes of every .c and keeps
+        its name; --header-dir filter/{unit} makes the generated files include each other as
+        "filter/<unit>/..."; the files then compile from a src/filter/<unit>/ tree."""
+
+        out = os.path.join(self.tmp, 'out')
+        status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
+                                          '--unit', 'envelope', '--header-dir', 'filter/{unit}',
+                                          '--c-define', 'CONFIG_COMPILE_FILTER', '--c-define', 'LEVEL=2')
+        self.assertEqual(status, 0, err)
+        unit_dir = os.path.join(out, 'envelope')
+        top = '#ifndef CONFIG_COMPILE_FILTER\n#define CONFIG_COMPILE_FILTER\n#endif\n' \
+              '#ifndef LEVEL\n#define LEVEL 2\n#endif\n'
+        for name in ('envelope.pb.c', 'envelope_validate.c'):
+            with open(os.path.join(unit_dir, name)) as handle:
+                text = handle.read()
+            self.assertIn(' */\n' + top + '#include', text)
+            self.assertLess(text.index(top), text.index('#include'))
+        with open(os.path.join(unit_dir, 'envelope.pb.c')) as handle:
+            self.assertIn('#include "filter/envelope/envelope_validate.h"', handle.read())
+        with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
+            text = handle.read()
+        self.assertIn('#include "filter/envelope/envelope.pb.h"', text)
+        self.assertNotIn('CONFIG_COMPILE_FILTER', text)
+        status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--unit', 'envelope',
+                                     '--c-define', '9X')
+        self.assertEqual(status, 1)
+        self.assertIn('not a C identifier', err)
+
+        cc = find_cc()
+        if not cc:
+            return
+        src = os.path.join(self.tmp, 'src')
+        shutil.copytree(unit_dir, os.path.join(src, 'filter', 'envelope'))
+        sources = [os.path.join(src, 'filter', 'envelope', f)
+                   for f in os.listdir(os.path.join(src, 'filter', 'envelope')) if f.endswith('.c')]
+        self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-I', src,
+                               '-I', os.path.join(src, 'filter', 'envelope')], sources)
+
     def test_rule_on_callback_field_is_an_error(self):
         """A rule on a field without max_size (a pb_callback_t) fails generation with a
         message naming the field, instead of writing C that does not compile."""
