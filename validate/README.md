@@ -82,6 +82,13 @@ if (fleet_udp(NULL, data, size) != 0)
   Wireshark menu's include field, or `wireshark install --include-prefix NanoPB`)
   writes `#include <NanoPB/pb.h>`, `<NanoPB/pb_validate.h>`, ...; compile with `-I`
   on the folder that contains `NanoPB/`.
+- Match your project's tree: `gen --header-dir "filter/{unit}" --c-define CONFIG_COMPILE_FILTER`
+  writes `#define CONFIG_COMPILE_FILTER` at the top of every generated `.c` and
+  `#include "filter/camera/camera_validate.h"`. In Wireshark these are two fields of
+  Tools > nanopb > Set protos directory, saved for every Generate C; `wireshark install`
+  takes the same two options only to pre-fill them. Nothing else needs them.
+- `--protos-root` is the folder *above* the protocol folders (`protocols/`, holding
+  `camera/`, `gps/`, ...). Pointing it at one protocol's folder makes that the only protocol.
 - Define `PB_FIELD_32BIT` (and any other `PB_*` switch) identically for every
   file, nanopb's included; `check` and `gen` tell you when it is needed.
 
