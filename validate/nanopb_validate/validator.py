@@ -540,6 +540,13 @@ class ValidatorGenerator:
         Returns:
             C code string for this rule
         """
+        if getattr(field, 'allocation', None) == 'CALLBACK':
+            # A pb_callback_t holds no value to check: the macros would not compile.
+            raise ValidationRuleNotImplementedError(
+                'validate.proto rule "%s" on message "%s" field "%s" needs the field stored in the '
+                'struct, but it is a callback (pb_callback_t). Give it (nanopb).max_size (strings, '
+                'bytes) or (nanopb).max_count (repeated, map), inline or in the .options file.'
+                % (rule.constraint_id, message_name or '?', getattr(field, 'name', '?')))
         # Build field context
         if is_oneof:
             context = FieldContext.for_oneof_member(field, oneof_name, is_anonymous)

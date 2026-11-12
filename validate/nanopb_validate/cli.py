@@ -153,7 +153,8 @@ def cmd_check(argv, global_args):
                 result = run_json(backend.main, gen_argv)
             if not result:
                 entry['errors'] += [l.strip() for l in buf_err.getvalue().splitlines()
-                                    if l.strip() and 'is unused' not in l][-12:]
+                                    if l.strip() and 'is unused' not in l
+                                    and 'Breaking circular dependency' not in l][-12:]
             for unit in result.get('units', []):
                 entry['warnings'] += check_generated(unit)
             report['errors'] += len(entry['errors'])

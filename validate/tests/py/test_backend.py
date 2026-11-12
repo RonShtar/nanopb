@@ -802,6 +802,18 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0)
         self.assertEqual(run.stdout.split(), ['6', '2'])
 
+    def test_rule_on_callback_field_is_an_error(self):
+        """A rule on a field without max_size (a pb_callback_t) fails generation with a
+        message naming the field, instead of writing C that does not compile."""
+
+        root = os.path.join(self.tmp, 'protos')
+        self.write_tree(root, {'cb/cb.proto': 'syntax = "proto3";\npackage cb;\nimport "validate.proto";\n'
+                               'message M { string name = 1 [(validate.rules).string = {min_len: 1}]; }\n'})
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', os.path.join(self.tmp, 'out'))
+        self.assertNotEqual(status, 0)
+        self.assertIn('field "name" needs the field stored in the struct, but it is a callback', err)
+        self.assertIn('(nanopb).max_size', err)
+
     def test_one_argument_drop_logger(self):
         """PB_VALIDATE_FILTER_DROP hands PB_VALIDATE_FILTER_LOG one ready-made string,
         so a logger without printf arguments compiles; an older pb_validate.h is an #error."""
