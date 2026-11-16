@@ -70,7 +70,7 @@ What is in it:
 | `test_stress.py` | the 7-file `fleet` example end to end: C round trip, samples, Wireshark dissection |
 | `test_dissector.py` | the Lua plugins against a mock Wireshark (needs `lupa`, skipped without) |
 | `test_cli.py` | `check`, `gen`, `packets`, `wireshark ...` as a user types them |
-| `test_cmake_install.py` | `cmake -S validate`: `libprotobuf-nanopb-validate`, `pb_validate.h` installed, `find_package(nanopb-validate)` links and runs |
+| `test_cmake_install.py` | `pb_validate` in nanopb's CMake build: with the hook it is a member of `libprotobuf-nanopb.a` and a project linking only nanopb's library runs the validators; without the hook it is absent (control); `cmake -S validate` builds a separate library that `find_package(nanopb-validate)` links |
 | `test_build_addons.py` | `validate/extra/NanopbValidate.cmake` |
 | `test_buf_convert.py` | `validate/tools/buf_to_validate.py` |
 | `test_nanopb_api.py` | what this tool uses from nanopb is still there after an upgrade |
