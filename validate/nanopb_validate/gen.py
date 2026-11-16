@@ -231,6 +231,19 @@ def compile_if_wrap(names, text, file_name):
     return opening + '\n' + text.rstrip('\n') + '\n\n#endif /* %s */\n' % label
 
 
+def first_include_lines(files):
+    """'#include "FILE"' for every --first-include, before the --compile-if gate:
+    the project's header that defines CONFIG_COMPILE_FILTER (or not)."""
+
+    out = ''
+    for name in files or ():
+        name = name.strip().replace('\\', '/')
+        if not name or '"' in name or '\n' in name:
+            raise BackendError('--first-include %r: give a header name such as filter_source_include.h' % name)
+        out += '#include "%s"\n' % name
+    return out
+
+
 def header_dir_for(template, unit_name):
     """'filter/camera' from --header-dir filter/{unit}, '' without one."""
 
@@ -241,7 +254,7 @@ def header_dir_for(template, unit_name):
 
 
 def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, public=None,
-               header_dir='', compile_if=()):
+               header_dir='', compile_if=(), first_include=()):
     """Merge the unit's generated files into <unit>.pb.c/.h and <unit>_validate.c/.h.
 
     <unit>.pb.*: every .pb.c/.pb.h of the unit and its imports (types,
@@ -313,7 +326,8 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
         from c_layout import tidy_c
         body = scope_to_unit(text, c_identifier(unit.name), aliases)
         with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
-            handle.write(tidy_c(banner(name) + compile_if_wrap(compile_if, body, name)))
+            handle.write(tidy_c(banner(name) + first_include_lines(first_include)
+                                + compile_if_wrap(compile_if, body, name)))
 
     # nanopb's aliases for the prefixed imports (#define google_protobuf_Any camera_google_protobuf_Any).
     aliases = []
@@ -348,7 +362,7 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
     has_filters = False
     for name in pb_sources:
         with open(os.path.join(gendir, name)) as handle:
-            has_filters = has_filters or '_filter_core(' in handle.read()
+            has_filters = has_filters or 'PB_VALIDATE_FILTER_DROP(' in handle.read()
 
     write_header(pb_h, 'NANOPB_UNIT_%s_PB_H_INCLUDED' % ident, [], pb_headers)
     write_source(pb_c, [pb_h] + ([validate_h] if has_filters and validate_headers else []), pb_sources)
@@ -560,6 +574,7 @@ def cmd_gen_c(args):
     tempdirs = []
     # Bad option values fail before any file is written.
     compile_if_condition(getattr(args, 'compile_if', None))
+    first_include_lines(getattr(args, 'first_include', None))
     for name in select_units(args):
         header_dir_for(getattr(args, 'header_dir', None), name)
 
@@ -639,7 +654,8 @@ def _gen_jobs(args, validate, jobs, tempdirs):
         files, header, parts = merge_unit(unit, gendir, outdir, validate, protocol,
                                           getattr(args, 'author', None), public,
                                           header_dir_for(getattr(args, 'header_dir', None), name),
-                                          getattr(args, 'compile_if', None) or ())
+                                          getattr(args, 'compile_if', None) or (),
+                                          getattr(args, 'first_include', None) or ())
         with open(os.path.join(outdir, header)) as handle:
             header_text = handle.read()
         filters = re.findall(r'^int (\w+_udp)\(void \*ctx', header_text, re.M)

@@ -102,8 +102,16 @@ class BackendTests(unittest.TestCase):
             self.assertIn('<pb_validate.h>', validate_h)
             self.assertNotIn('pb_validate', pb_h)
             self.assertNotIn('PB_BIND', validate_c)
-            self.assertIn('_filter_core(', pb_c)
-            self.assertNotIn('_filter_core(', validate_c)
+            if unit == 'envelope':
+                # An Any protocol filter: one static function plus the two entry points.
+                self.assertIn('static int %s_check_any(' % unit, pb_c)
+                self.assertNotIn('_filter_core(', pb_c)
+            else:
+                # An entry-point filter (a root message, not wrapped in Any) keeps its core.
+                self.assertIn('_filter_core(', pb_c)
+            self.assertIn('int %s_udp(' % unit, pb_c)
+            for name in ('_filter_core(', '_check_any(', '_udp('):
+                self.assertNotIn(name, validate_c)
 
         header = self.read('envelope', 'envelope.pb.h')
         # Dependency (Any) comes before its user, and storage is static.
@@ -831,20 +839,22 @@ class BackendTests(unittest.TestCase):
         out = os.path.join(self.tmp, 'out')
         status, result, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--with-runtime',
                                           '--unit', 'envelope', '--header-dir', 'filter/{unit}',
-                                          '--compile-if', 'CONFIG_COMPILE_FILTER')
+                                          '--compile-if', 'CONFIG_COMPILE_FILTER',
+                                          '--first-include', 'filter_source_include.h')
         self.assertEqual(status, 0, err)
         unit_dir = os.path.join(out, 'envelope')
         for name in ('envelope.pb.c', 'envelope_validate.c', 'envelope.pb.h', 'envelope_validate.h'):
             with open(os.path.join(unit_dir, name)) as handle:
                 text = handle.read()
-            self.assertIn(' */\n#ifdef CONFIG_COMPILE_FILTER\n', text, name)
-            self.assertLess(text.index('#ifdef CONFIG_COMPILE_FILTER'), text.index('#include'), name)
+            # The project header comes first, then the gate, then everything else.
+            self.assertIn(' */\n#include "filter_source_include.h"\n#ifdef CONFIG_COMPILE_FILTER\n', text, name)
+            self.assertLess(text.index('filter_source_include.h'), text.index('#ifdef CONFIG_COMPILE_FILTER'), name)
             self.assertTrue(text.endswith('#endif /* CONFIG_COMPILE_FILTER */\n'), name)
             self.assertNotIn('#define CONFIG_COMPILE_FILTER', text, name)
         with open(os.path.join(unit_dir, 'envelope.pb.c')) as handle:
             text = handle.read()
         self.assertIn('#include "filter/envelope/envelope_validate.h"', text)
-        self.assertIn('#define ENVELOPE_FILTER_MESSAGE(NAME, TYPE, VALIDATE, NEXT)', text)
+        self.assertIn('#define ENVELOPE_FILTER_MESSAGE(NAME, TYPE, VALIDATE)', text)
         self.assertIn('#undef ENVELOPE_FILTER_MESSAGE', text)
         with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
             self.assertIn('#include "filter/envelope/envelope.pb.h"', handle.read())
@@ -858,6 +868,8 @@ class BackendTests(unittest.TestCase):
             return
         src = os.path.join(self.tmp, 'src')
         shutil.copytree(unit_dir, os.path.join(src, 'filter', 'envelope'))
+        with open(os.path.join(src, 'filter_source_include.h'), 'w') as handle:
+            handle.write('/* the project defines CONFIG_COMPILE_FILTER here */\n')
         sources = [os.path.join(src, 'filter', 'envelope', f)
                    for f in os.listdir(os.path.join(src, 'filter', 'envelope')) if f.endswith('.c')]
         flags = ['-std=c99', '-Wall', '-Wextra', '-Werror', '-I', src,

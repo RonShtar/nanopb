@@ -378,9 +378,6 @@ class ProtocolFilterEmitter(object):
     def ctype(self, msg):
         return Globals.naming_style.type_name(msg.name)
 
-    def check_func(self, msg):
-        return '%s_check_%s' % (self.name, self.ctype(msg))
-
     # -- emission -------------------------------------------------------------
 
     def header(self):
@@ -424,30 +421,15 @@ class ProtocolFilterEmitter(object):
         yield drop_line(indent, self.public_name, reason)
         yield '%sreturn %s;\n' % (indent, RET_REJECT)
 
-    def _visit(self, indent, field, access):
-        """Statements that check one Any field or one sub-message holding Any."""
-        if field.allocation != 'STATIC':
-            raise GeneratorError(
-                "--protocol-filter: field '%s' of %s holds a google.protobuf.Any but has %s "
-                "storage, which the filter cannot inspect. Give it max_size/max_count."
-                % (field.name, field.struct_name, field.allocation.lower()))
-        sub = self.ir(field.ctype)
-        func = '%s_check_any' % self.name if sub is self.any_ir else self.check_func(sub)
-        if field.rules == 'REPEATED':
-            count = '%s_count' % access
-        elif field.rules == 'FIXARRAY':
-            count = '(pb_size_t)(sizeof(%s) / sizeof(%s[0]))' % (access, access)
-        else:
-            count = None
-        if count is None:
-            return ['%sif (%s(&%s, depth) != 0) return %s;\n' % (indent, func, access, RET_REJECT)]
-        return ['%s{\n' % indent,
-                '%s    pb_size_t i;\n' % indent,
-                '%s    for (i = 0; i < %s; i++)\n' % (indent, count),
-                '%s        if (%s(&%s[i], depth) != 0) return %s;\n' % (indent, func, access, RET_REJECT),
-                '%s}\n' % indent]
-
-    def _check_body(self, msg):
+    def _walk(self, msg, prefix, indent, level=0, active=()):
+        """Statements that resolve every google.protobuf.Any inside `msg`, written
+        inline: `prefix` is how the message is reached ("payload->", "payload->body.frame.").
+        Sub-messages are walked in place (a static struct cannot contain itself), so
+        the only recursion is through <unit>_check_any, one level per Any."""
+        if str(msg.name) in active:
+            raise GeneratorError('--protocol-filter: %s contains itself without an Any in between'
+                                 % msg.name)
+        active = active + (str(msg.name),)
         lines = []
         for field in msg.fields:
             if field.pbtype == 'oneof':
@@ -456,28 +438,56 @@ class ProtocolFilterEmitter(object):
                     sub = self.ir(member.ctype) if member.pbtype in ('MESSAGE', 'MSG_W_CB') else None
                     if sub is None or not (sub is self.any_ir or self.holds_any(sub)):
                         continue
-                    access = ('msg->%s' % member.name) if field.anonymous else ('msg->%s.%s' % (field.name, member.name))
-                    arms.append(['        case %s_%s_tag:\n' % (msg.name, member.name)] +
-                                self._visit('            ', member, access) + ['            break;\n'])
+                    access = prefix + (member.name if field.anonymous else '%s.%s' % (field.name, member.name))
+                    arms.append(['%s    case %s_%s_tag:\n' % (indent, msg.name, member.name)]
+                                + self._visit(indent + '        ', member, access, level, active)
+                                + ['%s        break;\n' % indent])
                 if arms:
-                    lines.append('    switch (msg->which_%s) {\n' % field.name)
+                    lines.append('%sswitch (%swhich_%s) {\n' % (indent, prefix, field.name))
                     for arm in arms:
                         lines += arm
-                    lines.append('        default:\n            break;\n    }\n')
+                    lines.append('%s    default:\n%s        break;\n%s}\n' % (indent, indent, indent))
                 continue
             if field.pbtype not in ('MESSAGE', 'MSG_W_CB'):
                 continue
             sub = self.ir(field.ctype)
             if sub is None or not (sub is self.any_ir or self.holds_any(sub)):
                 continue
-            access = 'msg->%s' % field.name
+            access = prefix + field.name
             if field.rules == 'OPTIONAL':
-                lines.append('    if (msg->has_%s) {\n' % field.name)
-                lines += self._visit('        ', field, access)
-                lines.append('    }\n')
+                lines.append('%sif (%shas_%s) {\n' % (indent, prefix, field.name))
+                lines += self._visit(indent + '    ', field, access, level, active)
+                lines.append('%s}\n' % indent)
             else:
-                lines += self._visit('    ', field, access)
+                lines += self._visit(indent, field, access, level, active)
         return lines
+
+    def _visit(self, indent, field, access, level, active):
+        """Statements for one field that is an Any or holds one."""
+        if field.allocation != 'STATIC':
+            raise GeneratorError(
+                "--protocol-filter: field '%s' of %s holds a google.protobuf.Any but has %s "
+                "storage, which the filter cannot inspect. Give it max_size/max_count."
+                % (field.name, field.struct_name, field.allocation.lower()))
+        sub = self.ir(field.ctype)
+        if field.rules == 'REPEATED':
+            count = '%s_count' % access
+        elif field.rules == 'FIXARRAY':
+            count = '(pb_size_t)(sizeof(%s) / sizeof(%s[0]))' % (access, access)
+        else:
+            count = None
+        item = access if count is None else '%s[i%d]' % (access, level)
+        inner = indent if count is None else indent + '        '
+        if sub is self.any_ir:
+            body = ['%sif (%s_check_any(&%s, depth + 1) != 0) return %s;\n' % (inner, self.name, item, RET_REJECT)]
+        else:
+            body = self._walk(sub, item + '.', inner, level + 1, active)
+        if count is None:
+            return body
+        return (['%s{\n' % indent,
+                 '%s    pb_size_t i%d;\n' % (indent, level),
+                 '%s    for (i%d = 0; i%d < %s; i%d++) {\n' % (indent, level, level, count, level)]
+                + body + ['%s    }\n' % indent, '%s}\n' % indent])
 
     def _protocol_irs(self):
         result = []
@@ -503,35 +513,6 @@ class ProtocolFilterEmitter(object):
         yield '#ifndef PB_VALIDATE_FILTER_MAX_ANY_DEPTH\n#define PB_VALIDATE_FILTER_MAX_ANY_DEPTH 4\n#endif\n\n'
 
         any_ctype = self.ctype(self.any_ir)
-        yield 'static int %s_check_any(const %s *any, int depth);\n' % (name, any_ctype)
-
-        # Every message that holds an Any gets a walker (protocol messages and
-        # anything they reach, e.g. map entries), declared up front for recursion.
-        walkers = []
-        seen = set()
-        pending = [msg for _, msg in self._protocol_irs()]
-        while pending:
-            msg = pending.pop(0)
-            if str(msg.name) in seen or msg is self.any_ir or not self.holds_any(msg):
-                continue
-            seen.add(str(msg.name))
-            walkers.append(msg)
-            for _, field in self.plain_fields(msg):
-                if field.pbtype in ('MESSAGE', 'MSG_W_CB'):
-                    sub = self.ir(field.ctype)
-                    if sub is not None:
-                        pending.append(sub)
-        for msg in walkers:
-            yield 'static int %s(const %s *msg, int depth);\n' % (self.check_func(msg), self.ctype(msg))
-        yield '\n'
-        for msg in walkers:
-            yield '/* Resolve the google.protobuf.Any fields of %s. */\n' % msg.name
-            yield 'static int %s(const %s *msg, int depth)\n{\n' % (self.check_func(msg), self.ctype(msg))
-            for line in self._check_body(msg):
-                yield line
-            yield '    (void)depth;\n'
-            yield '    return %s;\n}\n\n' % RET_ALLOW
-
         cases = OrderedDict()
         for fqn, msg in self._protocol_irs():
             cases.setdefault(type_url_hash(fqn), []).append((fqn, msg))
@@ -554,36 +535,57 @@ class ProtocolFilterEmitter(object):
                 yield '#define %s0x%08xu /* "%s" */\n' % (hash_names[fqn].ljust(width), value, fqn)
         yield '\n'
 
-        # One macro for every message: decode the Any's value as TYPE, validate it,
-        # then return NEXT (allow, or the walker of its own Any fields). The name is
-        # compared by length + memcmp: the length is known from the hash loop.
-        macro = '%s_FILTER_MESSAGE' % name.upper()
+        # Macros for the switch below. A message without Any fields is one line
+        # (<UNIT>_FILTER_MESSAGE); one with Any fields is decoded the same way and
+        # its Any fields are resolved right there, in this one function.
+        up = name.upper()
         drop = 'PB_VALIDATE_FILTER_DROP("%s", ' % self.public_name.replace('"', "'")
-        body = [
+        nested = set(str(msg.name) for _, msg in self._protocol_irs() if self.holds_any(msg))
+
+        def define(signature, body, comment):
+            width = max(len(line) for line in body) + 5
+            out = '/* %s */\n#define %s \\\n' % (comment, signature)
+            for i, line in enumerate(body):
+                out += '    ' + (line if i == len(body) - 1 else line.ljust(width) + '\\') + '\n'
+            return out + '\n'
+
+        yield ('/* Where a decoded payload lives: on the stack, or static with\n'
+               ' * PB_VALIDATE_FILTER_STATIC_BUFFERS (nothing large on the stack; not reentrant).\n'
+               ' * A message with Any fields can come back inside itself, so it gets one\n'
+               ' * static slot per nesting level. */\n')
+        yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
+        yield '#define %s_PAYLOAD(TYPE) static TYPE payload_store; TYPE *payload = &payload_store\n' % up
+        yield ('#define %s_NESTED_PAYLOAD(TYPE) static TYPE payload_store[PB_VALIDATE_FILTER_MAX_ANY_DEPTH]; '
+               'TYPE *payload = &payload_store[depth]\n' % up)
+        yield '#else\n'
+        yield '#define %s_PAYLOAD(TYPE) TYPE payload_store; TYPE *payload = &payload_store\n' % up
+        yield '#define %s_NESTED_PAYLOAD(TYPE) %s_PAYLOAD(TYPE)\n' % (up, up)
+        yield '#endif\n\n'
+        yield ('/* The name in the type_url is NAME (length first: it is known from the hash loop). */\n'
+               '#define %s_NAME_IS(NAME) \\\n'
+               '    (name_size == sizeof(NAME) - 1 && memcmp(type_name, NAME, sizeof(NAME) - 1) == 0)\n\n' % up)
+        yield define('%s_DECODE(NAME, TYPE, VALIDATE)' % up, [
             'do {',
-            '    if (name_size == sizeof(NAME) - 1 && memcmp(type_name, NAME, sizeof(NAME) - 1) == 0) {',
-            '        TYPE payload;',
-            '        pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);',
-            '        if (!pb_decode(&stream, &TYPE##_msg, &payload)) {',
-            '            %s"cannot decode " NAME);' % drop,
-            '            return %s;' % RET_REJECT,
-            '        }',
-            '        if (!VALIDATE(&payload, NULL)) {',
-            '            %sNAME " validation failed");' % drop,
-            '            return %s;' % RET_REJECT,
-            '        }',
-            '        return NEXT;',
+            '    pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);',
+            '    if (!pb_decode(&stream, &TYPE##_msg, payload)) {',
+            '        %s"cannot decode " NAME);' % drop,
+            '        return %s;' % RET_REJECT,
+            '    }',
+            '    if (!VALIDATE(payload, NULL)) {',
+            '        %sNAME " validation failed");' % drop,
+            '        return %s;' % RET_REJECT,
             '    }',
             '} while (0)',
-        ]
-        width = max(len(line) for line in body) + 5
-        yield '/* Decode the Any\'s value as TYPE (type_url name NAME), validate it with\n'
-        yield ' * VALIDATE, then return NEXT. One line per message in the switch below. */\n'
-        yield '#define %s(NAME, TYPE, VALIDATE, NEXT) \\\n' % macro
-        for i, line in enumerate(body):
-            last = i == len(body) - 1
-            yield '    ' + (line if last else (line.ljust(width) + '\\')) + '\n'
-        yield '\n'
+        ], 'Decode the Any\'s value into *payload as TYPE and validate it; drop the packet if either fails.')
+        yield define('%s_FILTER_MESSAGE(NAME, TYPE, VALIDATE)' % up, [
+            'do {',
+            '    if (%s_NAME_IS(NAME)) {' % up,
+            '        %s_PAYLOAD(TYPE);' % up,
+            '        %s_DECODE(NAME, TYPE, VALIDATE);' % up,
+            '        return %s;' % RET_ALLOW,
+            '    }',
+            '} while (0)',
+        ], 'A message without Any fields: decode, validate, allow.')
 
         yield '/* The type_url is the opcode: it selects the message to decode and validate. */\n'
         yield 'static int %s_check_any(const %s *any, int depth)\n{\n' % (name, any_ctype)
@@ -610,34 +612,42 @@ class ProtocolFilterEmitter(object):
         for value, entries in cases.items():
             yield '        case %s:\n' % hash_names[entries[0][0]]
             for fqn, msg in entries:
-                after = ('%s(&payload, depth + 1)' % self.check_func(msg)) if str(msg.name) in seen else RET_ALLOW
-                yield '            %s("%s", %s, %s, %s);\n' % (
-                    macro, fqn, self.ctype(msg), validator_func_name(msg), after)
+                ctype, check = self.ctype(msg), validator_func_name(msg)
+                if str(msg.name) not in nested:
+                    yield '            %s_FILTER_MESSAGE("%s", %s, %s);\n' % (up, fqn, ctype, check)
+                    continue
+                yield '            if (%s_NAME_IS("%s")) {\n' % (up, fqn)
+                yield '                %s_NESTED_PAYLOAD(%s);\n' % (up, ctype)
+                yield '                %s_DECODE("%s", %s, %s);\n' % (up, fqn, ctype, check)
+                for line in self._walk(msg, 'payload->', '                '):
+                    yield line
+                yield '                return %s;\n' % RET_ALLOW
+                yield '            }\n'
             yield '            break;\n'
         yield '        default:\n            break;\n    }\n'
         for line in self._reject('    ', 'type_url is not a message of this protocol'):
             yield line
-        yield '}\n\n#undef %s\n\n' % macro
+        yield '}\n\n'
+        for macro in ('PAYLOAD', 'NESTED_PAYLOAD', 'NAME_IS', 'DECODE', 'FILTER_MESSAGE'):
+            yield '#undef %s_%s\n' % (up, macro)
+        yield '\n'
 
-        yield 'static int %s_filter_core(const uint8_t *packet, size_t packet_size)\n{\n' % name
+        public = self.public_name
+        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % public
         yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
         yield '    static %s any;\n' % any_ctype
         yield '#else\n'
         yield '    %s any;\n' % any_ctype
         yield '#endif\n'
         yield '    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);\n\n'
+        yield '    (void)ctx;\n'
         yield '    if (!pb_decode(&stream, &%s_msg, &any)) {\n' % any_ctype
         for line in self._reject('        ', 'packet is not a google.protobuf.Any'):
             yield line
         yield '    }\n'
         yield '    return %s_check_any(&any, 0);\n}\n\n' % name
-
-        public = self.public_name
-        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % public
-        yield '    (void)ctx;\n    return %s_filter_core(packet, packet_size);\n}\n\n' % name
         yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % public
-        yield '    (void)ctx;\n    (void)is_to_server;\n    return %s_filter_core(packet, packet_size);\n}\n' % name
-
+        yield '    (void)is_to_server;\n    return %s_udp(ctx, packet, packet_size);\n}\n' % public
 
 def protocol_messages(index, files):
     """FQNs of the messages a protocol filter accepts: every message of `files`

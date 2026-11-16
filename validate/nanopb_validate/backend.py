@@ -91,6 +91,9 @@ def build_parser():
     p.add_argument('--compile-if', metavar='NAME', action='append', default=None,
                    help='wrap every generated .c and .h in #ifdef NAME ... #endif, so they compile only '
                         'when the build defines NAME (e.g. CONFIG_COMPILE_FILTER); repeat: all must be defined')
+    p.add_argument('--first-include', metavar='FILE', action='append', default=None,
+                   help='#include "FILE" at the top of every generated .c and .h, before the --compile-if '
+                        'gate (e.g. filter_source_include.h, the header that defines CONFIG_COMPILE_FILTER)')
     p.set_defaults(func=cmd_gen_c)
 
     p = sub.add_parser('gen-data', help='generate encoded sample messages')
@@ -166,6 +169,8 @@ def build_parser():
                    help='Generate C: generated files include each other as "DIR/<file>" (filter/{unit}); saved')
     p.add_argument('--compile-if', default=None, metavar='NAMES',
                    help='Generate C: wrap every .c/.h in #ifdef NAME ... #endif (space separated: all); saved')
+    p.add_argument('--first-include', default=None, metavar='FILES',
+                   help='Generate C: #include these (space separated) before the #ifdef; saved')
     p.set_defaults(func=cmd_install_studio)
     return parser
 

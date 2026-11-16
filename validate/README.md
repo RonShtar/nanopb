@@ -37,7 +37,7 @@ works the same.
 | Command | What it does |
 |---|---|
 | `check PROTOS_DIR` | Compiles every protocol and reports errors (syntax, imports, rules the generator cannot honour) and warnings (fields without `max_size`/`max_count`, messages needing `PB_FIELD_32BIT`, filters that cannot be built). Exit 1 on errors. |
-| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (default `{unit}` = protocol folder); `--compile-if CONFIG_COMPILE_FILTER` wraps every generated `.c` and `.h` in `#ifdef CONFIG_COMPILE_FILTER ... #endif`, so they compile only when your build defines it; `--header-dir filter/{unit}` makes the generated files include each other as `"filter/camera/camera_validate.h"`; `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). Imports from outside a protocol folder get that protocol's prefix, so all protocols link into one program; with several protocols and `--with-runtime` the runtime goes once to `<out>/common/`. |
+| `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (default `{unit}` = protocol folder); `--compile-if CONFIG_COMPILE_FILTER` wraps every generated `.c` and `.h` in `#ifdef CONFIG_COMPILE_FILTER ... #endif`, so they compile only when your build defines it; `--first-include FILE` puts `#include "FILE"` at the top of every file, before that `#ifdef`; `--header-dir filter/{unit}` makes the generated files include each other as `"filter/camera/camera_validate.h"`; `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). Imports from outside a protocol folder get that protocol's prefix, so all protocols link into one program; with several protocols and `--with-runtime` the runtime goes once to `<out>/common/`. |
 | `gen FILE.proto ...` | Per file, like nanopb: `<f>.pb.c/.h` and `<f>_validate.c/.h`. `--filter pkg.Msg` adds a filter; `--nanopb-opt` passes nanopb options to both generators. |
 | `packets PROTOS_DIR --out DIR` | A capture of PASSED and DROPPED packets of every message, plus each packet as a C array and hex; installs the dissector schema. |
 | `wireshark install` | Installs the Lua plugins and a private copy of this tool into Wireshark (once). |
@@ -82,11 +82,20 @@ if (fleet_udp(NULL, data, size) != 0)
   Wireshark menu's include field, or `wireshark install --include-prefix NanoPB`)
   writes `#include <NanoPB/pb.h>`, `<NanoPB/pb_validate.h>`, ...; compile with `-I`
   on the folder that contains `NanoPB/`.
-- Match your project's tree: `gen --header-dir "filter/{unit}" --compile-if CONFIG_COMPILE_FILTER`
-  puts every generated `.c` and `.h` inside `#ifdef CONFIG_COMPILE_FILTER ... #endif` (define it
-  in your build, e.g. `-DCONFIG_COMPILE_FILTER`) and writes `#include "filter/camera/camera_validate.h"`. In Wireshark these are two fields of
+- Match your project's tree:
+  `gen --header-dir "filter/{unit}" --first-include filter_source_include.h --compile-if CONFIG_COMPILE_FILTER`
+  makes every generated `.c` and `.h` start with
+  `#include "filter_source_include.h"` (your header, the one that may define
+  `CONFIG_COMPILE_FILTER`), then `#ifdef CONFIG_COMPILE_FILTER ... #endif /* CONFIG_COMPILE_FILTER */`
+  around the rest of the file, and the generated files include each other as
+  `#include "filter/camera/camera_validate.h"`. If the build does not define
+  `CONFIG_COMPILE_FILTER` the files compile to nothing. In Wireshark these are three fields of
   Tools > nanopb > Set protos directory, saved for every Generate C; `wireshark install`
-  takes the same two options only to pre-fill them. Nothing else needs them.
+  takes the same options only to pre-fill them. Nothing else needs them.
+- `google.protobuf.Any` is static: `type_url[]` and `value` are arrays sized by
+  `google/protobuf/any.options` (built-in default 128 / 256 bytes), never callbacks;
+  see [docs/any-examples.md](docs/any-examples.md) for a 7-file protocol that uses `Any` in
+  repeated fields, oneofs, sub-messages and inside other `Any`s.
 - `--protos-root` is the folder *above* the protocol folders (`protocols/`, holding
   `camera/`, `gps/`, ...). Pointing it at one protocol's folder makes that the only protocol.
 - Define `PB_FIELD_32BIT` (and any other `PB_*` switch) identically for every
@@ -100,12 +109,14 @@ Cost per packet, stack and the switches that change them:
 
 | | |
 |---|---|
-| CMake | `include(validate/extra/NanopbValidate.cmake)` after `find_package(Nanopb)`, then `nanopb_validate_generate(SRCS HDRS a.proto [OPTIONS --filter pkg.Msg])` and link `nanopb_validate`. |
+| CMake, build and install | `cmake -S validate -B build && cmake --build build && cmake --install build` builds nanopb as usual **and** `libprotobuf-nanopb-validate` (`pb_validate.c`), and installs `pb_validate.h` and `pb_filter_macros.h` next to `pb.h`. Then `find_package(nanopb-validate REQUIRED)` and `target_link_libraries(app nanopb::protobuf-nanopb-validate)` (it links the nanopb runtime too). nanopb's own `CMakeLists.txt` builds and installs neither, and is not changed. `-DNANOPB_VALIDATE_WITH_NANOPB=OFF` adds only the validation library to an installed nanopb. |
+| CMake, generate | `include(validate/extra/NanopbValidate.cmake)` after `find_package(Nanopb)`, then `nanopb_validate_generate(SRCS HDRS a.proto [OPTIONS --filter pkg.Msg])` and link `nanopb_validate`. |
 | make | `include validate/extra/nanopb_validate.mk` (before nanopb's `extra/nanopb.mk`); `%.proto` builds `.pb.c/.h` and `_validate.c/.h`. |
 | protoc | `--plugin=protoc-gen-nanopb-validate=validate/nanopb_validate/plugin/protoc-gen-nanopb-validate`, `--nanopb_out` before `--nanopb-validate_out`; see [docs/validation.md](docs/validation.md#with-protoc-directly). |
 
-Both add-ons run `gen`, which the tests cover; the CMake and make files
-themselves are not exercised by the tests.
+The add-ons run `gen`, which the tests cover. The CMake files are built and run
+by `test_cmake_install.py` and `test_build_addons.py` (skipped where `cmake` is
+missing); the make file is not exercised by the tests.
 
 ## Layout
 
@@ -134,11 +145,14 @@ validate/
     plugin/            protoc-gen-nanopb-validate launchers
     validate_proto/    validate.proto (+ any/timestamp)
   wireshark/           Lua dissector and Tools > nanopb menu
-  extra/               CMake and make add-ons
+  CMakeLists.txt       cmake -S validate: nanopb + libprotobuf-nanopb-validate, installed
+  extra/               CMake and make add-ons, find_package(nanopb-validate) config
+  tools/               buf_to_validate.py: buf.validate -> validate.rules (standalone, stdlib only)
   examples/stress/     a full protocol: protos, captures, C round trip
-  tests/py/            tool, dissector, CLI, security, performance, separation
+  tests/py/            tool, filters at run time, dissector, CLI, security, performance, build files, separation
   tests/c/             C tests of the runtime and generated code (SCons)
-  docs/                validation, performance, Wireshark guide and reference, data generator
+  tests/windows_zig_shims.py   gcc/ar stand-ins on zig for Windows without gcc or MSVC
+  docs/                validation, performance, Any examples, testing, Wireshark guide and reference, data generator
 ```
 
 ## Tests
@@ -149,7 +163,18 @@ validate/
     python -m nanopb_validate test --perf        # budgets: filter <= 1.25 x decode, stack, context size
 
 `tests/py/test_upstream_separation.py` fails if any nanopb file differs from
-`UPSTREAM`.
+`UPSTREAM`. All four groups of tests, nanopb's own included, step by step:
+[docs/testing.md](docs/testing.md).
+
+### Converting protovalidate (buf.validate) protos
+
+`tools/buf_to_validate.py` is a separate script, not part of the generator:
+
+    python validate/tools/buf_to_validate.py PROTOS --out CONVERTED
+
+It rewrites `(buf.validate.field)` options to `(validate.rules)`, keeps comments, never
+touches the input, and lists every rule nanopb-validate cannot enforce (CEL,
+`pattern`, ...) instead of converting it into something that only looks equivalent.
 
 ## Upgrading nanopb
 
@@ -173,3 +198,5 @@ anything moved; a fix goes in `nanopb_api.py`, never in nanopb's files.
 - [docs/wireshark.md](docs/wireshark.md): Wireshark guide, step by step
 - [docs/wireshark-reference.md](docs/wireshark-reference.md): menu, dissector and command reference
 - [docs/datagen.md](docs/datagen.md): the test data generator
+- [docs/any-examples.md](docs/any-examples.md): `google.protobuf.Any` with many protos, static storage, the generated filter
+- [docs/testing.md](docs/testing.md): running all the tests, step by step

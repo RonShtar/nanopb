@@ -737,6 +737,8 @@ def cmd_install_studio(args):
         config['compile_if'] = old
     if getattr(args, 'compile_if', None) is not None:
         config['compile_if'] = ' '.join(args.compile_if.split())
+    if getattr(args, 'first_include', None) is not None:
+        config['first_include'] = ' '.join(args.first_include.split())
     keys = ['python', 'project', 'nanopb_root', 'protos_root', 'output_dir', 'extra_includes', 'port_map']
     keys += sorted(k for k in config if k not in keys)
     with open(config_path, 'w', newline='\n') as handle:
