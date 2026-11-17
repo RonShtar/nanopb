@@ -64,8 +64,10 @@ class CliTests(unittest.TestCase):
         report = result(out)
         by_name = dict((p['protocol'], p) for p in report['protocols'])
         self.assertTrue(by_name['broken']['errors'])
-        self.assertEqual(by_name['loose']['errors'], [])
-        self.assertIn('callbacks', ' '.join(by_name['loose']['warnings']))
+        # A field without max_size would be a pb_callback_t: static storage only, so an error.
+        loose = ' '.join(by_name['loose']['errors'])
+        self.assertIn('would not be static storage', loose)
+        self.assertIn('loose_L.name: CALLBACK string', loose)
         self.assertIn('PB_FIELD_32BIT', ' '.join(by_name['big']['warnings']))
 
     def test_gen_single_files(self):

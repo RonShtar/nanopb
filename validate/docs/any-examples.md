@@ -9,32 +9,48 @@ case in `validate/tests/py/test_filter_runtime.py`.
 ## 1. Is `Any` static? Yes.
 
 `Any` is two fields, `type_url` and `value`. nanopb makes each one a fixed array
-when it is given a size, and the tool always gives it one:
+when it is given a size, and the tool always gives both one:
 
-| Where the size comes from | type_url | value |
+| | size | from |
 |---|---|---|
-| Built in (`validate/nanopb_validate/wireshark_include/google/protobuf/any.options`) | 128 | 256 |
-| Your own `google/protobuf/any.options` in the protos folder (this example) | 96 | 512 |
+| `type_url` | exactly the longest URL the protocol can carry, plus the NUL | computed by `gen` per protocol: `type.googleapis.com/` + the longest full name of every message in the protocol's files and imports (nested ones too), or a longer `any.in` URL |
+| `value` | 256 bytes, or what your `google/protobuf/any.options` says (512 here) | `.options` |
 
-The generated struct, from `fleet.pb.h`:
+`gen` prints the result per protocol:
+
+```
+fleet -> out/fleet
+  Any.type_url: char[49], the longest URL + NUL (type.googleapis.com/fleet.telemetry.Health.Fault)
+```
+
+and the generated struct, from `fleet.pb.h`:
 
 ```c
 typedef PB_BYTES_ARRAY_T(512) fleet_google_protobuf_Any_value_t;
 typedef struct _fleet_google_protobuf_Any {
-    char type_url[96];
+    char type_url[49];
     fleet_google_protobuf_Any_value_t value;
-} fleet_google_protobuf_Any;          /* 610 bytes, no pb_callback_t anywhere */
+} fleet_google_protobuf_Any;          /* 564 bytes, no pb_callback_t anywhere */
 ```
 
-So no heap and no callbacks. The price of static is a limit: a `type_url` that does
-not fit in `type_url`, or a payload bigger than `value`, cannot be decoded and the
-packet is dropped (cases `type_url longer than its storage` and `payload bigger
-than Any.value`). Size `value` for your largest message.
+So no heap and no callbacks. The price of static is a limit: a `type_url` with a
+longer host than `type.googleapis.com/`, or a payload bigger than `value`, cannot be
+decoded and the packet is dropped (cases `type_url longer than its storage` and
+`payload bigger than Any.value`). Size `value` for your largest message.
 
-A `repeated Any` needs a count: give it `max_count` in the `.options` file
-(`fleet/envelope.options`: `fleet.envelope.Batch.items max_count:3`). A field
-without one would be a callback, and the filter generator refuses it with the
-field's name instead of generating something that cannot inspect it.
+**No callbacks, no malloc, anywhere.** `gen` refuses to write a protocol in which any
+field would be a `pb_callback_t` (a string, bytes, repeated field or map without
+`max_size`/`max_count`) or a pointer (nanopb's `FT_POINTER`, which needs malloc), and
+names each field:
+
+```
+error: fleet: 1 field(s) would not be static storage (CALLBACK = pb_callback_t, POINTER = malloc):
+  fleet_envelope_Batch.items: CALLBACK repeated message
+Give each a size in a .options file next to its .proto, for example ...
+```
+
+So a `repeated Any` needs a count (`fleet/envelope.options`:
+`fleet.envelope.Batch.items max_count:3`). `--allow-callbacks` turns the check off.
 
 ## 2. The protocol
 
@@ -42,7 +58,7 @@ Seven `.proto` files, one protocol (`fleet`), one shared folder:
 
 ```
 protos/
-  google/protobuf/any.options        Any storage (96 / 512)
+  google/protobuf/any.options        Any.value storage (512); type_url is computed
   fleet/types.proto                  Vec3, GeoPoint, DeviceId, Version, Severity
   fleet/sensors.proto                Imu, Battery, Gps
   fleet/commands.proto               Move, Stop, SetMode, Command (oneof of those)
@@ -159,14 +175,17 @@ Measured on this example (`sizeof`, 64-bit, `-std=c99`):
 
 | | bytes |
 |---|---|
-| `Any` (96 + 512 + length) | 610 |
+| `Any` (49 + 512 + length) | 564 |
 | `Imu` | 104 |
-| `Batch` (3 × Any) | 1832 |
-| `Frame` | 2672 |
-| `Envelope` | 2720 |
+| `Batch` (3 × Any) | 1694 |
+| `Frame` | 2488 |
+| `Envelope` | 2536 |
+
+(With the earlier fixed `type_url[96]` an `Any` was 610 bytes: the exact size saves 46
+bytes per `Any`, 138 in every `Batch`.)
 
 By default a decoded payload lives on the stack, one per nesting level: at most
-`PB_VALIDATE_FILTER_MAX_ANY_DEPTH` (4) of them at a time, so well under 4 × 2.7 KB
+`PB_VALIDATE_FILTER_MAX_ANY_DEPTH` (4) of them at a time, so well under 4 × 2.6 KB
 for this protocol. Build with `-DPB_VALIDATE_FILTER_STATIC_BUFFERS` to move them to
 static storage (nothing large on the stack; the filter then is not reentrant). A
 message that holds `Any` fields gets one static slot per nesting level, because it

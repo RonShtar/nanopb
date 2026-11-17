@@ -70,7 +70,8 @@ What is in it:
 | `test_stress.py` | the 7-file `fleet` example end to end: C round trip, samples, Wireshark dissection |
 | `test_dissector.py` | the Lua plugins against a mock Wireshark (needs `lupa`, skipped without) |
 | `test_cli.py` | `check`, `gen`, `packets`, `wireshark ...` as a user types them |
-| `test_cmake_install.py` | `pb_validate` in nanopb's CMake build: with the hook it is a member of `libprotobuf-nanopb.a` and a project linking only nanopb's library runs the validators; without the hook it is absent (control); `cmake -S validate` builds a separate library that `find_package(nanopb-validate)` links |
+| `test_static_storage.py` | `Any.type_url` is exactly the longest URL + NUL (also from `any.in`, replacing a project value); no `pb_callback_t` or pointer field is generated: such a field is refused by name, `--allow-callbacks` allows it |
+| `test_cmake_install.py` | `pb_validate` in nanopb's CMake build: `cmake -S validate` (3.14+) and the hook (3.19+) put it into `libprotobuf-nanopb.a` and a project linking only nanopb's library runs the validators; without either it is absent (control); `-DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF` builds a separate library that `find_package(nanopb-validate)` links |
 | `test_build_addons.py` | `validate/extra/NanopbValidate.cmake` |
 | `test_buf_convert.py` | `validate/tools/buf_to_validate.py` |
 | `test_nanopb_api.py` | what this tool uses from nanopb is still there after an upgrade |
@@ -85,6 +86,8 @@ The CMake tests build two projects. Toolchain options go in an environment varia
 ```
 export NANOPB_TEST_CMAKE_ARGS="-G Ninja"                    # Windows with zig: section 6
 python -m pytest -q validate/tests/py/test_cmake_install.py validate/tests/py/test_build_addons.py
+# with another CMake, e.g. 3.18 (the hook test is then skipped):
+NANOPB_TEST_CMAKE=/opt/cmake-3.18/bin/cmake python -m pytest -q validate/tests/py/test_cmake_install.py
 ```
 
 `test_cmake_install.py` also needs `protoc` where nanopb's `CMakeLists.txt` finds it

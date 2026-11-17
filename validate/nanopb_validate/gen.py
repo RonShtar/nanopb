@@ -395,6 +395,70 @@ def renamed_option_lines(text, old_package, new_package):
     return ''.join(line + '\n' for line in out)
 
 
+FIELDLIST_RE = re.compile(r'^#define (\w+)_FIELDLIST\(X, ?a\)[ \t]*\\\n((?:.*\\\n)*.*)$', re.M)
+FIELD_X_RE = re.compile(r'X\(a,\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),')
+
+
+def dynamic_fields(header_text):
+    """['camera_Frame.name: CALLBACK string', ...]: fields of the generated header that are not
+    static storage (nanopb's CALLBACK = pb_callback_t, POINTER = malloc)."""
+
+    found = []
+    for match in FIELDLIST_RE.finditer(header_text):
+        for allocation, rule, kind, field in FIELD_X_RE.findall(match.group(2)):
+            if allocation in ('CALLBACK', 'POINTER'):
+                found.append('%s.%s: %s %s%s' % (match.group(1), field, allocation,
+                                                 'repeated ' if rule == 'REPEATED' else '', kind.lower()))
+    return found
+
+
+#: The host part of a type_url as protobuf libraries write it.
+TYPE_URL_PREFIX = 'type.googleapis.com/'
+ANY_TYPE_URL_RE = re.compile(r'^(\S*google\.protobuf\.Any\.type_url\s+.*?)\bmax_size\s*:\s*\d+(.*)$')
+
+
+def longest_type_url(unit):
+    """(storage size, URL) for google.protobuf.Any.type_url: the longest
+    "type.googleapis.com/<message>" any message of the unit (its own files and
+    imports, nested messages included) can have, or an any.in URL, plus the NUL."""
+
+    longest = TYPE_URL_PREFIX
+
+    def walk(prefix, messages):
+        nonlocal longest
+        for msg in messages:
+            name = prefix + msg.name
+            if not msg.options.map_entry and len(TYPE_URL_PREFIX + name) > len(longest):
+                longest = TYPE_URL_PREFIX + name
+            for fld in msg.field:
+                rules = field_rules(fld)
+                if rules is not None and rules.HasField('any'):
+                    for url in getattr(rules.any, 'in'):
+                        if len(url) > len(longest):
+                            longest = url
+            walk(name + '.', msg.nested_type)
+
+    for fdesc in unit.fds.file:
+        if not is_option_proto(fdesc.name):
+            walk(fdesc.package + '.' if fdesc.package else '', fdesc.message_type)
+    return len(longest) + 1, longest
+
+
+def exact_type_url_size(options_text, package, size):
+    """The any.options text with every Any.type_url max_size replaced by one exact line."""
+
+    out = []
+    for line in options_text.splitlines():
+        match = ANY_TYPE_URL_RE.match(line)
+        if match and not line.lstrip().startswith('#'):
+            line = (match.group(1) + match.group(2)).strip()
+            if len(line.split()) < 2:        # only the name was left
+                continue
+        out.append(line)
+    out.append('%s.Any.type_url max_size:%d' % (package, size))
+    return ''.join(line + '\n' for line in out)
+
+
 def prefix_imports(unit, optdir):
     """Give every file the unit imports from outside its folder (google/protobuf/any.proto,
     a shared common.proto, ...) the unit's name as C prefix: camera_google_protobuf_Any.
@@ -422,6 +486,11 @@ def prefix_imports(unit, optdir):
                 break
         package = ident + ('.' + fdesc.package if fdesc.package else '')
         existing = renamed_option_lines(existing, fdesc.package, package)
+        if fdesc.name == 'google/protobuf/any.proto':
+            # type_url gets exactly the storage the longest URL of this protocol needs.
+            size, url = longest_type_url(unit)
+            existing = exact_type_url_size(existing, package, size)
+            unit.any_type_url = (size, url)
         target = os.path.join(optdir, base + '.options')
         if not os.path.isdir(os.path.dirname(target)):
             os.makedirs(os.path.dirname(target))
@@ -480,6 +549,9 @@ def gen_c_summary(results, common=None):
         if r.get('prefixed_imports'):
             lines.append('  imports under the protocol\'s prefix: ' + ', '.join(
                 '%s -> %s_*' % kv for kv in sorted(r['prefixed_imports'].items())))
+        if r.get('any_type_url'):
+            lines.append('  Any.type_url: char[%d], the longest URL + NUL (%s)'
+                         % (r['any_type_url']['max_size'], r['any_type_url']['longest']))
         if r.get('protocol_filter'):
             lines.append('  protocol filter (Any type_url = opcode, every message): %s/_tcp'
                          % r['protocol_filter'])
@@ -658,6 +730,21 @@ def _gen_jobs(args, validate, jobs, tempdirs):
                                           getattr(args, 'first_include', None) or ())
         with open(os.path.join(outdir, header)) as handle:
             header_text = handle.read()
+        dynamic = dynamic_fields(header_text)
+        if dynamic and not getattr(args, 'allow_callbacks', False):
+            # Static storage only: no pb_callback_t, no malloc. Leave nothing half usable behind.
+            for written in files:
+                path = os.path.join(outdir, written)
+                if os.path.isfile(path):
+                    os.remove(path)
+            raise BackendError(
+                '%s: %d field(s) would not be static storage (CALLBACK = pb_callback_t, POINTER = malloc):\n  %s\n'
+                'Give each a size in a .options file next to its .proto, for example\n'
+                '  pkg.Msg.name max_size:32       (string, bytes)\n'
+                '  pkg.Msg.items max_count:8      (repeated, map; plus max_size for strings)\n'
+                'A message that contains itself is a callback in nanopb: carry it in a google.protobuf.Any '
+                'instead. --allow-callbacks generates them anyway.'
+                % (name, len(dynamic), '\n  '.join(dynamic)))
         filters = re.findall(r'^int (\w+_udp)\(void \*ctx', header_text, re.M)
         protocol_filter = public + '_udp' if protocol and public + '_udp' in filters else None
         filters = [f for f in filters if f != protocol_filter]
@@ -670,6 +757,8 @@ def _gen_jobs(args, validate, jobs, tempdirs):
                   'protocol_filter': protocol_filter, 'filters': filters, 'generator_log': log.strip()}
         if renamed:
             result['prefixed_imports'] = renamed
+        if getattr(unit, 'any_type_url', None):
+            result['any_type_url'] = {'max_size': unit.any_type_url[0], 'longest': unit.any_type_url[1]}
         if field_32bit:
             result['needs_field_32bit'] = field_32bit
             result['field_32bit_enabled_in_pb_h'] = bool(args.with_runtime)

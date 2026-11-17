@@ -4,13 +4,15 @@ nanopb's own CMakeLists.txt builds libprotobuf-nanopb from pb_common.c, pb_encod
 pb_decode.c and installs four headers; it knows nothing of pb_validate. Two ways to add it
 without changing a nanopb file, both tested here:
 
-  hook     cmake -S . -DCMAKE_PROJECT_INCLUDE=validate/extra/nanopb_validate_hook.cmake
-           pb_validate.c becomes part of libprotobuf-nanopb.a itself.
-  project  cmake -S validate
-           builds nanopb and a separate libprotobuf-nanopb-validate.a, find_package(nanopb-validate).
+  project  cmake -S validate                                             (CMake 3.14+)
+           pb_validate.c becomes part of nanopb's libprotobuf-nanopb.a itself;
+           -DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF: a separate libprotobuf-nanopb-validate.a.
+  hook     cmake -S . -DCMAKE_PROJECT_INCLUDE=validate/extra/nanopb_validate_hook.cmake (3.19+)
+           the same as the project's default, from nanopb's own build.
 
-Needs cmake (3.19 for the hook) and a generator (ninja) on PATH, and protoc where nanopb's
-CMakeLists finds it; skipped without cmake. Toolchain options go in NANOPB_TEST_CMAKE_ARGS,
+Needs cmake and a generator (ninja) on PATH, and protoc where nanopb's CMakeLists finds it;
+skipped without cmake. NANOPB_TEST_CMAKE=<path to cmake> picks another CMake (e.g. 3.18:
+the hook test is then skipped). Toolchain options go in NANOPB_TEST_CMAKE_ARGS,
 on Windows with zig from pip for example:
 
     -G Ninja -DCMAKE_C_COMPILER=C:/.../zig.exe -DCMAKE_C_COMPILER_ARG1=cc
@@ -19,6 +21,7 @@ on Windows with zig from pip for example:
 """
 
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -69,13 +72,20 @@ target_link_libraries(consumer ${LIB})
 '''
 
 HOOK = os.path.join(VALIDATE_DIR, 'extra', 'nanopb_validate_hook.cmake')
+CMAKE = os.environ.get('NANOPB_TEST_CMAKE') or shutil.which('cmake')
+
+
+def cmake_version():
+    out = subprocess.run([CMAKE, '--version'], stdout=subprocess.PIPE, universal_newlines=True).stdout
+    match = re.search(r'(\d+)\.(\d+)', out)
+    return (int(match.group(1)), int(match.group(2))) if match else (0, 0)
 
 
 def slash(path):
     return path.replace('\\', '/')
 
 
-@unittest.skipUnless(shutil.which('cmake'), 'cmake is not on PATH')
+@unittest.skipUnless(CMAKE, 'cmake is not on PATH')
 class CMakeInstallTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='nanopb_cmake_install_')
@@ -85,6 +95,8 @@ class CMakeInstallTests(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def run_step(self, argv):
+        if argv[0] == 'cmake':
+            argv = [CMAKE] + argv[1:]
         proc = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertEqual(proc.returncode, 0, ' '.join(argv) + '\n' + proc.stdout[-3000:])
         return proc.stdout
@@ -129,10 +141,9 @@ class CMakeInstallTests(unittest.TestCase):
         for header in ('pb.h', 'pb_validate.h', 'pb_filter_macros.h'):
             self.assertTrue(os.path.isfile(os.path.join(include, header)), header)
 
-    def test_hook_puts_pb_validate_into_nanopbs_own_library(self):
-        """nanopb is built from its unchanged root; the hook adds pb_validate.c to the
-        same libprotobuf-nanopb.a, and linking only nanopb's library is enough."""
-        prefix = self.build_and_install(REPO_ROOT, '-DCMAKE_PROJECT_INCLUDE=' + slash(HOOK))
+    def check_in_nanopb_library(self, prefix):
+        """One library, nanopb's, holding the runtime and pb_validate; a project linking only
+        nanopb's library runs the validators."""
         libs = [n for n in os.listdir(os.path.join(prefix, 'lib')) if 'protobuf-nanopb' in n]
         self.assertEqual(len(libs), 1, libs)                     # one library, not a second one
         with open(os.path.join(prefix, 'lib', libs[0]), 'rb') as handle:
@@ -141,6 +152,17 @@ class CMakeInstallTests(unittest.TestCase):
             self.assertIn(symbol, archive, symbol)
         self.check_headers(prefix)
         self.consume(prefix, 'nanopb', 'nanopb::protobuf-nanopb-static')
+
+    def test_project_puts_pb_validate_into_nanopbs_own_library(self):
+        """cmake -S validate (CMake 3.14+): nanopb built from its unchanged root, pb_validate.c
+        added to its library after add_subdirectory."""
+        self.check_in_nanopb_library(self.build_and_install(VALIDATE_DIR))
+
+    def test_hook_puts_pb_validate_into_nanopbs_own_library(self):
+        """cmake -S . with the hook (CMake 3.19+): the same, from nanopb's own build."""
+        if cmake_version() < (3, 19):
+            self.skipTest('the hook needs CMake 3.19 (cmake_language(DEFER))')
+        self.check_in_nanopb_library(self.build_and_install(REPO_ROOT, '-DCMAKE_PROJECT_INCLUDE=' + slash(HOOK)))
 
     def test_plain_nanopb_build_has_no_validation(self):
         """The control: without the hook nanopb's library has no pb_validate (the reason for it)."""
@@ -151,8 +173,9 @@ class CMakeInstallTests(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(prefix, 'include', 'nanopb', 'pb_validate.h')))
 
     def test_project_builds_a_separate_library(self):
-        """cmake -S validate: libprotobuf-nanopb-validate next to nanopb's library."""
-        prefix = self.build_and_install(VALIDATE_DIR)
+        """cmake -S validate -DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF: libprotobuf-nanopb-validate
+        next to nanopb's library."""
+        prefix = self.build_and_install(VALIDATE_DIR, '-DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF')
         libs = os.listdir(os.path.join(prefix, 'lib'))
         self.assertTrue([n for n in libs if 'protobuf-nanopb-validate' in n], libs)
         self.assertTrue([n for n in libs if 'protobuf-nanopb' in n and 'validate' not in n], libs)

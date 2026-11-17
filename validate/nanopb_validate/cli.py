@@ -118,9 +118,9 @@ def cmd_check(argv, global_args):
     """Compile every protocol of a protos directory and report what would go wrong.
 
     Errors: protoc syntax/import errors, validate rules the generator cannot
-    honour. Warnings: fields without max_size/max_count (callbacks instead of
-    static storage), messages that need PB_FIELD_32BIT, packet filters that
-    cannot be generated.
+    honour, fields without max_size/max_count (they would be pb_callback_t, not
+    static storage). Warnings: messages that need PB_FIELD_32BIT, packet filters
+    that cannot be generated.
     """
 
     p = argparse.ArgumentParser(prog='nanopb_validate check', description=cmd_check.__doc__.split('\n\n')[0])

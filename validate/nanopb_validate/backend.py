@@ -77,6 +77,9 @@ def build_parser():
     p.add_argument('--port-map', default=None,
                    help='messages mapped here get a packet filter (default: unreferenced root messages)')
     p.add_argument('--no-filter', action='store_true', help='do not generate packet filters')
+    p.add_argument('--allow-callbacks', action='store_true',
+                   help='generate fields without max_size/max_count as pb_callback_t (default: an error; '
+                        'every field must be static storage)')
     p.add_argument('--filter-name', default='{unit}',
                    help='name of the protocol filter; its entry points are <name>_udp and <name>_tcp '
                         '({unit} is the protocol folder, default: {unit})')

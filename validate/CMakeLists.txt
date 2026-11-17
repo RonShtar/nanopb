@@ -1,31 +1,33 @@
-# nanopb + validation, built and installed the way nanopb is.
+# nanopb + validation, built and installed the way nanopb is. CMake 3.14 or newer.
 #
 #   cmake -S validate -B build -DCMAKE_INSTALL_PREFIX=/where
 #   cmake --build build
 #   cmake --install build
 #
-# This builds nanopb itself (the repository root, untouched: libprotobuf-nanopb
-# and pb.h, pb_common.h, pb_encode.h, pb_decode.h) and adds what nanopb's own
-# CMakeLists does not know about:
+# This builds nanopb itself from the repository root, with nanopb's CMakeLists.txt
+# unchanged, and adds the validation runtime (validate/runtime/pb_validate.c):
 #
-#   libprotobuf-nanopb-validate.a   pb_validate.c, the validation runtime
-#   <prefix>/include/nanopb/pb_validate.h, pb_filter_macros.h   (next to pb.h)
-#   <prefix>/lib/cmake/nanopb-validate/   find_package(nanopb-validate)
+# NANOPB_VALIDATE_IN_NANOPB_LIBRARY=ON (default)
+#   pb_validate.c is compiled into nanopb's own library: libprotobuf-nanopb.a holds
+#   pb_common, pb_encode, pb_decode and pb_validate. pb_validate.h and
+#   pb_filter_macros.h are installed next to pb.h. Use it as nanopb:
 #
-# Use it:
+#     find_package(nanopb REQUIRED)
+#     target_link_libraries(app nanopb::protobuf-nanopb-static)
 #
-#   find_package(nanopb-validate REQUIRED)       # also finds nanopb
-#   target_link_libraries(app nanopb::protobuf-nanopb-validate)
+#   (With CMake 3.19+ the same is possible from nanopb's own build:
+#    cmake -S . -DCMAKE_PROJECT_INCLUDE=validate/extra/nanopb_validate_hook.cmake)
 #
-# and the generated code (python -m nanopb_validate gen ...) compiles with
-# #include <pb_validate.h>. The validate library links the nanopb runtime
-# publicly, so the generated packet filters (pb_decode) link too.
+# NANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF
+#   a separate libprotobuf-nanopb-validate next to nanopb's library:
 #
-# Options:
-#   NANOPB_VALIDATE_WITH_NANOPB  ON (default): build and install nanopb from the
-#                                repository root too. OFF: use an installed
-#                                nanopb (find_package(nanopb)) and add only
-#                                the validation runtime.
+#     find_package(nanopb-validate REQUIRED)       # also finds nanopb
+#     target_link_libraries(app nanopb::protobuf-nanopb-validate)
+#
+# NANOPB_VALIDATE_WITH_NANOPB=OFF
+#   use an already installed nanopb (find_package(nanopb)) and build only the separate
+#   validation library (its installed .a cannot be changed from here).
+#
 # nanopb's own options (nanopb_BUILD_GENERATOR, BUILD_SHARED_LIBS, ...) work as
 # usual. protoc must be found, as for nanopb.
 
@@ -34,6 +36,8 @@ cmake_minimum_required(VERSION 3.14.0)
 project(nanopb_validate VERSION 1.0.0 LANGUAGES C)
 
 option(NANOPB_VALIDATE_WITH_NANOPB "Build and install nanopb from the repository root too" ON)
+option(NANOPB_VALIDATE_IN_NANOPB_LIBRARY
+    "Compile pb_validate.c into nanopb's libprotobuf-nanopb (ON) or a separate libprotobuf-nanopb-validate (OFF)" ON)
 
 include(GNUInstallDirs)
 
@@ -41,6 +45,12 @@ get_filename_component(_nanopb_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 
 if(NANOPB_VALIDATE_WITH_NANOPB)
     add_subdirectory(${_nanopb_root} nanopb)
+    if(NANOPB_VALIDATE_IN_NANOPB_LIBRARY)
+        # nanopb's targets exist now: add pb_validate.c to them (nanopb's files unchanged).
+        include(${CMAKE_CURRENT_SOURCE_DIR}/extra/nanopb_validate_attach.cmake)
+        nanopb_validate_attach()
+        return()
+    endif()
     if(TARGET protobuf-nanopb)
         set(_nanopb_runtime protobuf-nanopb)
     elseif(TARGET protobuf-nanopb-static)
@@ -57,9 +67,7 @@ else()
     endif()
 endif()
 
-if(NOT DEFINED CMAKE_INSTALL_CMAKEDIR)
-    set(CMAKE_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/nanopb")
-endif()
+# A separate validation library.
 set(NANOPB_VALIDATE_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/nanopb-validate")
 
 add_library(protobuf-nanopb-validate

@@ -1,3 +1,5 @@
 # Project-specific Any storage; overrides validate/nanopb_validate/wireshark_include/google/protobuf/any.options.
+# gen replaces type_url's max_size with the exact longest URL of the protocol (+ NUL);
+# the value here is only the upper limit the test data generator keeps to.
 google.protobuf.Any.type_url max_size:96
 google.protobuf.Any.value max_size:512

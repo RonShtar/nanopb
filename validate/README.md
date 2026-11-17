@@ -36,7 +36,7 @@ works the same.
 
 | Command | What it does |
 |---|---|
-| `check PROTOS_DIR` | Compiles every protocol and reports errors (syntax, imports, rules the generator cannot honour) and warnings (fields without `max_size`/`max_count`, messages needing `PB_FIELD_32BIT`, filters that cannot be built). Exit 1 on errors. |
+| `check PROTOS_DIR` | Compiles every protocol and reports errors (syntax, imports, rules the generator cannot honour, fields without `max_size`/`max_count`: they would be `pb_callback_t`) and warnings (messages needing `PB_FIELD_32BIT`, filters that cannot be built). Exit 1 on errors. |
 | `gen PROTOS_DIR --out DIR` | Per protocol: one merged `<p>.pb.c/.h` (messages, descriptors, packet filters) and `<p>_validate.c/.h`. `--with-runtime` also copies the C runtime; `--filter-name NAME` names the protocol filter `NAME_udp/_tcp` (default `{unit}` = protocol folder); `--compile-if CONFIG_COMPILE_FILTER` wraps every generated `.c` and `.h` in `#ifdef CONFIG_COMPILE_FILTER ... #endif`, so they compile only when your build defines it; `--first-include FILE` puts `#include "FILE"` at the top of every file, before that `#ifdef`; `--header-dir filter/{unit}` makes the generated files include each other as `"filter/camera/camera_validate.h"`; `--include-prefix NanoPB` makes the generated C include `<NanoPB/pb.h>` (the runtime then goes to `<out>/<p>/NanoPB/`). Imports from outside a protocol folder get that protocol's prefix, so all protocols link into one program; with several protocols and `--with-runtime` the runtime goes once to `<out>/common/`. |
 | `gen FILE.proto ...` | Per file, like nanopb: `<f>.pb.c/.h` and `<f>_validate.c/.h`. `--filter pkg.Msg` adds a filter; `--nanopb-opt` passes nanopb options to both generators. |
 | `packets PROTOS_DIR --out DIR` | A capture of PASSED and DROPPED packets of every message, plus each packet as a C array and hex; installs the dissector schema. |
@@ -92,10 +92,14 @@ if (fleet_udp(NULL, data, size) != 0)
   `CONFIG_COMPILE_FILTER` the files compile to nothing. In Wireshark these are three fields of
   Tools > nanopb > Set protos directory, saved for every Generate C; `wireshark install`
   takes the same options only to pre-fill them. Nothing else needs them.
-- `google.protobuf.Any` is static: `type_url[]` and `value` are arrays sized by
-  `google/protobuf/any.options` (built-in default 128 / 256 bytes), never callbacks;
-  see [docs/any-examples.md](docs/any-examples.md) for a 7-file protocol that uses `Any` in
-  repeated fields, oneofs, sub-messages and inside other `Any`s.
+- Static storage only, no callbacks, no malloc: `gen` refuses a protocol in which any field
+  would be a `pb_callback_t` (string, bytes, repeated or map without `max_size`/`max_count`)
+  or a pointer, and names each field; `--allow-callbacks` turns that off.
+- `google.protobuf.Any` is static: `type_url` is sized per protocol to exactly the longest
+  URL it can carry (`type.googleapis.com/` + the longest message name, or a longer `any.in`
+  URL, + NUL; `gen` prints it), `value` by `google/protobuf/any.options` (default 256).
+  See [docs/any-examples.md](docs/any-examples.md) for a 7-file protocol that uses `Any` in
+  repeated fields, oneofs, sub-messages and inside other `Any`s, merged into one `.c`.
 - `--protos-root` is the folder *above* the protocol folders (`protocols/`, holding
   `camera/`, `gps/`, ...). Pointing it at one protocol's folder makes that the only protocol.
 - Define `PB_FIELD_32BIT` (and any other `PB_*` switch) identically for every
@@ -109,8 +113,9 @@ Cost per packet, stack and the switches that change them:
 
 | | |
 |---|---|
-| CMake, `pb_validate` inside nanopb's own library | nanopb's usual build with one extra flag: `cmake -S . -B build -DCMAKE_PROJECT_INCLUDE=validate/extra/nanopb_validate_hook.cmake && cmake --build build && cmake --install build`. nanopb's `CMakeLists.txt` runs unchanged; the hook adds `validate/runtime/pb_validate.c` to `libprotobuf-nanopb` (so `pb_validate.o` is a member of the same `.a`) and installs `pb_validate.h` and `pb_filter_macros.h` next to `pb.h`. A project that links `nanopb::protobuf-nanopb-static` gets validation with nothing else. Needs CMake 3.19. Without the flag nanopb's library has no `pb_validate` (nanopb builds only `pb_common`, `pb_encode`, `pb_decode`). |
-| CMake, separate validation library | `cmake -S validate -B build && cmake --build build && cmake --install build` builds nanopb as usual **and** a separate `libprotobuf-nanopb-validate`, with a `find_package(nanopb-validate REQUIRED)` and `nanopb::protobuf-nanopb-validate` (it links the nanopb runtime too). Needs only CMake 3.14. `-DNANOPB_VALIDATE_WITH_NANOPB=OFF` adds only the validation library to an installed nanopb. |
+| CMake 3.14+, `pb_validate` inside nanopb's own library | `cmake -S validate -B build && cmake --build build && cmake --install build`. This builds nanopb from the repository root with nanopb's `CMakeLists.txt` unchanged, then adds `validate/runtime/pb_validate.c` to nanopb's `libprotobuf-nanopb` (so `pb_validate.o` is a member of the same `.a`) and installs `pb_validate.h` and `pb_filter_macros.h` next to `pb.h`. Use it as nanopb: `find_package(nanopb)`, link `nanopb::protobuf-nanopb-static`. Tested with CMake 3.18. (nanopb's own build alone has no `pb_validate`: it compiles only `pb_common`, `pb_encode`, `pb_decode`.) |
+| CMake 3.19+, the same from nanopb's own build | `cmake -S . -B build -DCMAKE_PROJECT_INCLUDE=validate/extra/nanopb_validate_hook.cmake`, then build and install as usual: the same result as the line above, for builds that must start at nanopb's root. Stops with a clear message on CMake 3.18 and older. |
+| CMake 3.14+, separate validation library | `cmake -S validate -B build -DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF`: nanopb as usual **and** a separate `libprotobuf-nanopb-validate`, with `find_package(nanopb-validate)` and `nanopb::protobuf-nanopb-validate` (it links the nanopb runtime too). `-DNANOPB_VALIDATE_WITH_NANOPB=OFF` adds only that library to an installed nanopb. |
 | CMake, generate | `include(validate/extra/NanopbValidate.cmake)` after `find_package(Nanopb)`, then `nanopb_validate_generate(SRCS HDRS a.proto [OPTIONS --filter pkg.Msg])` and link `nanopb_validate`. |
 | make | `include validate/extra/nanopb_validate.mk` (before nanopb's `extra/nanopb.mk`); `%.proto` builds `.pb.c/.h` and `_validate.c/.h`. |
 | protoc | `--plugin=protoc-gen-nanopb-validate=validate/nanopb_validate/plugin/protoc-gen-nanopb-validate`, `--nanopb_out` before `--nanopb-validate_out`; see [docs/validation.md](docs/validation.md#with-protoc-directly). |
