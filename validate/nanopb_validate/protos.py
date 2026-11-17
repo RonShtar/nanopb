@@ -375,7 +375,12 @@ def unit_data_generator(unit, DataGenerator):
             handle.write('syntax = "proto3";\n')
             for name in unit.names:
                 handle.write('import "%s";\n' % name)
-        return DataGenerator(path, [p for p in unit.includes if os.path.isdir(p)])
+        # The exact Any storage gen uses (any_storage.py), first on the path, so test
+        # packets fit the generated C structs.
+        import any_storage
+        exact = os.path.join(tmpdir, 'exact_options')
+        first = [exact] if any_storage.write_exact_options_dir(unit, exact) else []
+        return DataGenerator(path, first + [p for p in unit.includes if os.path.isdir(p)])
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

@@ -240,7 +240,7 @@ generated filter and expect `0` (passed) or `-1` (dropped).
 | File | Contents |
 |------|----------|
 | `<protocol>.pb.h` / `.pb.c` | every message struct, descriptor and `PB_BIND` of the protocol's protos and their imports, plus the packet filters |
-| `<protocol>_validate.h` / `.c` | a `pb_validate_<Message>()` for every message |
+| `<protocol>_validate.h` / `.c` | a `<protocol>_validate_<message>()` for every message (`fleet_validate_cmd_Move()`) |
 
 The result window lists the exported filters and the smallest validation
 buffer settings for this protocol.

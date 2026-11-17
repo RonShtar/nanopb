@@ -77,6 +77,9 @@ def build_parser():
     p.add_argument('--port-map', default=None,
                    help='messages mapped here get a packet filter (default: unreferenced root messages)')
     p.add_argument('--no-filter', action='store_true', help='do not generate packet filters')
+    p.add_argument('--any-value-size', type=int, default=None, metavar='BYTES',
+                   help='google.protobuf.Any.value storage (default: the largest maximum encoded size nanopb '
+                        'computes for a message of the protocol that holds no Any)')
     p.add_argument('--allow-callbacks', action='store_true',
                    help='generate fields without max_size/max_count as pb_callback_t (default: an error; '
                         'every field must be static storage)')
@@ -133,6 +136,8 @@ def build_parser():
     p = sub.add_parser('gen-packets', help='one capture with valid (PASSED) and invalid (DROPPED) packets')
     protos_args(p, unit=True)
     p.add_argument('--out', required=True, help='output directory for nanopb_test_packets.{pcapng,json,txt}')
+    p.add_argument('--any-value-size', type=int, default=None, metavar='BYTES',
+                   help='google.protobuf.Any.value storage, as for gen (default: computed the same way)')
     p.add_argument('--port-map', default='',
                    help='root messages sent on their own port (default: one UDP port per unit root, from %d)'
                    % AUTO_PORT_BASE)
@@ -174,6 +179,8 @@ def build_parser():
                    help='Generate C: wrap every .c/.h in #ifdef NAME ... #endif (space separated: all); saved')
     p.add_argument('--first-include', default=None, metavar='FILES',
                    help='Generate C: #include these (space separated) before the #ifdef; saved')
+    p.add_argument('--any-value-size', type=int, default=None, metavar='BYTES',
+                   help='Generate C and packets: google.protobuf.Any.value bytes (0 = computed); saved')
     p.set_defaults(func=cmd_install_studio)
     return parser
 

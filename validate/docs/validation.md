@@ -445,7 +445,7 @@ int NAME_filter_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool i
 Every packet is a `google.protobuf.Any`. Its `type_url` is the opcode: a
 `switch` on it selects one of the protocol's messages (every message of the
 generated files except map entries and `google.protobuf.*`), which is decoded
-and validated (`pb_validate_<msg>(&msg, NULL)`). Every `Any` inside that
+and validated (`<protocol>_validate_<msg>(&msg, NULL)`; `pb_validate_<msg>` for single files). Every `Any` inside that
 message, whether a singular field, a repeated field, a oneof arm or one inside
 a sub-message, is resolved the same way, recursively. A packet is rejected
 (`-1`) when it is not an `Any`, when a `type_url` names no message of the

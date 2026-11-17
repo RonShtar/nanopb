@@ -47,7 +47,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map",
-    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "c_defines" }
+    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "c_defines" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
@@ -63,6 +63,7 @@ local config = {
     header_dir = "",        -- e.g. filter/{unit}: #include "filter/camera/camera_validate.h"
     compile_if = "",        -- e.g. CONFIG_COMPILE_FILTER: every .c/.h inside #ifdef ... #endif
     first_include = "",     -- e.g. filter_source_include.h: #include before the #ifdef
+    any_value_size = "",    -- Any.value bytes; empty = largest message without an Any (nanopb sizes)
     c_defines = "",         -- older name of compile_if, read once
 }
 
@@ -453,6 +454,10 @@ local function gen_c()
                 args[#args + 1] = "--first-include"
                 args[#args + 1] = name
             end
+            if (config.any_value_size or "") ~= "" then
+                args[#args + 1] = "--any-value-size"
+                args[#args + 1] = config.any_value_size
+            end
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -461,7 +466,7 @@ local function gen_c()
             if not ok then return false, text end
             return true, (json_string(text, "summary") or text) .. "\n\n" ..
                 "<unit>.pb.c/.h: all messages, PB_BINDs and the packet filters (_udp/_tcp).\n" ..
-                "<unit>_validate.c/.h: all pb_validate_* validators.\n" ..
+                "<unit>_validate.c/.h: all <unit>_validate_<message> validators.\n" ..
                 "Add all four to your project, next to the nanopb runtime.\n" ..
                 "Each protocol is self-contained: imports from outside its folder\n" ..
                 "(google/protobuf/*, shared protos) carry its prefix (camera_google_protobuf_Any),\n" ..
@@ -486,6 +491,11 @@ local function gen_packets()
         pick_units(title, function(units)
             local args = add_common({ "packets", "--mode", "protocol", "--out", output_dir(),
                 "--unit", units, "--plugins-dir", PLUGINS_DIR, "--drop-stale-ports" })
+            -- The same Any.value size as Generate C, so PASSED packets fit the C structs.
+            if (config.any_value_size or "") ~= "" then
+                args[#args + 1] = "--any-value-size"
+                args[#args + 1] = config.any_value_size
+            end
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -579,7 +589,8 @@ local function set_directory()
         { "Folder in #include \"...\" (e.g. filter/{unit}; empty = none)", config.header_dir },
         { "Header to #include first, before the #ifdef (e.g. filter_source_include.h; empty = none)", config.first_include },
         { "Compile only if defined: #ifdef ... #endif around every .c/.h (e.g. CONFIG_COMPILE_FILTER)", config.compile_if },
-    }, function(input, output, prefix, author, header_dir, first_include, compile_if)
+        { "Any.value bytes (empty = largest message without an Any; set it for nested Anys)", config.any_value_size },
+    }, function(input, output, prefix, author, header_dir, first_include, compile_if, any_value_size)
         input = trim(input)
         if input == "" then
             show(title, false, "Enter the protos directory.")
@@ -592,6 +603,12 @@ local function set_directory()
         config.header_dir = trim(header_dir or "")
         config.first_include = trim(first_include or "")
         config.compile_if = trim(compile_if or "")
+        any_value_size = trim(any_value_size or "")
+        if any_value_size ~= "" and not any_value_size:match("^%d+$") then
+            show(title, false, "Any.value bytes: a number, or empty.")
+            return
+        end
+        config.any_value_size = any_value_size
         config.protos_root_fixed = "1"
         save_config()
         load_now(title, "\n\nEvery Tools > nanopb item now uses this directory without asking."

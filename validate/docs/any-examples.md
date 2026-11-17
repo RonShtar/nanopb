@@ -14,29 +14,43 @@ when it is given a size, and the tool always gives both one:
 | | size | from |
 |---|---|---|
 | `type_url` | exactly the longest URL the protocol can carry, plus the NUL | computed by `gen` per protocol: `type.googleapis.com/` + the longest full name of every message in the protocol's files and imports (nested ones too), or a longer `any.in` URL |
-| `value` | 256 bytes, or what your `google/protobuf/any.options` says (512 here) | `.options` |
+| `value` | the largest maximum encoded size nanopb computes (`#define <msg>_size`) of any message, with the `Any`s inside it holding the largest message that has none: one level of `Any` always fits | computed by `gen` per protocol (two nanopb runs); `--any-value-size N` sets it |
 
 `gen` prints the result per protocol:
 
 ```
 fleet -> out/fleet
   Any.type_url: char[49], the longest URL + NUL (type.googleapis.com/fleet.telemetry.Health.Fault)
+  Any.value: 1053 bytes, fleet.envelope.Envelope (fleet_envelope_Envelope_size) with its Anys
+             holding the largest message without an Any, fleet.sensors.Imu
+  note: Any.value (1053 bytes) fits every message with one level of Any;
+        fleet.envelope.Batch.items, fleet.envelope.Envelope.extension, fleet.telemetry.Frame.readings
+        can hold a message that carries an Any itself (no any.in, or any.in allows one), which fits
+        only when encoded that small: set --any-value-size for deeper nesting
+  largest packet: FLEET_MAX_SIZE = fleet_google_protobuf_Any_size (1106 bytes)
 ```
 
 and the generated struct, from `fleet.pb.h`:
 
 ```c
-typedef PB_BYTES_ARRAY_T(512) fleet_google_protobuf_Any_value_t;
+typedef PB_BYTES_ARRAY_T(1053) fleet_google_protobuf_Any_value_t;
 typedef struct _fleet_google_protobuf_Any {
     char type_url[49];
     fleet_google_protobuf_Any_value_t value;
-} fleet_google_protobuf_Any;          /* 564 bytes, no pb_callback_t anywhere */
+} fleet_google_protobuf_Any;          /* 1106 bytes, no pb_callback_t anywhere */
+
+#define FLEET_MAX_SIZE fleet_google_protobuf_Any_size     /* 1106: the largest packet */
 ```
 
 So no heap and no callbacks. The price of static is a limit: a `type_url` with a
 longer host than `type.googleapis.com/`, or a payload bigger than `value`, cannot be
 decoded and the packet is dropped (cases `type_url longer than its storage` and
-`payload bigger than Any.value`). Size `value` for your largest message.
+`payload bigger than Any.value`). Every message fits by construction when the `Any`s
+inside it hold messages without an `Any` (one level). Deeper (an `Envelope` in a `Batch` in
+a `Batch`) has no fixed maximum, so it fits only when its encoding is at most `value`
+(`test_filter_runtime.py` checks both). For a protocol like yours, `Packet { Any payload }`
+with `any.in` naming only plain messages, one level is all there is, and there is no note:
+`camera` gets `value` 99 bytes, exactly `camera.Packet` holding the largest `camera.Frame`.
 
 **No callbacks, no malloc, anywhere.** `gen` refuses to write a protocol in which any
 field would be a `pb_callback_t` (a string, bytes, repeated field or map without
@@ -139,10 +153,10 @@ and its `switch` reads by message name, one line for a message without `Any` fie
 ```c
     switch (hash) {
         case FLEET_HASH_FLEET_TYPES_VEC3:
-            FLEET_FILTER_MESSAGE("fleet.types.Vec3", fleet_types_Vec3, pb_validate_fleet_types_Vec3);
+            FLEET_FILTER_MESSAGE("fleet.types.Vec3", fleet_types_Vec3, fleet_validate_types_Vec3);
             break;
         case FLEET_HASH_FLEET_CMD_SETMODE:
-            FLEET_FILTER_MESSAGE("fleet.cmd.SetMode", fleet_cmd_SetMode, pb_validate_fleet_cmd_SetMode);
+            FLEET_FILTER_MESSAGE("fleet.cmd.SetMode", fleet_cmd_SetMode, fleet_validate_cmd_SetMode);
             break;
         ...
 ```
@@ -153,7 +167,7 @@ and, for a message that holds `Any` fields, the walk written out in place:
         case FLEET_HASH_FLEET_ENVELOPE_BATCH:
             if (FLEET_NAME_IS("fleet.envelope.Batch")) {
                 FLEET_NESTED_PAYLOAD(fleet_envelope_Batch);
-                FLEET_DECODE("fleet.envelope.Batch", fleet_envelope_Batch, pb_validate_fleet_envelope_Batch);
+                FLEET_DECODE("fleet.envelope.Batch", fleet_envelope_Batch, fleet_validate_envelope_Batch);
                 {
                     pb_size_t i0;
                     for (i0 = 0; i0 < payload->items_count; i0++) {
@@ -175,25 +189,30 @@ Measured on this example (`sizeof`, 64-bit, `-std=c99`):
 
 | | bytes |
 |---|---|
-| `Any` (49 + 512 + length) | 564 |
-| `Imu` | 104 |
-| `Batch` (3 × Any) | 1694 |
-| `Frame` | 2488 |
-| `Envelope` | 2536 |
+| | default (one level of `Any` always fits) | `--any-value-size 512` |
+|---|---|---|
+| `Any` | 1106 (49 + 1053 + length) | 564 |
+| `Imu` | 104 | 104 |
+| `Batch` (3 × Any) | 3320 | 1694 |
+| `Frame` (4 × Any) | 4656 | 2488 |
+| `Envelope` | 4704 | 2536 |
 
-(With the earlier fixed `type_url[96]` an `Any` was 610 bytes: the exact size saves 46
-bytes per `Any`, 138 in every `Batch`.)
+This protocol is the expensive case: its `Frame` alone carries four `Any`s, so the size that
+always fits is large. `--any-value-size` trades the guarantee for RAM.
+
+(With the earlier fixed `type_url[96]` and `value` 512 an `Any` was 610 bytes.)
 
 By default a decoded payload lives on the stack, one per nesting level: at most
-`PB_VALIDATE_FILTER_MAX_ANY_DEPTH` (4) of them at a time, so well under 4 × 2.6 KB
+`PB_VALIDATE_FILTER_MAX_ANY_DEPTH` (4) of them at a time
 for this protocol. Build with `-DPB_VALIDATE_FILTER_STATIC_BUFFERS` to move them to
 static storage (nothing large on the stack; the filter then is not reentrant). A
 message that holds `Any` fields gets one static slot per nesting level, because it
 can legitimately appear inside itself (a `Batch` in a `Batch`); a message that does
 not gets one slot. The test builds the example both ways and runs the same packets.
 
-To shrink: lower `Any.value` to your largest message, lower
-`PB_VALIDATE_FILTER_MAX_ANY_DEPTH`, and `max_count` the repeated `Any` fields.
+To shrink: lower the `max_count` of the repeated `Any` fields (it multiplies the size that
+always fits), `PB_VALIDATE_FILTER_MAX_ANY_DEPTH`, or set `--any-value-size` and accept that
+bigger packets are dropped.
 
 ## 6. Try it
 

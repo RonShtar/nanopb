@@ -95,7 +95,7 @@ the includes between them removed:
 | file | contents |
 |------|----------|
 | `<unit>.pb.h` / `<unit>.pb.c` | every message struct, descriptor and `PB_BIND` (all `.pb.h`/`.pb.c` of the unit), plus the protocol filter `<unit>_udp` / `_tcp` (one per unit, named after its folder) and its core |
-| `<unit>_validate.h` / `<unit>_validate.c` | every validator `pb_validate_<msg>()` (all `_validate.h`/`_validate.c` from the validate plugin, see `docs/validation.md`) |
+| `<unit>_validate.h` / `<unit>_validate.c` | every validator `<protocol>_validate_<msg>()` (all `_validate.h`/`_validate.c` from the validate plugin, see `docs/validation.md`) |
 | `common/` | when several units are generated together with the runtime: the nanopb runtime, once. Imports from outside a unit folder carry the unit's prefix (`<unit>_google_protobuf_Any`), so units never clash |
 
 `<unit>_validate.h` includes `<unit>.pb.h`; `<unit>.pb.c` includes
@@ -112,7 +112,7 @@ Generating takes a few seconds per unit; Wireshark does not respond meanwhile.
 `<unit>_validate.h` exports, for every message,
 
 ```c
-bool pb_validate_<msg>(const <msg> *msg, pb_violations_t *violations);  /* violations may be NULL */
+bool <protocol>_validate_<msg>(const <protocol>_<msg> *msg, pb_violations_t *violations);  /* violations may be NULL */
 ```
 
 and `<unit>.pb.h` exports packet filters that decode, validate and return `0`

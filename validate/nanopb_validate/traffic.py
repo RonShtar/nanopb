@@ -180,6 +180,7 @@ def cmd_gen_data(args):
     errors = []
     for name in select_units(args):
         unit = Unit(args.protos_root, name, args.include)
+        unit.any_value_override = getattr(args, 'any_value_size', None)
         outdir = os.path.join(args.out, name, 'data')
         if not os.path.isdir(outdir):
             os.makedirs(outdir)
@@ -368,6 +369,8 @@ def cmd_gen_packets(args):
         raise BackendError('--valid and --max-invalid must not be negative')
     names = select_units(args)
     units = [Unit(args.protos_root, name, args.include) for name in names]
+    for unit in units:
+        unit.any_value_override = getattr(args, 'any_value_size', None)
     protocol_mode = args.mode == 'protocol'
     # Protocol mode: every message of a unit, wrapped in an Any, on that
     # protocol's own port (decoded like Decode As -> nanopb_<unit>).

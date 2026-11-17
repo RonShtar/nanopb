@@ -64,13 +64,13 @@ What is in it:
 | File | Covers |
 |---|---|
 | `test_backend.py` | generation: merged C per protocol, rules, filters, `--compile-if`, `--first-include`, `--header-dir`, errors that must be clear |
-| `test_filter_runtime.py` | the generated packet filter on real packets, built twice (stack and `PB_VALIDATE_FILTER_STATIC_BUFFERS`): `Any` in `Any`, in a oneof, in a sub-message, size and depth limits |
+| `test_filter_runtime.py` | the generated packet filter on real packets, built twice (stack and `PB_VALIDATE_FILTER_STATIC_BUFFERS`): `Any` in `Any`, in a oneof, in a sub-message, size and depth limits; with the default exact `Any.value` a message carrying `Any`s that is bigger is dropped |
 | `test_security.py` | fuzzing of every filter entry point, with guard pages and UBSan where the compiler has them |
 | `test_performance.py` | time and size budgets of validators and filters |
 | `test_stress.py` | the 7-file `fleet` example end to end: C round trip, samples, Wireshark dissection |
 | `test_dissector.py` | the Lua plugins against a mock Wireshark (needs `lupa`, skipped without) |
 | `test_cli.py` | `check`, `gen`, `packets`, `wireshark ...` as a user types them |
-| `test_static_storage.py` | `Any.type_url` is exactly the longest URL + NUL (also from `any.in`, replacing a project value); no `pb_callback_t` or pointer field is generated: such a field is refused by name, `--allow-callbacks` allows it |
+| `test_static_storage.py` | `Any.type_url` is exactly the longest URL + NUL (also from `any.in`, replacing a project value); `Any.value` is nanopb's largest `<msg>_size` of a message without an `Any`, or `--any-value-size`; `<PROTOCOL>_MAX_SIZE`; validators named `<protocol>_validate_<message>`; no `pb_callback_t` or pointer field is generated: such a field is refused by name, `--allow-callbacks` allows it |
 | `test_cmake_install.py` | `pb_validate` in nanopb's CMake build: `cmake -S validate` (3.14+) and the hook (3.19+) put it into `libprotobuf-nanopb.a` and a project linking only nanopb's library runs the validators; without either it is absent (control); `-DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF` builds a separate library that `find_package(nanopb-validate)` links |
 | `test_build_addons.py` | `validate/extra/NanopbValidate.cmake` |
 | `test_buf_convert.py` | `validate/tools/buf_to_validate.py` |

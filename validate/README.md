@@ -3,7 +3,8 @@
 Validation, packet filters and Wireshark tools for [nanopb](../README.md).
 
 - **Validators.** `validate.proto` rules in your `.proto` files become C
-  functions, `pb_validate_<Message>()`, with no heap and no reflection.
+  functions with no heap and no reflection: `<protocol>_validate_<message>()` for a protocol
+  folder (`fleet_validate_cmd_Move()`), `pb_validate_<Message>()` for single `.proto` files.
 - **Packet filters.** `<protocol>_udp()` / `_tcp()` decode, identify and
   validate an untrusted packet and return 0 (accept) or -1 (drop, logged).
 - **Wireshark.** A dissector that decodes nested messages and
@@ -95,9 +96,17 @@ if (fleet_udp(NULL, data, size) != 0)
 - Static storage only, no callbacks, no malloc: `gen` refuses a protocol in which any field
   would be a `pb_callback_t` (string, bytes, repeated or map without `max_size`/`max_count`)
   or a pointer, and names each field; `--allow-callbacks` turns that off.
-- `google.protobuf.Any` is static: `type_url` is sized per protocol to exactly the longest
-  URL it can carry (`type.googleapis.com/` + the longest message name, or a longer `any.in`
-  URL, + NUL; `gen` prints it), `value` by `google/protobuf/any.options` (default 256).
+- `google.protobuf.Any` is static and sized per protocol, `gen` prints both: `type_url` is exactly
+  the longest URL it can carry (`type.googleapis.com/` + the longest message name, or a longer
+  `any.in` URL, + NUL); `value` is the largest maximum size nanopb computes (`#define <msg>_size`)
+  of any message of the protocol, with the `Any`s inside it holding the largest message that has
+  none: every message with one level of `Any` (a `Packet { Any payload }` holding a `Frame`) always
+  fits. Where an `Any` may hold a message that carries an `Any` itself (no `any.in`, or one that
+  allows such a message) `gen`/`check` warn and name the field: deeper nesting fits only when
+  that small; `--any-value-size N` sets the size (a field of Set protos directory in Wireshark).
+  `.options` values for `Any` are replaced.
+- `<PROTOCOL>_MAX_SIZE` in `<protocol>.pb.h`: the largest packet (nanopb's `_size` of the `Any`,
+  or of the largest message without one), for receive buffers.
   See [docs/any-examples.md](docs/any-examples.md) for a 7-file protocol that uses `Any` in
   repeated fields, oneofs, sub-messages and inside other `Any`s, merged into one `.c`.
 - `--protos-root` is the folder *above* the protocol folders (`protocols/`, holding

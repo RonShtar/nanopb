@@ -193,6 +193,8 @@ def check_generated(unit):
                             + ', '.join(callbacks))
     for reason in unit.get('needs_field_32bit') or []:
         warnings.append('needs PB_FIELD_32BIT: ' + reason)
+    if unit.get('any_value_note'):
+        warnings.append(unit['any_value_note'])
     if unit.get('protocol_filter_error') and 'does not use google.protobuf.Any' not in unit['protocol_filter_error']:
         warnings.append('no protocol filter: ' + unit['protocol_filter_error'].splitlines()[0])
     for message, error in sorted((unit.get('filter_errors') or {}).items()):

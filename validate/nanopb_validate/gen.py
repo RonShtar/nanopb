@@ -13,6 +13,7 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
+import any_storage  # noqa: E402
 from protos import (BackendError, INCLUDE_RE, OPTION_PROTOS, RUNTIME_FILES, Unit, VALIDATE_RUNTIME_FILES,  # noqa: E402
                     c_identifier, field_rules, is_option_proto, protocol_name, select_units, unit_entrypoints)
 
@@ -412,51 +413,63 @@ def dynamic_fields(header_text):
     return found
 
 
-#: The host part of a type_url as protobuf libraries write it.
-TYPE_URL_PREFIX = 'type.googleapis.com/'
-ANY_TYPE_URL_RE = re.compile(r'^(\S*google\.protobuf\.Any\.type_url\s+.*?)\bmax_size\s*:\s*\d+(.*)$')
+def rename_validators(outdir, files, unit_name, header_text):
+    """pb_validate_<C type>() -> <unit>_validate_<C type without the unit prefix>() in every
+    generated file: fleet_cmd_Move -> fleet_validate_cmd_Move. Only the message validators
+    (the types of the header's FIELDLIST macros) change, never runtime functions such as
+    pb_validate_int32. Returns how many validators were renamed."""
+
+    ident = c_identifier(unit_name)
+    ctypes = sorted(set(re.findall(r'^#define (\w+)_FIELDLIST\(', header_text, re.M)), key=len, reverse=True)
+    if not ctypes:
+        return 0
+    pattern = re.compile(r'\bpb_validate_(%s)\b' % '|'.join(re.escape(c) for c in ctypes))
+    renamed = set()
+
+    def new_name(match):
+        ctype = match.group(1)
+        renamed.add(ctype)
+        return '%s_validate_%s' % (ident, ctype[len(ident) + 1:] if ctype.startswith(ident + '_') else ctype)
+
+    for name in files:
+        path = os.path.join(outdir, name)
+        with open(path, encoding='utf-8', newline='') as handle:
+            text = handle.read()
+        new = pattern.sub(new_name, text)
+        if new != text:
+            with open(path, 'w', encoding='utf-8', newline='') as handle:
+                handle.write(new)
+    return len(renamed)
 
 
-def longest_type_url(unit):
-    """(storage size, URL) for google.protobuf.Any.type_url: the longest
-    "type.googleapis.com/<message>" any message of the unit (its own files and
-    imports, nested messages included) can have, or an any.in URL, plus the NUL."""
-
-    longest = TYPE_URL_PREFIX
-
-    def walk(prefix, messages):
-        nonlocal longest
-        for msg in messages:
-            name = prefix + msg.name
-            if not msg.options.map_entry and len(TYPE_URL_PREFIX + name) > len(longest):
-                longest = TYPE_URL_PREFIX + name
-            for fld in msg.field:
-                rules = field_rules(fld)
-                if rules is not None and rules.HasField('any'):
-                    for url in getattr(rules.any, 'in'):
-                        if len(url) > len(longest):
-                            longest = url
-            walk(name + '.', msg.nested_type)
-
-    for fdesc in unit.fds.file:
-        if not is_option_proto(fdesc.name):
-            walk(fdesc.package + '.' if fdesc.package else '', fdesc.message_type)
-    return len(longest) + 1, longest
+SIZE_DEFINE_RE = re.compile(r'^#define (\w+)_size\s+(\d+)\s*$', re.M)
 
 
-def exact_type_url_size(options_text, package, size):
-    """The any.options text with every Any.type_url max_size replaced by one exact line."""
+def add_max_size_define(path, unit_name, header_text, any_protocol):
+    """#define <UNIT>_MAX_SIZE in the merged .pb.h: the largest packet of the protocol, as one of
+    nanopb's own <msg>_size macros (an Any for an Any protocol, else the largest message).
+    Returns (define, macro it names) or (None, None) when nanopb gave no size."""
 
-    out = []
-    for line in options_text.splitlines():
-        match = ANY_TYPE_URL_RE.match(line)
-        if match and not line.lstrip().startswith('#'):
-            line = (match.group(1) + match.group(2)).strip()
-            if len(line.split()) < 2:        # only the name was left
-                continue
-        out.append(line)
-    out.append('%s.Any.type_url max_size:%d' % (package, size))
-    return ''.join(line + '\n' for line in out)
+    ident = c_identifier(unit_name)
+    sizes = dict((m, int(n)) for m, n in SIZE_DEFINE_RE.findall(header_text))
+    if any_protocol and ident + '_google_protobuf_Any' in sizes:
+        message, why = ident + '_google_protobuf_Any', 'every packet is one google.protobuf.Any'
+    elif sizes and not any_protocol:
+        message = max(sorted(sizes), key=lambda m: sizes[m])
+        why = 'the largest message of the protocol'
+    else:
+        return None, None
+    define = '%s_MAX_SIZE' % ident.upper()
+    block = ('/* Largest packet of protocol %s (%d bytes): %s. Size receive buffers with it. */\n'
+             '#define %s %s_size\n\n' % (unit_name, sizes[message], why, define, message))
+    with open(path, encoding='utf-8', newline='') as handle:
+        text = handle.read()
+    guard_end = text.rfind('#endif /* NANOPB_UNIT_')
+    if guard_end < 0:
+        return None, None
+    with open(path, 'w', encoding='utf-8', newline='') as handle:
+        handle.write(text[:guard_end] + block + text[guard_end:])
+    return define, '%s_size (%d bytes)' % (message, sizes[message])
 
 
 def prefix_imports(unit, optdir):
@@ -486,11 +499,10 @@ def prefix_imports(unit, optdir):
                 break
         package = ident + ('.' + fdesc.package if fdesc.package else '')
         existing = renamed_option_lines(existing, fdesc.package, package)
-        if fdesc.name == 'google/protobuf/any.proto':
-            # type_url gets exactly the storage the longest URL of this protocol needs.
-            size, url = longest_type_url(unit)
-            existing = exact_type_url_size(existing, package, size)
-            unit.any_type_url = (size, url)
+        if fdesc.name == any_storage.ANY_PROTO:
+            # Exact static storage: type_url for the longest URL, value for the largest
+            # message (nanopb's own sizes); any_storage.py.
+            existing = any_storage.exact_options(existing, package, any_storage.exact_any_sizes(unit))
         target = os.path.join(optdir, base + '.options')
         if not os.path.isdir(os.path.dirname(target)):
             os.makedirs(os.path.dirname(target))
@@ -552,6 +564,14 @@ def gen_c_summary(results, common=None):
         if r.get('any_type_url'):
             lines.append('  Any.type_url: char[%d], the longest URL + NUL (%s)'
                          % (r['any_type_url']['max_size'], r['any_type_url']['longest']))
+        if r.get('any_value'):
+            lines.append('  Any.value: %d bytes, %s' % (r['any_value']['max_size'], r['any_value']['from']))
+        if r.get('any_value_note'):
+            lines.append('  note: ' + r['any_value_note'])
+        if r.get('max_size_define'):
+            lines.append('  largest packet: %s = %s' % (r['max_size_define'], r['max_size_from']))
+        if r.get('renamed_validators'):
+            lines.append('  validators: %s_validate_<message> (%d)' % (r['unit'], r['renamed_validators']))
         if r.get('protocol_filter'):
             lines.append('  protocol filter (Any type_url = opcode, every message): %s/_tcp'
                          % r['protocol_filter'])
@@ -656,6 +676,7 @@ def cmd_gen_c(args):
     try:
         for name in select_units(args):
             unit = Unit(args.protos_root, name, args.include)
+            unit.any_value_override = getattr(args, 'any_value_size', None)
             optdir = tempfile.mkdtemp(prefix='nanopb_ws_opt_')
             tempdirs.append(optdir)
             renamed = prefix_imports(unit, optdir)
@@ -745,8 +766,11 @@ def _gen_jobs(args, validate, jobs, tempdirs):
                 'A message that contains itself is a callback in nanopb: carry it in a google.protobuf.Any '
                 'instead. --allow-callbacks generates them anyway.'
                 % (name, len(dynamic), '\n  '.join(dynamic)))
+        renamed_validators = rename_validators(outdir, files, name, header_text)
         filters = re.findall(r'^int (\w+_udp)\(void \*ctx', header_text, re.M)
         protocol_filter = public + '_udp' if protocol and public + '_udp' in filters else None
+        max_define, max_from = add_max_size_define(os.path.join(outdir, header), name, header_text,
+                                                   bool(protocol_filter))
         filters = [f for f in filters if f != protocol_filter]
         # The generator puts its '#error Enable PB_FIELD_32BIT' in the .pb.c.
         with open(os.path.join(outdir, name + '.pb.c')) as handle:
@@ -757,8 +781,16 @@ def _gen_jobs(args, validate, jobs, tempdirs):
                   'protocol_filter': protocol_filter, 'filters': filters, 'generator_log': log.strip()}
         if renamed:
             result['prefixed_imports'] = renamed
-        if getattr(unit, 'any_type_url', None):
-            result['any_type_url'] = {'max_size': unit.any_type_url[0], 'longest': unit.any_type_url[1]}
+        any_sizes = getattr(unit, '_any_sizes', None)
+        if any_sizes:
+            result['any_type_url'] = {'max_size': any_sizes['type_url'][0], 'longest': any_sizes['type_url'][1]}
+            result['any_value'] = {'max_size': any_sizes['value'][0], 'from': any_sizes['value'][1]}
+            if any_storage.carriers_note(any_sizes):
+                result['any_value_note'] = any_storage.carriers_note(any_sizes)
+        if max_define:
+            result['max_size_define'], result['max_size_from'] = max_define, max_from
+        if renamed_validators:
+            result['renamed_validators'] = renamed_validators
         if field_32bit:
             result['needs_field_32bit'] = field_32bit
             result['field_32bit_enabled_in_pb_h'] = bool(args.with_runtime)

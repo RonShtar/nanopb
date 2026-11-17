@@ -135,9 +135,11 @@ def roundtrip_source(samples, header_text):
             '    pb_violations_init(&violations);']
         # Messages without rules (and without sub-messages that have rules)
         # get no validator; only call the ones fleet_validate.h declares.
-        if re.search(r'\bpb_validate_%s\(' % ctype, header_text):
+        # Protocol validators are <protocol>_validate_<message C type without the protocol>.
+        vname = '%s_validate_%s' % (UNIT, ctype[len(UNIT) + 1:] if ctype.startswith(UNIT + '_') else ctype)
+        if re.search(r'\b%s\(' % vname, header_text):
             lines += [
-                '    if (!pb_validate_%s(&msg, &violations)) {' % ctype,
+                '    if (!%s(&msg, &violations)) {' % vname,
                 '        printf("FAIL %s: validate: %%s %%s\\n", violations.violations[0].field_path,' % ident,
                 '               violations.violations[0].constraint_id);',
                 '        return 1;',
