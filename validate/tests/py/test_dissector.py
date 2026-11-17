@@ -620,7 +620,7 @@ class StudioTests(LuaTestCase):
         self.assertEqual(sorted(os.listdir(os.path.join(self.out, 'envelope'))),
                          ['envelope.pb.c', 'envelope.pb.h', 'envelope_validate.c', 'envelope_validate.h'])
         with open(os.path.join(self.out, 'envelope', 'envelope_validate.c')) as handle:
-            self.assertIn('pb_validate_demo_envelope_Envelope', handle.read())
+            self.assertIn('envelope_validate_demo_envelope_Envelope', handle.read())
         with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
             self.assertIn(self.out.replace('\\', '\\\\'), handle.read())
 

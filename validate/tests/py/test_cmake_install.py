@@ -49,7 +49,7 @@ static int check(uint32_t level, unsigned *violations)
     int ok;
     m.level = level;
     pb_violations_init(&v);
-    ok = pb_validate_demo_Ping(&m, &v);
+    ok = demo_validate_Ping(&m, &v);
     *violations = (unsigned)v.count;
     return ok;
 }

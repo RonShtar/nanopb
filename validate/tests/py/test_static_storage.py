@@ -52,6 +52,8 @@ class StaticStorageTests(unittest.TestCase):
         unit = result['units'][0]
         self.assertEqual(unit['any_type_url'], {'max_size': size, 'longest': 'type.googleapis.com/' + longest})
         self.assertIn('Any.type_url: char[%d]' % size, result['summary'])
+        # Packet.payload has no any.in: it may hold a Packet (an Any inside an Any inside ...).
+        self.assertIn('radar.tracking.Packet.payload can hold a message that carries an Any', unit['any_value_note'])
 
     def test_project_value_is_replaced_and_any_in_counts(self):
         """A project any.options type_url size is replaced; an any.in URL longer than every
@@ -63,11 +65,45 @@ class StaticStorageTests(unittest.TestCase):
                    'message Packet { google.protobuf.Any payload = 1 [(validate.rules).any.in = "%s"]; }\n' % url)
         self.write('radar/google/protobuf/any.options',
                    'google.protobuf.Any.type_url max_size:200\ngoogle.protobuf.Any.value max_size:64\n')
-        status, _, err, out = self.gen()
+        status, result, err, out = self.gen()
         self.assertEqual(status, 0, err)
         header = self.header(out, 'radar')
         self.assertIn('char type_url[%d];' % (len(url) + 1), header)
-        self.assertIn('PB_BYTES_ARRAY_T(64)', header)          # value keeps the project's size
+        # value, not the project's 64: nanopb's size of the largest message, with its Any holding
+        # the largest message without one: Packet{Any{url, Short}} = 2 + (2 + 49 + 2 + 6) = 61.
+        self.assertIn('#define radar_Short_size                         6', header)
+        self.assertIn('PB_BYTES_ARRAY_T(61)', header)
+        unit = result['units'][0]
+        self.assertEqual(unit['any_value']['max_size'], 61)
+        self.assertIn('radar.Packet (radar_Packet_size)', unit['any_value']['from'])
+        # any.in allows only Short (no Any inside), so deeper nesting is impossible: no note.
+        self.assertNotIn('any_value_note', unit)
+
+    def test_any_value_size_option(self):
+        self.write('radar/radar.proto', 'syntax = "proto3";\npackage radar;\n' + ANY_IMPORT +
+                   'message Short { uint32 a = 1; }\nmessage Packet { google.protobuf.Any payload = 1; }\n')
+        status, result, err, out = self.gen('--any-value-size', '300')
+        self.assertEqual(status, 0, err)
+        self.assertIn('PB_BYTES_ARRAY_T(300)', self.header(out, 'radar'))
+        self.assertEqual(result['units'][0]['any_value'], {'max_size': 300, 'from': '--any-value-size'})
+
+    def test_max_size_define_and_validator_names(self):
+        """<PROTOCOL>_MAX_SIZE names nanopb's size of the Any (the packet); validators are
+        <protocol>_validate_<message>."""
+        self.write('radar/radar.proto', 'syntax = "proto3";\npackage radar;\n' + ANY_IMPORT +
+                   'import "validate.proto";\n'
+                   'message Short { uint32 a = 1 [(validate.rules).uint32.lte = 9]; }\n'
+                   'message Packet { google.protobuf.Any payload = 1; }\n')
+        status, result, err, out = self.gen()
+        self.assertEqual(status, 0, err)
+        self.assertIn('#define RADAR_MAX_SIZE radar_google_protobuf_Any_size', self.header(out, 'radar'))
+        with open(os.path.join(out, 'radar', 'radar_validate.h')) as handle:
+            validate_h = handle.read()
+        self.assertIn('bool radar_validate_Short(const radar_Short *msg', validate_h)
+        self.assertNotIn('pb_validate_radar_', validate_h)
+        self.assertIn('#include <pb_validate.h>', validate_h)        # runtime names unchanged
+        with open(os.path.join(out, 'radar', 'radar.pb.c')) as handle:
+            self.assertIn('radar_validate_Short', handle.read())    # the filter calls the new name
 
     def test_stress_example_is_all_static(self):
         out = os.path.join(self.tmp, 'out')

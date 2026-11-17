@@ -121,7 +121,8 @@ class BackendTests(unittest.TestCase):
         self.assertIn('demo_envelope_Envelope_size', header)
         for symbol in ('PB_BIND(demo_envelope_Envelope', 'PB_BIND(envelope_google_protobuf_Any'):
             self.assertIn(symbol, self.read('envelope', 'envelope.pb.c'))
-        self.assertIn('bool pb_validate_demo_envelope_Envelope(', self.read('envelope', 'envelope_validate.c'))
+        # Protocol validators are <protocol>_validate_<message C type>.
+        self.assertIn('bool envelope_validate_demo_envelope_Envelope(', self.read('envelope', 'envelope_validate.c'))
 
     def schema_messages(self, root):
         from backend import DEFAULT_NANOPB_ROOT
@@ -258,7 +259,8 @@ class BackendTests(unittest.TestCase):
                 if entry['any_wrapped']:
                     data = unwrap_any(data)
                 ctype = c_identifier(msg.replace('.', '_'))
-                validate = ('pb_validate_%s(&m, &v)' % ctype) if ('bool pb_validate_%s(' % ctype) in header else 'true'
+                vname = '%s_validate_%s' % (unit, ctype[len(unit) + 1:] if ctype.startswith(unit + '_') else ctype)
+                validate = ('%s(&m, &v)' % vname) if ('bool %s(' % vname) in header else 'true'
                 name = 'frame_%d' % entry['frame']
                 lines += ['static const pb_byte_t %s_data[] = {%s};' % (name, ', '.join(str(b) for b in data) or '0'),
                           'static int %s(void) {' % name,
@@ -712,9 +714,9 @@ class BackendTests(unittest.TestCase):
         with open(os.path.join(unit_dir, 'arr_validate.c')) as handle:
             source = handle.read()
         self.assertIsNone(re.search(r',\s*,', source), source)
-        self.assertIn('PB_VALIDATE_NESTED_MSG_REPEATED(ctx, pb_validate_arr_Item, msg, items, violations);', source)
-        self.assertIn('PB_VALIDATE_NESTED_MSG_FIXARRAY(ctx, pb_validate_arr_Item, msg, fixed, violations);', source)
-        self.assertIn('PB_VALIDATE_NESTED_MAP_VALUES(ctx, pb_validate_arr_Item, msg, by_id, violations);', source)
+        self.assertIn('PB_VALIDATE_NESTED_MSG_REPEATED(ctx, arr_validate_Item, msg, items, violations);', source)
+        self.assertIn('PB_VALIDATE_NESTED_MSG_FIXARRAY(ctx, arr_validate_Item, msg, fixed, violations);', source)
+        self.assertIn('PB_VALIDATE_NESTED_MAP_VALUES(ctx, arr_validate_Item, msg, by_id, violations);', source)
         for chatter in ('/* Validate field:', 'Fields without constraints', '/* Validate oneof', '/* Message rule:'):
             self.assertNotIn(chatter, source)
         cc = find_cc()

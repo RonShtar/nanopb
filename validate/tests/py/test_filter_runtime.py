@@ -78,7 +78,7 @@ CASES = [
     # The outer packet is an Any, so Batch(Batch(Batch(SetMode))) is four Anys deep: the limit.
     ('4 Anys nested (the limit)', nested_batches(3), ALLOW),
     ('5 Anys nested', nested_batches(4), DROP),
-    # Any storage is static (type_url[96], value 512 in this example): bigger does not fit.
+    # Any storage is static (type_url[49], value 512 here): bigger does not fit.
     ('type_url longer than its storage', any_of('x' * 90 + '.Msg', b''), DROP),
     ('payload bigger than Any.value', any_of('fleet.cmd.SetMode', b'\x00' * 600), DROP),
 ]
@@ -88,7 +88,7 @@ def c_array(data):
     return '{' + ', '.join('0x%02x' % b for b in bytearray(data)) + '}' if data else '{0}'
 
 
-def harness():
+def harness(cases):
     lines = ['#include <stdio.h>', '#include "fleet.pb.h"', '',
              'static int failed;', '',
              'static void check(const char *name, const uint8_t *data, size_t size, int want)',
@@ -100,7 +100,7 @@ def harness():
              '        failed++;',
              '    }',
              '}', '', 'int main(void)', '{']
-    for i, (name, data, want) in enumerate(CASES):
+    for i, (name, data, want) in enumerate(cases):
         lines.append('    { static const uint8_t p%d[] = %s; check("%s", p%d, %d, %d); }'
                      % (i, c_array(data), name, i, len(data), want))
     lines += ['    printf("%d failed\\n", failed);', '    return failed != 0;', '}', '']
@@ -111,8 +111,14 @@ class FilterRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.mkdtemp(prefix='nanopb_ws_filter_rt_')
+        # This protocol nests Anys on purpose, so it needs room: --any-value-size 512.
         cls.out = os.path.join(cls.tmp, 'out')
         status, _, err = run_backend('gen-c', '--protos-root', STRESS_PROTOS, '--out', cls.out,
+                                     '--with-runtime', '--unit', 'fleet', '--any-value-size', '512')
+        assert status == 0, err
+        # The default: value = the largest message without an Any (Imu, 128 bytes).
+        cls.exact = os.path.join(cls.tmp, 'exact')
+        status, _, err = run_backend('gen-c', '--protos-root', STRESS_PROTOS, '--out', cls.exact,
                                      '--with-runtime', '--unit', 'fleet')
         assert status == 0, err
 
@@ -128,17 +134,17 @@ class FilterRuntimeTests(unittest.TestCase):
         functions = re.findall(r'^(?:static )?int (\w+)\(', text, re.M)
         self.assertEqual(functions, ['fleet_check_any', 'fleet_udp', 'fleet_tcp'])
 
-    def run_cases(self, defines):
+    def run_cases(self, defines, cases=CASES, out=None, tag=''):
         cc = find_cc()
         if not cc:
             self.skipTest('no C compiler')
-        unit_dir = os.path.join(self.out, 'fleet')
+        unit_dir = os.path.join(out or self.out, 'fleet')
         flags, extra = unit_build(unit_dir)
-        build = os.path.join(self.tmp, 'build_' + ('static' if defines else 'stack'))
+        build = os.path.join(self.tmp, 'build_' + ('static' if defines else 'stack') + tag)
         os.makedirs(build)
         main = os.path.join(build, 'main.c')
         with open(main, 'w', newline='\n') as handle:
-            handle.write(harness())
+            handle.write(harness(cases))
         sources = [main] + [os.path.join(unit_dir, f) for f in sorted(os.listdir(unit_dir)) if f.endswith('.c')]
         objects = []
         for source in sources + extra:
@@ -161,6 +167,23 @@ class FilterRuntimeTests(unittest.TestCase):
 
     def test_static_payloads(self):
         self.run_cases(['-DPB_VALIDATE_FILTER_STATIC_BUFFERS'])
+
+    def test_default_value_size_fits_one_level_of_nesting(self):
+        """Without --any-value-size, Any.value is nanopb's largest message size with its Anys
+        holding the largest message without one (Envelope with Imus: 1053 bytes): any message
+        with one level of Any fits; a deeper packet bigger than that is dropped (gen warns)."""
+        with open(os.path.join(self.exact, 'fleet', 'fleet.pb.h')) as handle:
+            header = handle.read()
+        self.assertIn('PB_BYTES_ARRAY_T(1053) fleet_google_protobuf_Any_value_t', header)
+        one_level = envelope(2, frame([imu(-40), imu(125), imu(1)], imu(3)))
+        envelopes = [envelope(2, frame([imu(-40), imu(125), imu(1)], imu(3))) for _ in range(3)]
+        deep = batch(*[batch(*envelopes) for _ in range(3)])
+        self.assertGreater(len(deep), 49 + 1053 + 6)        # more than type_url + value + tags
+        self.run_cases([], cases=[
+            ('Imu, the largest message without an Any', imu(-40), ALLOW),
+            ('Envelope.frame with three Imus and a primary: one level of Any', one_level, ALLOW),
+            ('Batch of Batches of Envelopes: deeper and bigger than Any.value', deep, DROP),
+        ], out=self.exact, tag='_exact')
 
 
 if __name__ == '__main__':
