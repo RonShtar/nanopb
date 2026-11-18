@@ -856,7 +856,7 @@ class BackendTests(unittest.TestCase):
         with open(os.path.join(unit_dir, 'envelope.pb.c')) as handle:
             text = handle.read()
         self.assertIn('#include "filter/envelope/envelope_validate.h"', text)
-        self.assertIn('#define ENVELOPE_FILTER_MESSAGE(NAME, TYPE, VALIDATE)', text)
+        self.assertIn('#define ENVELOPE_FILTER_MESSAGE(NAME, FUNC)', text)
         self.assertIn('#undef ENVELOPE_FILTER_MESSAGE', text)
         with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
             self.assertIn('#include "filter/envelope/envelope.pb.h"', handle.read())

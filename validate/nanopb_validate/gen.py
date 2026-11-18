@@ -418,8 +418,9 @@ def renamed_option_lines(text, old_package, new_package):
     return ''.join(line + '\n' for line in out)
 
 
-FIELDLIST_RE = re.compile(r'^#define (\w+)_FIELDLIST\(X, ?a\)[ \t]*\\\n((?:.*\\\n)*.*)$', re.M)
-FIELD_X_RE = re.compile(r'X\(a,\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),')
+# nanopb names the macro argument "a", or "a_" when the message has a field called "a".
+FIELDLIST_RE = re.compile(r'^#define (\w+)_FIELDLIST\(X, ?\w+\)[ \t]*\\\n((?:.*\\\n)*.*)$', re.M)
+FIELD_X_RE = re.compile(r'X\(\w+,\s*(\w+),\s*(\w+),\s*(\w+),\s*(\w+),')
 
 
 def dynamic_fields(header_text):

@@ -67,6 +67,7 @@ What is in it:
 | `test_filter_runtime.py` | the generated packet filter on real packets, built twice (stack and `PB_VALIDATE_FILTER_STATIC_BUFFERS`): `Any` in `Any`, in a oneof, in a sub-message, size and depth limits; with the default exact `Any.value` a message carrying `Any`s that is bigger is dropped; also at `-O2` under UBSan |
 | `test_abi_check.py` | generated code built with other `PB_VALIDATE_*` / `PB_FIELD_32BIT` values than `pb_validate.c` does not link (it used to corrupt memory at `-O2`); the same values link and leave guard bytes intact |
 | `test_required_and_errors.py` | `required` on every kind of field (C, test data, dissector agree); protoc errors shown once with a hint (missing `import "validate.proto";`, syntax); the buf converter adds the import |
+| `test_fast_decode.py` | The filter's fast path gives `pb_decode`'s verdict on every packet: every field kind, the stress protocol, with `PB_FIELD_32BIT PB_BUFFER_ONLY PB_NO_ERRMSG PB_VALIDATE_FILTER_STATIC_BUFFERS` and at `-O0`; which messages take it; it is faster |
 | `test_packet_sizes.py` | `packets --sizes`: every range gets a packet of its size, over the MTU as IPv4 fragments, read back whole, reassembled by Wireshark with the right verdict, accepted by the C filter |
 | `test_security.py` | fuzzing of every filter entry point, with guard pages and UBSan where the compiler has them |
 | `test_performance.py` | time and size budgets of validators and filters |

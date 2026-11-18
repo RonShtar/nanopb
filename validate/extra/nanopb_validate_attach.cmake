@@ -11,6 +11,35 @@
 #
 # Only nanopb's targets are changed, never its files.
 
+# Build settings that must be the same in the library and in every file using it
+# (PB_FIELD_32BIT, PB_VALIDATE_MAX_*, PB_VALIDATE_DEBUG, ...). They are PUBLIC
+# definitions of the library: nanopb's pb_*.c and pb_validate.c are compiled with them,
+# and a project linking nanopb::protobuf-nanopb(-static) from find_package(nanopb)
+# gets them too, so it needs no target_compile_definitions of its own.
+#
+#   -DNANOPB_VALIDATE_FIELD_32BIT=ON                         PB_FIELD_32BIT
+#   -DNANOPB_VALIDATE_DEFINES="PB_VALIDATE_MAX_VIOLATIONS=32;PB_VALIDATE_DEBUG"
+option(NANOPB_VALIDATE_FIELD_32BIT "Define PB_FIELD_32BIT for the library and every project using it" OFF)
+set(NANOPB_VALIDATE_DEFINES "" CACHE STRING
+    "Definitions (;-separated, NAME or NAME=VALUE) for the library and every project using it")
+
+function(nanopb_validate_definitions out)
+    set(_defs ${NANOPB_VALIDATE_DEFINES})
+    if(NANOPB_VALIDATE_FIELD_32BIT AND NOT "PB_FIELD_32BIT" IN_LIST _defs)
+        list(APPEND _defs PB_FIELD_32BIT)
+    endif()
+    set(${out} ${_defs} PARENT_SCOPE)
+endfunction()
+
+# Adds the settings to `target` as PUBLIC definitions (exported with the target).
+function(nanopb_validate_apply_definitions target)
+    nanopb_validate_definitions(_defs)
+    if(_defs)
+        target_compile_definitions(${target} PUBLIC ${_defs})
+        message(STATUS "nanopb_validate: ${target} and its users are compiled with: ${_defs}")
+    endif()
+endfunction()
+
 get_filename_component(NANOPB_VALIDATE_RUNTIME_DIR "${CMAKE_CURRENT_LIST_DIR}/../runtime" ABSOLUTE)
 get_filename_component(NANOPB_VALIDATE_NANOPB_DIR "${CMAKE_CURRENT_LIST_DIR}/../.." ABSOLUTE)   # where pb.h is
 
@@ -27,6 +56,7 @@ function(nanopb_validate_attach)
             # In the build tree, other targets see pb_validate.h through the library.
             target_include_directories(${_target} INTERFACE
                 $<BUILD_INTERFACE:${NANOPB_VALIDATE_RUNTIME_DIR}>)
+            nanopb_validate_apply_definitions(${_target})
             set(_attached TRUE)
         endif()
     endforeach()

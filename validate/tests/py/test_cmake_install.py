@@ -38,6 +38,9 @@ message Ping { uint32 level = 1 [(validate.rules).uint32.lte = 5]; }
 '''
 
 MAIN = '''#include <stdio.h>
+#if defined(EXPECT_FIELD_32BIT) && !defined(PB_FIELD_32BIT)
+#error "PB_FIELD_32BIT did not come with nanopb::protobuf-nanopb-static"
+#endif
 #include <pb_validate.h>
 #include "demo.pb.h"
 #include "demo_validate.h"
@@ -69,6 +72,9 @@ find_package(${PKG} REQUIRED)
 add_executable(consumer main.c ${GEN_DIR}/demo.pb.c ${GEN_DIR}/demo_validate.c)
 target_include_directories(consumer PRIVATE ${GEN_DIR})
 target_link_libraries(consumer ${LIB})
+if(EXPECT_FIELD_32BIT)
+    target_compile_definitions(consumer PRIVATE EXPECT_FIELD_32BIT)    # only the check, not the setting
+endif()
 '''
 
 HOOK = os.path.join(VALIDATE_DIR, 'extra', 'nanopb_validate_hook.cmake')
@@ -118,7 +124,7 @@ class CMakeInstallTests(unittest.TestCase):
         self.run_step(['cmake', '--install', build])
         return prefix
 
-    def consume(self, prefix, package, library):
+    def consume(self, prefix, package, library, *options):
         """A project that links `library` from find_package(`package`) and calls the validators."""
         protos = os.path.join(self.tmp, 'protos')
         self.write(os.path.join(protos, 'demo'), 'demo.proto', PROTO)
@@ -131,7 +137,7 @@ class CMakeInstallTests(unittest.TestCase):
         app_build = os.path.join(self.tmp, 'app_build')
         self.run_step(['cmake', '-S', app, '-B', app_build, '-DCMAKE_PREFIX_PATH=' + slash(prefix),
                        '-DPKG=' + package, '-DLIB=' + library,
-                       '-DGEN_DIR=' + slash(os.path.join(gen, 'demo'))] + self.extra)
+                       '-DGEN_DIR=' + slash(os.path.join(gen, 'demo'))] + list(options) + self.extra)
         self.run_step(['cmake', '--build', app_build])
         exe = os.path.join(app_build, 'consumer' + ('.exe' if os.name == 'nt' else ''))
         self.assertIn('good=1(0) bad=0(1)', self.run_step([exe]))
@@ -157,6 +163,18 @@ class CMakeInstallTests(unittest.TestCase):
         """cmake -S validate (CMake 3.14+): nanopb built from its unchanged root, pb_validate.c
         added to its library after add_subdirectory."""
         self.check_in_nanopb_library(self.build_and_install(VALIDATE_DIR))
+
+    def test_field_32bit_reaches_the_library_and_the_project(self):
+        """-DNANOPB_VALIDATE_FIELD_32BIT=ON: nanopb's .c files and pb_validate.c are built with
+        PB_FIELD_32BIT and the project gets it from find_package(nanopb), with no
+        target_compile_definitions of its own (else it would not link: the _f32 link names)."""
+        prefix = self.build_and_install(VALIDATE_DIR, '-DNANOPB_VALIDATE_FIELD_32BIT=ON')
+        libs = [n for n in os.listdir(os.path.join(prefix, 'lib')) if 'protobuf-nanopb' in n]
+        with open(os.path.join(prefix, 'lib', libs[0]), 'rb') as handle:
+            archive = handle.read()
+        self.assertIn(b'_f32', archive)
+        self.assertNotIn(b'_rel_f16', archive)
+        self.consume(prefix, 'nanopb', 'nanopb::protobuf-nanopb-static', '-DEXPECT_FIELD_32BIT=ON')
 
     def test_hook_puts_pb_validate_into_nanopbs_own_library(self):
         """cmake -S . with the hook (CMake 3.19+): the same, from nanopb's own build."""

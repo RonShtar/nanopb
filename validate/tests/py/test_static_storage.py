@@ -116,7 +116,7 @@ class StaticStorageTests(unittest.TestCase):
         header = self.header(out, 'fleet')
         self.assertIn('char type_url[49];', header)            # type.googleapis.com/fleet.telemetry.Health.Fault
         self.assertNotIn('pb_callback_t', header)
-        self.assertEqual(re.findall(r'X\(a, (?:CALLBACK|POINTER)', header), [])
+        self.assertEqual(re.findall(r'X\(\w+, (?:CALLBACK|POINTER)', header), [])
 
     def test_callback_field_is_refused(self):
         self.write('radar/radar.proto', 'syntax = "proto3";\npackage radar;\n' + ANY_IMPORT +
@@ -134,6 +134,16 @@ class StaticStorageTests(unittest.TestCase):
         status, _, err, out = self.gen('--allow-callbacks', '--no-filter')
         self.assertEqual(status, 0, err)
         self.assertIn('pb_callback_t', self.header(out, 'radar'))
+
+    def test_callback_field_is_refused_in_a_message_with_a_field_named_a(self):
+        """nanopb writes FIELDLIST(X, a_) when a field is called "a"; it was missed, the filter then
+        called an uninitialized pb_callback_t and crashed."""
+        self.write('radar/radar.proto', 'syntax = "proto2";\npackage radar;\n' + ANY_IMPORT +
+                   'message Short { required uint32 a = 1; optional string name = 2; }\n'
+                   'message Packet { optional google.protobuf.Any payload = 1; }\n')
+        status, _, err, out = self.gen()
+        self.assertEqual(status, 1, err)
+        self.assertIn('radar_Short.name: CALLBACK string', err)
 
     def test_optimize_pragma(self):
         """--optimize O2: #pragma GCC optimize in every generated .c, before its includes

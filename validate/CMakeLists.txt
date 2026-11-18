@@ -28,6 +28,10 @@
 #   use an already installed nanopb (find_package(nanopb)) and build only the separate
 #   validation library (its installed .a cannot be changed from here).
 #
+# Settings that must match everywhere, carried to your project by find_package:
+#   -DNANOPB_VALIDATE_FIELD_32BIT=ON      PB_FIELD_32BIT for the library and its users
+#   -DNANOPB_VALIDATE_DEFINES="A;B=1"     any others (PB_VALIDATE_MAX_VIOLATIONS=32, ...)
+#
 # nanopb's own options (nanopb_BUILD_GENERATOR, BUILD_SHARED_LIBS, ...) work as
 # usual. protoc must be found, as for nanopb.
 
@@ -42,12 +46,12 @@ option(NANOPB_VALIDATE_IN_NANOPB_LIBRARY
 include(GNUInstallDirs)
 
 get_filename_component(_nanopb_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+include(${CMAKE_CURRENT_SOURCE_DIR}/extra/nanopb_validate_attach.cmake)
 
 if(NANOPB_VALIDATE_WITH_NANOPB)
     add_subdirectory(${_nanopb_root} nanopb)
     if(NANOPB_VALIDATE_IN_NANOPB_LIBRARY)
         # nanopb's targets exist now: add pb_validate.c to them (nanopb's files unchanged).
-        include(${CMAKE_CURRENT_SOURCE_DIR}/extra/nanopb_validate_attach.cmake)
         nanopb_validate_attach()
         return()
     endif()
@@ -58,7 +62,17 @@ if(NANOPB_VALIDATE_WITH_NANOPB)
     else()
         message(FATAL_ERROR "nanopb built no runtime library (nanopb_BUILD_RUNTIME is OFF?)")
     endif()
+    # nanopb's pb_*.c need the same settings (PB_FIELD_32BIT changes its descriptors).
+    foreach(_target protobuf-nanopb protobuf-nanopb-static)
+        if(TARGET ${_target})
+            nanopb_validate_apply_definitions(${_target})
+        endif()
+    endforeach()
 else()
+    nanopb_validate_definitions(_defs)
+    if(_defs)
+        message(STATUS "nanopb_validate: the installed nanopb must have been built with ${_defs} too")
+    endif()
     find_package(nanopb REQUIRED)
     if(TARGET nanopb::protobuf-nanopb)
         set(_nanopb_runtime nanopb::protobuf-nanopb)
@@ -82,6 +96,9 @@ target_link_libraries(protobuf-nanopb-validate PUBLIC ${_nanopb_runtime})
 target_include_directories(protobuf-nanopb-validate PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/runtime>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/nanopb>)
+if(NOT NANOPB_VALIDATE_WITH_NANOPB)
+    nanopb_validate_apply_definitions(protobuf-nanopb-validate)
+endif()
 add_library(nanopb::protobuf-nanopb-validate ALIAS protobuf-nanopb-validate)
 
 install(TARGETS protobuf-nanopb-validate EXPORT nanopb-validate-targets

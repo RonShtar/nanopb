@@ -130,12 +130,18 @@ class FilterRuntimeTests(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_one_function(self):
-        """The filter is one static function plus the public udp/tcp entry points."""
+        """One public filter, fleet_udp/fleet_tcp; the rest is static: <unit>_check_any, one check
+        function per message (each with only its own struct on the stack) and the fast path."""
         with open(os.path.join(self.out, 'fleet', 'fleet.pb.c')) as handle:
             text = handle.read()
         import re
-        functions = re.findall(r'^(?:static )?int (\w+)\(', text, re.M)
-        self.assertEqual(functions, ['fleet_check_any', 'fleet_udp', 'fleet_tcp'])
+        public = re.findall(r'^int (\w+)\(', text, re.M)
+        self.assertEqual(public, ['fleet_udp', 'fleet_tcp'])
+        self.assertIn('static int fleet_check_any(', text)
+        self.assertIn('FLEET_FILTER_MESSAGE("fleet.cmd.Move", fleet_check_cmd_Move);', text)
+        with open(os.path.join(self.out, 'fleet', 'fleet.pb.h')) as handle:
+            header = handle.read()
+        self.assertEqual(re.findall(r'^int (\w+)\(', header, re.M), ['fleet_udp', 'fleet_tcp'])
 
     def run_cases(self, defines, cases=CASES, out=None, tag=''):
         cc = find_cc()
