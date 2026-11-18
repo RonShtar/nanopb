@@ -78,9 +78,12 @@ CASES = [
     # The outer packet is an Any, so Batch(Batch(Batch(SetMode))) is four Anys deep: the limit.
     ('4 Anys nested (the limit)', nested_batches(3), ALLOW),
     ('5 Anys nested', nested_batches(4), DROP),
-    # Any storage is static (type_url[49], value 512 here): bigger does not fit.
-    ('type_url longer than its storage', any_of('x' * 90 + '.Msg', b''), DROP),
-    ('payload bigger than Any.value', any_of('fleet.cmd.SetMode', b'\x00' * 600), DROP),
+    # The outer Any is read in place: a long type_url is just a name that is not in the
+    # protocol, a long payload is fine if it is a valid message.
+    ('long type_url that is not a message of the protocol', any_of('x' * 90 + '.Msg', b''), DROP),
+    ('payload that is not a message (600 zero bytes)', any_of('fleet.cmd.SetMode', b'\x00' * 600), DROP),
+    ('payload with 600 bytes of unknown fields after a valid SetMode',
+     any_of('fleet.cmd.SetMode', f_varint(1, 2) + f_bytes(15, b'\x01' * 597)), ALLOW),
 ]
 
 
@@ -168,21 +171,31 @@ class FilterRuntimeTests(unittest.TestCase):
     def test_static_payloads(self):
         self.run_cases(['-DPB_VALIDATE_FILTER_STATIC_BUFFERS'])
 
+    def test_optimized_with_undefined_behavior_checks(self):
+        """-O2 lets the compiler exploit undefined behavior; UBSan (trap mode, no runtime
+        needed) stops the program at the first one. Every case must still be right."""
+        ubsan = ['-fsanitize=undefined', '-fsanitize-trap=undefined']
+        self.run_cases(['-O2'] + ubsan, tag='_o2_ubsan')
+        self.run_cases(['-O2', '-DPB_VALIDATE_FILTER_STATIC_BUFFERS'] + ubsan, tag='_o2_ubsan_static')
+
     def test_default_value_size_fits_one_level_of_nesting(self):
         """Without --any-value-size, Any.value is nanopb's largest message size with its Anys
         holding the largest message without one (Envelope with Imus: 1053 bytes): any message
-        with one level of Any fits; a deeper packet bigger than that is dropped (gen warns)."""
+        with one level of Any fits. The outer Any is read in place, so the packet itself may be
+        bigger; an Any inside a message holding more than that is dropped (gen warns)."""
         with open(os.path.join(self.exact, 'fleet', 'fleet.pb.h')) as handle:
             header = handle.read()
         self.assertIn('PB_BYTES_ARRAY_T(1053) fleet_google_protobuf_Any_value_t', header)
         one_level = envelope(2, frame([imu(-40), imu(125), imu(1)], imu(3)))
         envelopes = [envelope(2, frame([imu(-40), imu(125), imu(1)], imu(3))) for _ in range(3)]
-        deep = batch(*[batch(*envelopes) for _ in range(3)])
-        self.assertGreater(len(deep), 49 + 1053 + 6)        # more than type_url + value + tags
+        big = batch(*[batch(*envelopes) for _ in range(3)])
+        self.assertGreater(len(big), 49 + 1053 + 6)          # more than type_url + value + tags
+        inner_too_big = batch(big)                            # an Any inside a Batch holding it
         self.run_cases([], cases=[
             ('Imu, the largest message without an Any', imu(-40), ALLOW),
             ('Envelope.frame with three Imus and a primary: one level of Any', one_level, ALLOW),
-            ('Batch of Batches of Envelopes: deeper and bigger than Any.value', deep, DROP),
+            ('a 3 KB packet: the outer Any is read in place, not copied', big, ALLOW),
+            ('an Any inside a message holding more than Any.value', inner_too_big, DROP),
         ], out=self.exact, tag='_exact')
 
 

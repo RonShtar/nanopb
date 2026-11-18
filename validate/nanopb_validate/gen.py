@@ -254,8 +254,27 @@ def header_dir_for(template, unit_name):
     return path
 
 
+OPTIMIZE_RE = re.compile(r'^(O[0-3sgz]|Ofast)$')
+
+
+def optimize_lines(level):
+    """--optimize O2: GCC compiles the generated .c at that level whatever the build's flags
+    (the validators and filter are inline-heavy: -O0 makes them several times slower).
+    Other compilers ignore it (clang has no such pragma)."""
+
+    if not level:
+        return ''
+    level = level.strip().lstrip('-')
+    if not OPTIMIZE_RE.match(level):
+        raise BackendError('--optimize %s: give a GCC level such as O2, O3, Os' % level)
+    return ('/* --optimize %s: GCC compiles this file at -%s, whatever the build flags. */\n'
+            '#if defined(__GNUC__) && !defined(__clang__)\n'
+            '#pragma GCC optimize ("%s")\n'
+            '#endif\n' % (level, level, level))
+
+
 def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, public=None,
-               header_dir='', compile_if=(), first_include=()):
+               header_dir='', compile_if=(), first_include=(), optimize=None):
     """Merge the unit's generated files into <unit>.pb.c/.h and <unit>_validate.c/.h.
 
     <unit>.pb.*: every .pb.c/.pb.h of the unit and its imports (types,
@@ -326,6 +345,9 @@ def merge_unit(unit, gendir, outdir, validate, protocol=None, author=None, publi
         # wrapped after scoping, so the user's NAME is never prefixed with the unit.
         from c_layout import tidy_c
         body = scope_to_unit(text, c_identifier(unit.name), aliases)
+        if name.endswith('.c'):
+            # Before every include, so the inline code of the headers is optimized too.
+            body = optimize_lines(optimize) + body
         with open(os.path.join(outdir, name), 'w', newline='\n') as handle:
             handle.write(tidy_c(banner(name) + first_include_lines(first_include)
                                 + compile_if_wrap(compile_if, body, name)))
@@ -445,23 +467,44 @@ def rename_validators(outdir, files, unit_name, header_text):
 SIZE_DEFINE_RE = re.compile(r'^#define (\w+)_size\s+(\d+)\s*$', re.M)
 
 
+def varint_size(value):
+    size = 1
+    while value >= 0x80:
+        value >>= 7
+        size += 1
+    return size
+
+
 def add_max_size_define(path, unit_name, header_text, any_protocol):
-    """#define <UNIT>_MAX_SIZE in the merged .pb.h: the largest packet of the protocol, as one of
-    nanopb's own <msg>_size macros (an Any for an Any protocol, else the largest message).
-    Returns (define, macro it names) or (None, None) when nanopb gave no size."""
+    """#define <UNIT>_MAX_SIZE in the merged .pb.h: the largest packet of the protocol.
+
+    An Any protocol's packet is an Any read in place (not copied into the Any struct), so
+    it can carry any message of the protocol: the longest type_url plus nanopb's largest
+    <msg>_size plus their tags and lengths. Without Any: nanopb's largest <msg>_size.
+    Returns (define, how) or (None, None) when nanopb gave no size."""
 
     ident = c_identifier(unit_name)
+    any_name = ident + '_google_protobuf_Any'
     sizes = dict((m, int(n)) for m, n in SIZE_DEFINE_RE.findall(header_text))
-    if any_protocol and ident + '_google_protobuf_Any' in sizes:
-        message, why = ident + '_google_protobuf_Any', 'every packet is one google.protobuf.Any'
-    elif sizes and not any_protocol:
-        message = max(sorted(sizes), key=lambda m: sizes[m])
-        why = 'the largest message of the protocol'
-    else:
+    messages = dict((m, n) for m, n in sizes.items() if m != any_name)
+    if not messages:
         return None, None
+    largest = max(sorted(messages), key=lambda m: messages[m])
     define = '%s_MAX_SIZE' % ident.upper()
+    if any_protocol:
+        url = re.search(r'^\s*char type_url\[(\d+)\];', header_text, re.M)
+        if not url:
+            return None, None
+        url_chars = int(url.group(1)) - 1
+        total = (1 + varint_size(url_chars) + url_chars
+                 + 1 + varint_size(messages[largest]) + messages[largest])
+        how = ('an Any: type_url (%d characters) + %s_size (%d bytes) + tags and lengths'
+               % (url_chars, largest, messages[largest]))
+        value = '%d' % total
+    else:
+        total, how, value = messages[largest], '%s_size' % largest, '%s_size' % largest
     block = ('/* Largest packet of protocol %s (%d bytes): %s. Size receive buffers with it. */\n'
-             '#define %s %s_size\n\n' % (unit_name, sizes[message], why, define, message))
+             '#define %s %s\n\n' % (unit_name, total, how, define, value))
     with open(path, encoding='utf-8', newline='') as handle:
         text = handle.read()
     guard_end = text.rfind('#endif /* NANOPB_UNIT_')
@@ -469,7 +512,7 @@ def add_max_size_define(path, unit_name, header_text, any_protocol):
         return None, None
     with open(path, 'w', encoding='utf-8', newline='') as handle:
         handle.write(text[:guard_end] + block + text[guard_end:])
-    return define, '%s_size (%d bytes)' % (message, sizes[message])
+    return define, '%d bytes, %s' % (total, how)
 
 
 def prefix_imports(unit, optdir):
@@ -591,7 +634,9 @@ def gen_c_summary(results, common=None):
                          % ('; '.join(r['needs_field_32bit']), where))
         if r.get('recommended_defines'):
             lines.append('  smallest validation buffers: ' + ' '.join(
-                '-D%s=%d' % kv for kv in sorted(r['recommended_defines'].items())))
+                '-D%s=%d' % kv for kv in sorted(r['recommended_defines'].items()))
+                + ' (optional; then for EVERY file that includes pb_validate.h, the library\'s '
+                  'pb_validate.c too: a mismatch does not link)')
     return '\n'.join(lines)
 
 
@@ -667,6 +712,7 @@ def cmd_gen_c(args):
     # Bad option values fail before any file is written.
     compile_if_condition(getattr(args, 'compile_if', None))
     first_include_lines(getattr(args, 'first_include', None))
+    optimize_lines(getattr(args, 'optimize', None))
     for name in select_units(args):
         header_dir_for(getattr(args, 'header_dir', None), name)
 
@@ -748,7 +794,8 @@ def _gen_jobs(args, validate, jobs, tempdirs):
                                           getattr(args, 'author', None), public,
                                           header_dir_for(getattr(args, 'header_dir', None), name),
                                           getattr(args, 'compile_if', None) or (),
-                                          getattr(args, 'first_include', None) or ())
+                                          getattr(args, 'first_include', None) or (),
+                                          getattr(args, 'optimize', None))
         with open(os.path.join(outdir, header)) as handle:
             header_text = handle.read()
         dynamic = dynamic_fields(header_text)

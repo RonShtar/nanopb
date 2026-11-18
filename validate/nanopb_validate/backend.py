@@ -80,6 +80,9 @@ def build_parser():
     p.add_argument('--any-value-size', type=int, default=None, metavar='BYTES',
                    help='google.protobuf.Any.value storage (default: the largest maximum encoded size nanopb '
                         'computes for a message of the protocol that holds no Any)')
+    p.add_argument('--optimize', metavar='LEVEL', default=None,
+                   help='#pragma GCC optimize ("LEVEL") at the top of every generated .c, e.g. O2: GCC then '
+                        'optimizes the filter and validators whatever the build flags (ignored by other compilers)')
     p.add_argument('--allow-callbacks', action='store_true',
                    help='generate fields without max_size/max_count as pb_callback_t (default: an error; '
                         'every field must be static storage)')
@@ -181,6 +184,8 @@ def build_parser():
                    help='Generate C: #include these (space separated) before the #ifdef; saved')
     p.add_argument('--any-value-size', type=int, default=None, metavar='BYTES',
                    help='Generate C and packets: google.protobuf.Any.value bytes (0 = computed); saved')
+    p.add_argument('--optimize', default=None, metavar='LEVEL',
+                   help='Generate C: #pragma GCC optimize (e.g. O2) in every generated .c; saved')
     p.set_defaults(func=cmd_install_studio)
     return parser
 

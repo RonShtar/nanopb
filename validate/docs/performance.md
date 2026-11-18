@@ -32,6 +32,60 @@ Costs that used to be on this path and no longer are:
 - With oneof dispatch, the selected arm was validated twice: once by the
   entrypoint validator and once by the dispatch.
 
+## Protocol filters (`Any`): compile flags and packet sizes
+
+Measured on a PC (zig/clang 21, `camera_udp` and `fleet_udp`, best of 5 × 200000 calls).
+Your target's numbers differ; the ratios carry over.
+
+**1. Compile the generated `.c` files with optimization.** Most of the validation code is
+`static inline` in `pb_validate.h` and macros in the generated files, and a header is
+compiled with the flags of the `.c` that includes it. An optimized `libprotobuf-nanopb.a`
+does not help the generated files:
+
+| `camera` packet | all `-O0` | library `-O2`, generated `-O0` | all `-O2` |
+|---|---|---|---|
+| small `Frame{id}`, 38 B | 750 ns | 230 ns | **110 ns** |
+| medium `Frame{id, thumbnail, ts}`, 66 B | 1520 ns | 340 ns | **210 ns** |
+| nested `Packet(Any(Frame))`, 105 B | 2455 ns | 630 ns | **355 ns** |
+
+Per file in CMake, if the rest of the build must stay at `-O0`:
+
+```cmake
+set_source_files_properties(filter/camera/camera.pb.c filter/camera/camera_validate.c
+                            PROPERTIES COMPILE_OPTIONS -O2)
+```
+
+or with GCC `gen --optimize O2` (Wireshark: the "GCC optimization" field of Set protos
+directory), which puts `#pragma GCC optimize ("O2")` at the top of every generated `.c`
+(before its includes, so the inline header code is covered too). Other compilers ignore it.
+
+**2. The outer `Any` is read in place.** The filter takes `type_url` and the payload
+straight from the receive buffer: no `Any` struct is cleared or filled and nothing is
+copied. That made small packets 18-40 % faster than before (`camera`: 185 -> 110 ns) and,
+with a large `Any.value`, up to 5x (`fleet` `SetMode`: 590 -> 105 ns). The packet can be as
+large as `<PROTOCOL>_MAX_SIZE`, independent of `Any.value`.
+
+**3. Big packets cost struct size × nesting, not bytes.** Every nested decode clears the
+whole message struct (nanopb zeroes static arrays), and a message with `Any` fields holds
+`max_count × sizeof(Any)` bytes. `fleet`, from a 43-byte `SetMode` to a 3 KB `Batch` of
+`Batch`es (more than an Ethernet MTU), at `-O2`:
+
+| packet | bytes | `Any.value` 4096 | `Any.value` computed (1053) |
+|---|---|---|---|
+| `SetMode` | 43 | 105 ns | 95 ns |
+| `Imu` | 60 | 295 ns | 295 ns |
+| `Envelope` (`Frame` with 4 `Any`s) | 318 | 5505 ns | 2905 ns |
+| `Batch` of 3 `Envelope`s | 1008 | 18220 ns | 9455 ns |
+| `Batch` of 3 `Batch`es | 3078 | 56700 ns | 29060 ns |
+
+So keep `Any.value` at the size `gen` computes (raise `--any-value-size` only when deeper
+nesting needs it), and keep `max_count` of repeated `Any` fields as low as the protocol allows.
+
+**4. Fragments.** The filter needs the whole packet: a UDP datagram larger than the MTU is
+reassembled by the IP stack before the socket returns it, so the filter sees it complete; a
+filter placed on raw IP fragments cannot decode a fragment on its own. Over TCP, pass one
+complete framed message. Size the receive buffer with `<PROTOCOL>_MAX_SIZE`.
+
 ## Measured
 
 `validate/tests/c/validate_benchmark`, a 124-byte `Envelope { version, oneof body:

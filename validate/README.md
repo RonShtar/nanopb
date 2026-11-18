@@ -105,14 +105,23 @@ if (fleet_udp(NULL, data, size) != 0)
   allows such a message) `gen`/`check` warn and name the field: deeper nesting fits only when
   that small; `--any-value-size N` sets the size (a field of Set protos directory in Wireshark).
   `.options` values for `Any` are replaced.
-- `<PROTOCOL>_MAX_SIZE` in `<protocol>.pb.h`: the largest packet (nanopb's `_size` of the `Any`,
-  or of the largest message without one), for receive buffers.
+- `<PROTOCOL>_MAX_SIZE` in `<protocol>.pb.h`: the largest packet, for receive buffers. The
+  filter reads the packet's `Any` in place (nothing copied), so that is the longest `type_url`
+  plus nanopb's largest `<msg>_size` plus their tags and lengths, not limited by `Any.value`.
+- Speed: compile the generated `.c` files with optimization (the validation code is inline in
+  `pb_validate.h` and compiles with the generated files' flags: `-O0` is 2-7x slower), per file
+  if the rest must stay `-O0`, or `gen --optimize O2` for a `#pragma GCC optimize` in them.
+  Measurements by packet size: [docs/performance.md](docs/performance.md#protocol-filters-any-compile-flags-and-packet-sizes).
   See [docs/any-examples.md](docs/any-examples.md) for a 7-file protocol that uses `Any` in
   repeated fields, oneofs, sub-messages and inside other `Any`s, merged into one `.c`.
 - `--protos-root` is the folder *above* the protocol folders (`protocols/`, holding
   `camera/`, `gps/`, ...). Pointing it at one protocol's folder makes that the only protocol.
 - Define `PB_FIELD_32BIT` (and any other `PB_*` switch) identically for every
-  file, nanopb's included; `check` and `gen` tell you when it is needed.
+  file, nanopb's included; `check` and `gen` tell you when it is needed. The same holds
+  for `PB_VALIDATE_MAX_PATH_DEPTH`, `_MAX_PATH_LENGTH`, `_MAX_VIOLATIONS`,
+  `_MAX_MESSAGE_LENGTH` and `PB_VALIDATE_DEBUG`, `pb_validate.c` (in the library) included:
+  they change `pb_violations_t`, so they are part of the runtime's link names and a
+  mismatched build fails to link (`..._d1_l10_v16_m256_rel_f16`) instead of corrupting memory.
 
 Rules, options and every switch: [docs/validation.md](docs/validation.md).
 Cost per packet, stack and the switches that change them:

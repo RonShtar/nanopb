@@ -47,6 +47,47 @@ extern "C"
     #define PB_VALIDATE_MAX_PATH_DEPTH 16
     #endif
 
+/* Build check. PB_VALIDATE_MAX_PATH_DEPTH, _MAX_PATH_LENGTH, _MAX_VIOLATIONS,
+ * _MAX_MESSAGE_LENGTH, PB_VALIDATE_DEBUG and PB_FIELD_32BIT change the layout of
+ * pb_violations_t and pb_validate_context_t. They are part of the link names of the
+ * functions that read or write those structs, so code built with different values than
+ * pb_validate.c (e.g. -DPB_VALIDATE_MAX_PATH_LENGTH=10 on the generated files only)
+ * fails to link, naming the values, instead of corrupting memory at run time:
+ *     undefined reference to `pb_violations_record_d1_l10_v16_m256_rel_f16'
+ * Define them identically for every file that includes pb_validate.h, pb_validate.c too.
+ * The values must be plain decimal numbers (16, not (8*2)). */
+#define PB_VALIDATE_ABI_CAT_(a, b) a##b
+#define PB_VALIDATE_ABI_CAT(a, b) PB_VALIDATE_ABI_CAT_(a, b)
+#ifdef PB_VALIDATE_DEBUG
+#define PB_VALIDATE_ABI_MODE _dbg
+#else
+#define PB_VALIDATE_ABI_MODE _rel
+#endif
+#ifdef PB_FIELD_32BIT
+#define PB_VALIDATE_ABI_FIELD _f32
+#else
+#define PB_VALIDATE_ABI_FIELD _f16
+#endif
+#define PB_VALIDATE_ABI_TAG                                                                    \
+    PB_VALIDATE_ABI_CAT(                                                                       \
+        PB_VALIDATE_ABI_CAT(                                                                   \
+            PB_VALIDATE_ABI_CAT(                                                               \
+                PB_VALIDATE_ABI_CAT(PB_VALIDATE_ABI_CAT(_d, PB_VALIDATE_MAX_PATH_DEPTH),       \
+                                    PB_VALIDATE_ABI_CAT(_l, PB_VALIDATE_MAX_PATH_LENGTH)),     \
+                PB_VALIDATE_ABI_CAT(PB_VALIDATE_ABI_CAT(_v, PB_VALIDATE_MAX_VIOLATIONS),       \
+                                    PB_VALIDATE_ABI_CAT(_m, PB_VALIDATE_MAX_MESSAGE_LENGTH))), \
+            PB_VALIDATE_ABI_MODE),                                                             \
+        PB_VALIDATE_ABI_FIELD)
+#define PB_VALIDATE_ABI(name) PB_VALIDATE_ABI_CAT(name, PB_VALIDATE_ABI_TAG)
+#define pb_violations_init PB_VALIDATE_ABI(pb_violations_init)
+#define pb_violations_add PB_VALIDATE_ABI(pb_violations_add)
+#define pb_validate_context_push_field PB_VALIDATE_ABI(pb_validate_context_push_field)
+#define pb_validate_context_pop_field PB_VALIDATE_ABI(pb_validate_context_pop_field)
+#define pb_validate_context_push_index PB_VALIDATE_ABI(pb_validate_context_push_index)
+#define pb_validate_context_pop_index PB_VALIDATE_ABI(pb_validate_context_pop_index)
+#define pb_violations_record PB_VALIDATE_ABI(pb_violations_record)
+#define pb_violations_record_numeric PB_VALIDATE_ABI(pb_violations_record_numeric)
+
     /* Violation structure representing a single validation error.
      *
      * field_path and (in PB_VALIDATE_DEBUG builds) message are owned copies,

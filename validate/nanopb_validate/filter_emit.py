@@ -479,7 +479,8 @@ class ProtocolFilterEmitter(object):
         item = access if count is None else '%s[i%d]' % (access, level)
         inner = indent if count is None else indent + '        '
         if sub is self.any_ir:
-            body = ['%sif (%s_check_any(&%s, depth + 1) != 0) return %s;\n' % (inner, self.name, item, RET_REJECT)]
+            body = ['%sif (%s_check_any(%s.type_url, sizeof(%s.type_url), %s.value.bytes, %s.value.size, '
+                    'depth + 1) != 0) return %s;\n' % (inner, self.name, item, item, item, item, RET_REJECT)]
         else:
             body = self._walk(sub, item + '.', inner, level + 1, active)
         if count is None:
@@ -566,7 +567,7 @@ class ProtocolFilterEmitter(object):
                '    (name_size == sizeof(NAME) - 1 && memcmp(type_name, NAME, sizeof(NAME) - 1) == 0)\n\n' % up)
         yield define('%s_DECODE(NAME, TYPE, VALIDATE)' % up, [
             'do {',
-            '    pb_istream_t stream = pb_istream_from_buffer(any->value.bytes, any->value.size);',
+            '    pb_istream_t stream = pb_istream_from_buffer(value, value_size);',
             '    if (!pb_decode(&stream, &TYPE##_msg, payload)) {',
             '        %s"cannot decode " NAME);' % drop,
             '        return %s;' % RET_REJECT,
@@ -587,9 +588,12 @@ class ProtocolFilterEmitter(object):
             '} while (0)',
         ], 'A message without Any fields: decode, validate, allow.')
 
-        yield '/* The type_url is the opcode: it selects the message to decode and validate. */\n'
-        yield 'static int %s_check_any(const %s *any, int depth)\n{\n' % (name, any_ctype)
-        yield '    const char *type_name = any->type_url;\n'
+        yield '/* The type_url is the opcode: it selects the message to decode and validate.\n'
+        yield ' * type_url and value are read in place: from the packet itself for the outer\n'
+        yield ' * Any, from the decoded struct for an Any inside a message. */\n'
+        yield ('static int %s_check_any(const char *url, size_t url_size, const pb_byte_t *value, '
+               'size_t value_size, int depth)\n{\n' % name)
+        yield '    const char *type_name = url;\n'
         yield '    const char *cursor;\n'
         yield '    size_t name_size;\n'
         yield '    uint32_t hash = 0;\n\n'
@@ -599,7 +603,7 @@ class ProtocolFilterEmitter(object):
         yield '    }\n'
         yield '    /* One pass: "type.googleapis.com/pkg.Msg" -> hash and length of "pkg.Msg"\n'
         yield '     * (the hash restarts after every \'/\'; any host prefix is accepted). */\n'
-        yield '    for (cursor = type_name; *cursor != \'\\0\'; cursor++) {\n'
+        yield '    for (cursor = url; cursor < url + url_size && *cursor != \'\\0\'; cursor++) {\n'
         yield '        if (*cursor == \'/\') {\n'
         yield '            type_name = cursor + 1;\n'
         yield '            hash = 0;\n'
@@ -634,18 +638,48 @@ class ProtocolFilterEmitter(object):
 
         public = self.public_name
         yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % public
-        yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
-        yield '    static %s any;\n' % any_ctype
-        yield '#else\n'
-        yield '    %s any;\n' % any_ctype
-        yield '#endif\n'
-        yield '    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);\n\n'
+        yield '    /* The packet is a google.protobuf.Any, read in place: nothing is copied and no\n'
+        yield '     * Any struct is filled. Field 1 type_url, field 2 value; other fields are\n'
+        yield '     * skipped and the last occurrence wins, as pb_decode does. */\n'
+        yield '    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);\n'
+        yield '    const char *url = "";\n'
+        yield '    size_t url_size = 0;\n'
+        yield '    const pb_byte_t *value = packet;\n'
+        yield '    size_t value_size = 0;\n'
+        yield '    pb_wire_type_t wire_type;\n'
+        yield '    uint32_t tag;\n'
+        yield '    bool eof = false;\n\n'
         yield '    (void)ctx;\n'
-        yield '    if (!pb_decode(&stream, &%s_msg, &any)) {\n' % any_ctype
+        yield '    while (pb_decode_tag(&stream, &wire_type, &tag, &eof)) {\n'
+        yield '        if ((tag == 1 || tag == 2) && wire_type == PB_WT_STRING) {\n'
+        yield '            uint32_t size;\n'
+        yield '            const pb_byte_t *at;\n'
+        yield '            if (!pb_decode_varint32(&stream, &size) || size > stream.bytes_left) {\n'
+        yield '                eof = false;\n'
+        yield '                break;\n'
+        yield '            }\n'
+        yield '            at = packet + (packet_size - stream.bytes_left);\n'
+        yield '            if (tag == 1) {\n'
+        yield '                url = (const char *)at;\n'
+        yield '                url_size = size;\n'
+        yield '            } else {\n'
+        yield '                value = at;\n'
+        yield '                value_size = size;\n'
+        yield '            }\n'
+        yield '            if (!pb_read(&stream, NULL, size)) {\n'
+        yield '                eof = false;\n'
+        yield '                break;\n'
+        yield '            }\n'
+        yield '        } else if (tag == 1 || tag == 2 || !pb_skip_field(&stream, wire_type)) {\n'
+        yield '            eof = false;\n'
+        yield '            break;\n'
+        yield '        }\n'
+        yield '    }\n'
+        yield '    if (!eof) {\n'
         for line in self._reject('        ', 'packet is not a google.protobuf.Any'):
             yield line
         yield '    }\n'
-        yield '    return %s_check_any(&any, 0);\n}\n\n' % name
+        yield '    return %s_check_any(url, url_size, value, value_size, 0);\n}\n\n' % name
         yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % public
         yield '    (void)is_to_server;\n    return %s_udp(ctx, packet, packet_size);\n}\n' % public
 

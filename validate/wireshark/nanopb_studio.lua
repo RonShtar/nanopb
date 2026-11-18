@@ -47,7 +47,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map",
-    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "c_defines" }
+    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "optimize", "c_defines" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
@@ -63,7 +63,8 @@ local config = {
     header_dir = "",        -- e.g. filter/{unit}: #include "filter/camera/camera_validate.h"
     compile_if = "",        -- e.g. CONFIG_COMPILE_FILTER: every .c/.h inside #ifdef ... #endif
     first_include = "",     -- e.g. filter_source_include.h: #include before the #ifdef
-    any_value_size = "",    -- Any.value bytes; empty = largest message without an Any (nanopb sizes)
+    any_value_size = "",    -- Any.value bytes; empty = computed from nanopb's sizes
+    optimize = "",          -- e.g. O2: #pragma GCC optimize in every generated .c
     c_defines = "",         -- older name of compile_if, read once
 }
 
@@ -458,6 +459,10 @@ local function gen_c()
                 args[#args + 1] = "--any-value-size"
                 args[#args + 1] = config.any_value_size
             end
+            if (config.optimize or "") ~= "" then
+                args[#args + 1] = "--optimize"
+                args[#args + 1] = config.optimize
+            end
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -473,7 +478,8 @@ local function gen_c()
                 "so any protocols link together. Filter: <protocol>_udp / <protocol>_tcp.\n" ..
                 "Compile the nanopb runtime once (common/ when generated together).\n" ..
                 "The -D values are optional: they shrink the validation buffers to what this\n" ..
-                "schema needs (docs/validation_performance.md)."
+                "schema needs. Use them for EVERY file that includes pb_validate.h, the\n" ..
+                "library's pb_validate.c too (a mismatch does not link)."
         end)
     end)
 end
@@ -589,8 +595,9 @@ local function set_directory()
         { "Folder in #include \"...\" (e.g. filter/{unit}; empty = none)", config.header_dir },
         { "Header to #include first, before the #ifdef (e.g. filter_source_include.h; empty = none)", config.first_include },
         { "Compile only if defined: #ifdef ... #endif around every .c/.h (e.g. CONFIG_COMPILE_FILTER)", config.compile_if },
-        { "Any.value bytes (empty = largest message without an Any; set it for nested Anys)", config.any_value_size },
-    }, function(input, output, prefix, author, header_dir, first_include, compile_if, any_value_size)
+        { "Any.value bytes (empty = computed from nanopb's sizes; set it for deeper nested Anys)", config.any_value_size },
+        { "GCC optimization of the generated .c (e.g. O2; empty = your build's flags)", config.optimize },
+    }, function(input, output, prefix, author, header_dir, first_include, compile_if, any_value_size, optimize)
         input = trim(input)
         if input == "" then
             show(title, false, "Enter the protos directory.")
@@ -609,6 +616,12 @@ local function set_directory()
             return
         end
         config.any_value_size = any_value_size
+        optimize = trim(optimize or ""):gsub("^%-", "")
+        if optimize ~= "" and not (optimize:match("^O[0-3sgz]$") or optimize == "Ofast") then
+            show(title, false, "GCC optimization: O0, O1, O2, O3, Os, Og, Oz, Ofast, or empty.")
+            return
+        end
+        config.optimize = optimize
         config.protos_root_fixed = "1"
         save_config()
         load_now(title, "\n\nEvery Tools > nanopb item now uses this directory without asking."

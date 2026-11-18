@@ -162,7 +162,12 @@ fit its schema, e.g. `-DPB_VALIDATE_MAX_PATH_DEPTH=2
 16 and 128). A validator reports paths relative to its own message, so a path
 is at most a field name plus an array index. These shrink `pb_violations_t`
 (2.3 KB by default) and the per-validator context; they are optional and must
-be the same for every file of the build. For what else costs time and stack
+be the same for every file of the build, the library's `pb_validate.c` included
+(the same holds for `PB_VALIDATE_MAX_VIOLATIONS`, `_MAX_MESSAGE_LENGTH`,
+`PB_VALIDATE_DEBUG` and `PB_FIELD_32BIT`). A mismatch used to corrupt memory at run
+time (the library wrote a 128-byte path into the generated code's 10-byte one); the
+values are now part of the runtime's link names, so it fails to link instead:
+`undefined reference to pb_validate_context_push_field_d1_l10_v16_m256_rel_f16`. For what else costs time and stack
 on the hot path, and the build switches that matter, see
 `docs/validation_performance.md`.
 

@@ -39,13 +39,14 @@ typedef struct _fleet_google_protobuf_Any {
     fleet_google_protobuf_Any_value_t value;
 } fleet_google_protobuf_Any;          /* 1106 bytes, no pb_callback_t anywhere */
 
-#define FLEET_MAX_SIZE fleet_google_protobuf_Any_size     /* 1106: the largest packet */
+#define FLEET_MAX_SIZE 4806     /* the largest packet: type_url + fleet_envelope_Envelope_size + framing */
 ```
 
-So no heap and no callbacks. The price of static is a limit: a `type_url` with a
-longer host than `type.googleapis.com/`, or a payload bigger than `value`, cannot be
-decoded and the packet is dropped (cases `type_url longer than its storage` and
-`payload bigger than Any.value`). Every message fits by construction when the `Any`s
+So no heap and no callbacks. The packet itself (the outer `Any`) is read in place,
+straight from the receive buffer: no `Any` struct is filled and nothing is copied, so
+the packet can be as large as the largest message (`<PROTOCOL>_MAX_SIZE`, e.g. a 3 KB
+`Batch`, more than one Ethernet MTU). The static limit applies to an `Any` *inside* a
+message: its `type_url` and `value` arrays. Every message fits by construction when the `Any`s
 inside it hold messages without an `Any` (one level). Deeper (an `Envelope` in a `Batch` in
 a `Batch`) has no fixed maximum, so it fits only when its encoding is at most `value`
 (`test_filter_runtime.py` checks both). For a protocol like yours, `Packet { Any payload }`

@@ -88,7 +88,8 @@ class StaticStorageTests(unittest.TestCase):
         self.assertEqual(result['units'][0]['any_value'], {'max_size': 300, 'from': '--any-value-size'})
 
     def test_max_size_define_and_validator_names(self):
-        """<PROTOCOL>_MAX_SIZE names nanopb's size of the Any (the packet); validators are
+        """<PROTOCOL>_MAX_SIZE is the largest packet: an Any holding the largest message
+        (type_url + nanopb's <msg>_size + tags and lengths); validators are
         <protocol>_validate_<message>."""
         self.write('radar/radar.proto', 'syntax = "proto3";\npackage radar;\n' + ANY_IMPORT +
                    'import "validate.proto";\n'
@@ -96,7 +97,10 @@ class StaticStorageTests(unittest.TestCase):
                    'message Packet { google.protobuf.Any payload = 1; }\n')
         status, result, err, out = self.gen()
         self.assertEqual(status, 0, err)
-        self.assertIn('#define RADAR_MAX_SIZE radar_google_protobuf_Any_size', self.header(out, 'radar'))
+        header = self.header(out, 'radar')
+        url = int(re.search(r'char type_url\[(\d+)\];', header).group(1)) - 1
+        packet = int(re.search(r'#define radar_Packet_size\s+(\d+)', header).group(1))
+        self.assertIn('#define RADAR_MAX_SIZE %d\n' % (1 + 1 + url + 1 + 1 + packet), header)
         with open(os.path.join(out, 'radar', 'radar_validate.h')) as handle:
             validate_h = handle.read()
         self.assertIn('bool radar_validate_Short(const radar_Short *msg', validate_h)
@@ -130,6 +134,24 @@ class StaticStorageTests(unittest.TestCase):
         status, _, err, out = self.gen('--allow-callbacks', '--no-filter')
         self.assertEqual(status, 0, err)
         self.assertIn('pb_callback_t', self.header(out, 'radar'))
+
+    def test_optimize_pragma(self):
+        """--optimize O2: #pragma GCC optimize in every generated .c, before its includes
+        (so the inline code of the headers is covered), guarded for GCC only; not in headers."""
+        self.write('radar/radar.proto', 'syntax = "proto3";\npackage radar;\n' + ANY_IMPORT +
+                   'message Short { uint32 a = 1; }\nmessage Packet { google.protobuf.Any payload = 1; }\n')
+        status, _, err, out = self.gen('--optimize', 'O2')
+        self.assertEqual(status, 0, err)
+        for name in ('radar.pb.c', 'radar_validate.c'):
+            with open(os.path.join(out, 'radar', name)) as handle:
+                text = handle.read()
+            block = '#if defined(__GNUC__) && !defined(__clang__)\n#pragma GCC optimize ("O2")\n#endif\n'
+            self.assertIn(block, text, name)
+            self.assertLess(text.index(block), text.index('#include'), name)
+        self.assertNotIn('#pragma GCC optimize', self.header(out, 'radar'))
+        status, _, err, _ = self.gen('--optimize', 'fast')
+        self.assertEqual(status, 1)
+        self.assertIn('give a GCC level', err)
 
     def test_sized_fields_are_accepted(self):
         self.write('radar/radar.proto', 'syntax = "proto3";\npackage radar;\n' + ANY_IMPORT +
