@@ -143,6 +143,65 @@ def c_identifier(name):
 # Descriptors
 # ---------------------------------------------------------------------------
 
+def run_protoc_captured(invoke_protoc, argv):
+    """(status, protoc's messages when it failed). protoc runs in this process (grpc_tools),
+    which writes its errors through its own C runtime: they cannot be captured reliably on
+    Windows. So when it fails, the same command runs once more as a separate process,
+    whose output is captured; a successful run costs nothing extra."""
+
+    import subprocess
+    status = invoke_protoc(argv)          # appends the built-in include paths to argv
+    if status == 0:
+        return status, ''
+    try:
+        import grpc_tools.protoc  # noqa: F401
+        cmd = [sys.executable, '-m', 'grpc_tools.protoc'] + list(argv[1:])
+    except ImportError:
+        cmd = list(argv)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                          env=env.subprocess_env())
+    return status, proc.stdout
+
+
+#: (protoc message, what it means for this tool's users)
+PROTOC_HINTS = [
+    (re.compile(r'Option "\(validate\.(rules|message|validate)\)" unknown'),
+     'the file uses validate rules but does not import their definition: add  import "validate.proto";'
+     '  under the package line (the tool provides that file; or validate/validate.proto if your '
+     'folder carries a copy)'),
+    (re.compile(r'Option "\(nanopb(_fileopt|_msgopt|_enumopt)?\)" unknown'),
+     'the file uses nanopb options but does not import them: add  import "nanopb.proto";'),
+    (re.compile(r'Import "([^"]+)" was not found|([^\s:]+): File not found'),
+     'an imported file was not found: an import is relative to the protocol folder, the protos '
+     'directory or the importing file\'s folder; check the path and its spelling'),
+    (re.compile(r'"([^"]+)" is not defined'),
+     'a type is used but not defined: import the .proto that declares it, and check the package '
+     'name in front of it'),
+    (re.compile(r'is already defined in file'),
+     'the same name is defined twice, often by two copies of validate.proto or nanopb.proto in one '
+     'protocol (keep one), or by two .proto files with the same package and message'),
+    (re.compile(r'Expected |Unexpected |Missing field number|Expected top-level statement'),
+     'a syntax error at that line and column of the .proto'),
+]
+
+
+def explain_protoc_errors(output):
+    """protoc's own error lines, each once, with a plain-language hint; '' if none."""
+
+    lines, seen = [], set()
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line in seen or 'warning:' in line:
+            continue
+        seen.add(line)
+        lines.append(line)
+        for pattern, hint in PROTOC_HINTS:
+            if pattern.search(line):
+                lines.append('    -> ' + hint)
+                break
+    return '\n'.join(lines)
+
+
 def compile_descriptor_set(proto_names, include_paths):
     """Compile ``proto_names`` (virtual paths) to a FileDescriptorSet."""
 
@@ -155,9 +214,10 @@ def compile_descriptor_set(proto_names, include_paths):
         argv = ['protoc', '--include_imports', '--descriptor_set_out=' + out]
         argv += ['-I' + p for p in include_paths if os.path.isdir(p)]
         argv += list(proto_names)
-        status = invoke_protoc(argv)
+        status, output = run_protoc_captured(invoke_protoc, argv)
         if status != 0:
-            raise BackendError('protoc failed (status %s) for %s' % (status, ' '.join(proto_names)))
+            raise BackendError(explain_protoc_errors(output) or
+                               'protoc failed (status %s) for %s' % (status, ' '.join(proto_names)))
         fds = descriptor_pb2.FileDescriptorSet()
         with open(out, 'rb') as handle:
             fds.ParseFromString(handle.read())
@@ -256,7 +316,13 @@ class Unit(object):
             self.names = names
             break
         else:
-            raise BackendError('could not compile unit %s:\n  %s' % (name, '\n  '.join(errors)))
+            # Every layout tried fails the same way for most mistakes: say it once.
+            unique = []
+            for error in errors:
+                if error not in unique:
+                    unique.append(error)
+            raise BackendError('protocol %s: protoc (the protobuf compiler) rejected its .proto files:\n  %s'
+                               % (name, '\n  '.join('\n  '.join(e.splitlines()) for e in unique)))
 
     def generated_files(self):
         """Descriptor file names to generate, dependencies first."""

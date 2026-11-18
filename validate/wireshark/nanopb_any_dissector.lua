@@ -1032,6 +1032,16 @@ local function default_value(fd)
     return 0
 end
 
+-- The value a field without a has_ flag has when it is not on the wire: what
+-- (validate.rules).required forbids (pb_validate compares strings up to the NUL).
+local function is_default(fd, v)
+    if v == nil then return true end
+    if fd.type == T.STRING then return cstr(v) == "" end
+    if fd.type == T.BYTES then return #v == 0 end
+    if fd.type == T.MESSAGE then return false end
+    return v == default_value(fd)
+end
+
 local function show_value(fd, v)
     local t = fd.type
     if t == T.STRING or t == T.BYTES then
@@ -1245,7 +1255,11 @@ validate_state = function(st, path, ctx)
             local items = list or {}
             for _, rule in ipairs(rules) do
                 local kind = rule.kind
-                if kind == "MIN_ITEMS" then
+                if kind == "REQUIRED" then
+                    -- required on a repeated field: at least one item (as pb_validate).
+                    apply(ctx, #items > 0, string.format("at least one item (got %d)", #items),
+                        fpath, nil, rule, fd, nil, st)
+                elseif kind == "MIN_ITEMS" then
                     apply(ctx, #items >= rule.v, string.format("at least %d items (got %d)", rule.v, #items),
                         fpath, nil, rule, fd, nil, st)
                 elseif kind == "MAX_ITEMS" then
@@ -1288,9 +1302,14 @@ validate_state = function(st, path, ctx)
             for _, rule in ipairs(rules) do
                 local kind = rule.kind
                 if kind == "REQUIRED" then
-                    -- pb_validate only checks fields with a has_ flag.
+                    -- As pb_validate: the has_ flag where there is one, otherwise the
+                    -- field must differ from its default (non-empty, non-zero, true).
                     if fd.presence == "explicit" then
                         apply(ctx, present, "present", fpath, nil, rule, fd, nil, st)
+                    elseif fd.presence ~= "required" and fd.presence ~= "oneof" then
+                        local value = item and item.v
+                        apply(ctx, not is_default(fd, value), "not the default value",
+                            fpath, item, rule, fd, value, st)
                     end
                 elseif fd.presence == "explicit" and not present then
                     -- rules of an absent optional field are not evaluated

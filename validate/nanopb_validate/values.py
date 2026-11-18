@@ -57,6 +57,8 @@ class ValuesMixin:
             if field_info.oneof_index is not None or field_info.storage == 'ignore':
                 continue
             value = self._generate_valid_value(field_info, active_stack)
+            if 'required' in field_info.constraint_map():
+                value = self._required_value(field_info, value, active_stack)
             if value is not None:
                 data[field_info.name] = value
 
@@ -65,6 +67,31 @@ class ValuesMixin:
 
         self._apply_message_rules(message_info, data, active_stack)
         return data
+
+    @staticmethod
+    def _is_default(value: Any) -> bool:
+        """A value that is not on the wire: what "required" forbids for a field without presence."""
+        if value is None:
+            return True
+        if isinstance(value, (list, dict, str, bytes)):
+            return len(value) == 0
+        if isinstance(value, bool):
+            return not value
+        if isinstance(value, (int, float)):
+            return value == 0
+        return False
+
+    def _required_value(self, field_info: ProtoFieldInfo, value: Any, active_stack: Tuple[str, ...]) -> Any:
+        """A valid value that is not the default, for a field with "required"."""
+        if field_info.is_message() and not field_info.is_repeated() and not field_info.is_map():
+            # A sub-message only needs to be present; it may be empty (Stop {}).
+            return value if value is not None else self._generate_valid_value(field_info, active_stack)
+        for _ in range(32):
+            if not self._is_default(value):
+                return value
+            value = self._generate_valid_value(field_info, active_stack)
+        raise ValueError('field %s has "required" but its other rules only allow the default value'
+                         % field_info.name)
 
     def _generate_oneof(
         self,
@@ -459,6 +486,9 @@ class ValuesMixin:
         return low, high, explicit_max
 
     def _pick_length(self, low: int, high: int, explicit_max: bool) -> int:
+        fill = getattr(self, '_fill', None)
+        if fill is not None:
+            return low + int(round(fill * (high - low)))
         roll = self._random.random()
         if roll < 0.15:
             return low

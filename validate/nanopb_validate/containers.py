@@ -68,6 +68,8 @@ class ContainersMixin:
             field_info, constraints.get('min_items'), constraints.get('max_items')
         )
         enforce_minimum = count is None
+        if count is None and getattr(self, '_fill', None) is not None:
+            count = low + int(round(self._fill * (high - low)))
         if count is None:
             roll = self._random.random()
             count = low if roll < 0.15 else high if roll < 0.3 else self._random.randint(low, high)
@@ -106,6 +108,8 @@ class ContainersMixin:
             field_info, constraints.get('min_items'), constraints.get('max_items')
         )
         enforce_minimum = count is None
+        if count is None and getattr(self, '_fill', None) is not None:
+            count = low + int(round(self._fill * (high - low)))
         if count is None:
             count = self._random.randint(low, high)
         entry = self.registry.resolve_message(field_info.map_entry)

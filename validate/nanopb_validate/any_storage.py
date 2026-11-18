@@ -96,7 +96,9 @@ def _measure(unit, any_options_text):
 
     outdir = tempfile.mkdtemp(prefix='nanopb_ws_size_')
     try:
-        includes = [p for p in unit.includes if os.path.isdir(p)]
+        # Absolute: protoc runs in a temporary folder, so a relative protos directory
+        # ("../protos") would not be found from there.
+        includes = [os.path.abspath(p) for p in unit.includes if os.path.isdir(p)]
         first = []
         if any_options_text is not None:
             optdir = os.path.join(outdir, '_options')

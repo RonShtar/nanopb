@@ -739,6 +739,8 @@ def cmd_install_studio(args):
         config['compile_if'] = ' '.join(args.compile_if.split())
     if getattr(args, 'first_include', None) is not None:
         config['first_include'] = ' '.join(args.first_include.split())
+    if getattr(args, 'packet_sizes', None) is not None:
+        config['packet_sizes'] = ''.join(args.packet_sizes.split())
     if getattr(args, 'optimize', None) is not None:
         config['optimize'] = args.optimize.strip().lstrip('-')
     if getattr(args, 'any_value_size', None) is not None:

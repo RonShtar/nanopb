@@ -3,6 +3,7 @@
 """
 
 import json
+import re
 import shutil
 import os
 import struct
@@ -30,6 +31,36 @@ def ip_checksum(data):
     while total >> 16:
         total = (total & 0xffff) + (total >> 16)
     return (~total) & 0xffff
+
+
+#: Ethernet's IP MTU; a UDP datagram bigger than this minus 28 header bytes is fragmented.
+DEFAULT_MTU = 1500
+
+
+def ethernet_frames(transport, port, payload, index, mtu=DEFAULT_MTU):
+    """The Ethernet frames of one packet: one, or for a UDP datagram bigger than the MTU the
+    IPv4 fragments a real network would carry (Wireshark reassembles them)."""
+
+    frame = ethernet_frame(transport, port, payload, index)
+    ip = frame[14:]
+    if transport != 'udp' or len(ip) <= mtu:
+        return [frame]
+    l4 = ip[20:]
+    chunk = (mtu - 20) // 8 * 8
+    ident = (index + 1) & 0xffff
+    frames = []
+    for offset in range(0, len(l4), chunk):
+        part = l4[offset:offset + chunk]
+        more = 0x2000 if offset + chunk < len(l4) else 0
+        header = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(part), ident, more | (offset // 8), 64, 17, 0,
+                             LOOPBACK, LOOPBACK)
+        header = header[:10] + struct.pack('!H', ip_checksum(header)) + header[12:]
+        frames.append(b'\x00' * 12 + b'\x08\x00' + header + part)
+    return frames
+
+
+def frame_count(transport, payload, mtu=DEFAULT_MTU):
+    return len(ethernet_frames(transport, 1, payload, 0, mtu))
 
 
 def ethernet_frame(transport, port, payload, index):
@@ -69,15 +100,15 @@ def _timestamps(count, start, step):
         yield sec, int(round((ts - sec) * 1000000)) % 1000000
 
 
-def write_pcap(path, packets, start=None, step=1.0):
+def write_pcap(path, packets, start=None, step=1.0, mtu=DEFAULT_MTU):
     """Classic little-endian pcap (no comments)."""
 
     with open(path, 'wb') as handle:
         handle.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 1))
         for i, (pkt, (sec, usec)) in enumerate(zip(packets, _timestamps(len(packets), start, step))):
-            data = ethernet_frame(pkt.transport, pkt.port, pkt.payload, i)
-            handle.write(struct.pack('<IIII', sec, usec, len(data), len(data)))
-            handle.write(data)
+            for data in ethernet_frames(pkt.transport, pkt.port, pkt.payload, i, mtu):
+                handle.write(struct.pack('<IIII', sec, usec, len(data), len(data)))
+                handle.write(data)
 
 
 def _pcapng_block(block_type, body):
@@ -90,20 +121,46 @@ def _pcapng_option(code, value):
     return struct.pack('<HH', code, len(value)) + value + b'\x00' * (-len(value) % 4)
 
 
-def write_pcapng(path, packets, start=None, step=0.001):
-    """pcapng with one Ethernet interface; each packet's comment becomes opt_comment."""
+def write_pcapng(path, packets, start=None, step=0.001, mtu=DEFAULT_MTU):
+    """pcapng with one Ethernet interface; each packet's comment becomes opt_comment (on its
+    last fragment, where Wireshark shows the reassembled datagram)."""
 
     with open(path, 'wb') as handle:
         handle.write(_pcapng_block(0x0A0D0D0A, struct.pack('<IHHq', 0x1A2B3C4D, 1, 0, -1)))
         handle.write(_pcapng_block(1, struct.pack('<HHI', 1, 0, 65535)))
         for i, (pkt, (sec, usec)) in enumerate(zip(packets, _timestamps(len(packets), start, step))):
-            data = ethernet_frame(pkt.transport, pkt.port, pkt.payload, i)
-            ts = sec * 1000000 + usec
-            body = struct.pack('<IIIII', 0, ts >> 32, ts & 0xffffffff, len(data), len(data))
-            body += data + b'\x00' * (-len(data) % 4)
-            if pkt.comment:
-                body += _pcapng_option(1, pkt.comment.encode('utf-8')) + _pcapng_option(0, b'')
-            handle.write(_pcapng_block(6, body))
+            frames = ethernet_frames(pkt.transport, pkt.port, pkt.payload, i, mtu)
+            for n, data in enumerate(frames):
+                ts = sec * 1000000 + usec + n
+                body = struct.pack('<IIIII', 0, ts >> 32, ts & 0xffffffff, len(data), len(data))
+                body += data + b'\x00' * (-len(data) % 4)
+                if pkt.comment and n == len(frames) - 1:
+                    body += _pcapng_option(1, pkt.comment.encode('utf-8')) + _pcapng_option(0, b'')
+                handle.write(_pcapng_block(6, body))
+
+
+class _Reassembly(object):
+    """IPv4 fragments back into datagrams (frames that are not fragments pass through)."""
+
+    def __init__(self):
+        self.parts = {}
+
+    def add(self, data, comment):
+        ip = data[14:]
+        flags = struct.unpack('!H', ip[6:8])[0]
+        more, offset = flags & 0x2000, (flags & 0x1fff) * 8
+        if not more and offset == 0:
+            return _frame_packet(data, comment)
+        ident = struct.unpack('!H', ip[4:6])[0]
+        total = struct.unpack('!H', ip[2:4])[0]
+        pieces = self.parts.setdefault(ident, {})
+        pieces[offset] = ip[20:total]
+        if more:
+            return None
+        l4 = b''.join(pieces[o] for o in sorted(pieces))
+        del self.parts[ident]
+        header = ip[:2] + struct.pack('!H', 20 + len(l4)) + ip[4:6] + b'\x00\x00' + ip[8:20]
+        return _frame_packet(data[:14] + header + l4, comment)
 
 
 def _frame_packet(data, comment):
@@ -122,11 +179,17 @@ def read_capture(path):
     with open(path, 'rb') as handle:
         data = handle.read()
     packets = []
+    reassembly = _Reassembly()
+
+    def keep(packet):
+        if packet is not None:
+            packets.append(packet)
+
     if struct.unpack('<I', data[:4])[0] == 0xa1b2c3d4:
         pos = 24
         while pos < len(data):
             incl = struct.unpack('<I', data[pos + 8:pos + 12])[0]
-            packets.append(_frame_packet(data[pos + 16:pos + 16 + incl], None))
+            keep(reassembly.add(data[pos + 16:pos + 16 + incl], None))
             pos += 16 + incl
         return packets
     pos = 0
@@ -144,7 +207,7 @@ def read_capture(path):
                 if code == 1:
                     comment = data[opt + 4:opt + 4 + olen].decode('utf-8')
                 opt += 4 + olen + (-olen % 4)
-            packets.append(_frame_packet(frame, comment))
+            keep(reassembly.add(frame, comment))
         pos += length
     return packets
 
@@ -362,11 +425,72 @@ def auto_port_map(units, base=AUTO_PORT_BASE):
     return ','.join(entries)
 
 
+#: --sizes presets: bytes of the packet (the UDP payload, what the filter receives).
+SIZE_PRESETS = [('small', 100, 256), ('medium', 400, 800), ('large', 900, 1470)]
+MAX_UDP_PAYLOAD = 65507
+
+
+def parse_sizes(text, mtu):
+    """[(name, min, max)] from 'small,medium,large,fragmented,100-256'."""
+
+    presets = dict((name, (lo, hi)) for name, lo, hi in SIZE_PRESETS)
+    presets['fragmented'] = (mtu - 28 + 1, MAX_UDP_PAYLOAD)      # more than one IP packet
+    ranges = []
+    for item in [i.strip() for i in (text or '').split(',') if i.strip()]:
+        if item in presets:
+            ranges.append((item,) + presets[item])
+            continue
+        match = re.match(r'^(\d+)-(\d+)$', item)
+        if not match or int(match.group(1)) > int(match.group(2)):
+            raise BackendError('--sizes %s: use small, medium, large, fragmented or MIN-MAX (e.g. 100-256)' % item)
+        ranges.append(('%s-%s' % match.groups(), int(match.group(1)), int(match.group(2))))
+    return ranges
+
+
+def sized_sample(gen, msg, low, high, seed, packet_of):
+    """(data, packet size) of a valid sample whose packet is low..high bytes, or
+    (None, (smallest, largest)) when the message cannot get there: lengths and counts
+    are steered with generate_valid(fill=...) and a bisection on the encoded size."""
+
+    limits = None
+    for attempt in range(3):
+        s = seed + 7919 * attempt
+
+        def build(fill):
+            data = gen.encode_to_binary(msg, gen.generate_valid(msg, seed=s, fill=fill))
+            return len(packet_of(data)), data
+
+        small, data = build(0.0)
+        if low <= small <= high:
+            return data, small
+        big, data = build(1.0)
+        if low <= big <= high:
+            return data, big
+        limits = (min(small, limits[0]) if limits else small, max(big, limits[1]) if limits else big)
+        if big < low or small > high:
+            continue
+        a, b = 0.0, 1.0
+        for _ in range(18):
+            middle = (a + b) / 2
+            size, data = build(middle)
+            if low <= size <= high:
+                return data, size
+            if size < low:
+                a = middle
+            else:
+                b = middle
+    return None, limits
+
+
 def cmd_gen_packets(args):
     from datagen import DataGenerator, ValidationRuleNotViolatableError
 
     if args.valid < 0 or args.max_invalid < 0:
         raise BackendError('--valid and --max-invalid must not be negative')
+    mtu = getattr(args, 'mtu', None) or DEFAULT_MTU
+    if mtu < 68:
+        raise BackendError('--mtu %d: IPv4 needs at least 68' % mtu)
+    size_ranges = parse_sizes(getattr(args, 'sizes', None), mtu)
     names = select_units(args)
     units = [Unit(args.protos_root, name, args.include) for name in names]
     for unit in units:
@@ -408,15 +532,20 @@ def cmd_gen_packets(args):
     any_url = field_by_name(messages, ANY_MESSAGE, 'type_url') or {}
 
     packets, entries, skipped, errors = [], [], [], []
+    frames = [0]                    # frames written so far (a fragmented packet has several)
+    sized = {}                      # size range -> packets generated in it
 
-    def add(unit, msg, data, expect, seed, violate=None):
+    def packet_of(unit, msg, data):
+        if protocol_mode:
+            # The protocol filter reads the outer Any in place: no Any.value limit here.
+            return any_wrap(msg, data) if unit not in direct else data
+        return data if msg in roots else any_wrap(msg, data)
+
+    def add(unit, msg, data, expect, seed, violate=None, size_class=None):
         if protocol_mode:
             transport, port = 'udp', protocol_of[unit]
             wrapped = unit not in direct
-            payload = any_wrap(msg, data) if wrapped else data
-            if wrapped and ((any_value.get('max_size') and len(data) > any_value['max_size']) or
-                            (any_url.get('max_size') and len(ANY_URL_PREFIX + msg) > any_url['max_size'])):
-                return False
+            payload = packet_of(unit, msg, data)
         elif msg in roots:
             transport, port = roots[msg]
             payload, wrapped = data, False
@@ -431,11 +560,17 @@ def cmd_gen_packets(args):
         comment = 'expect=%s msg=%s' % (expect.upper(), msg)
         if violate:
             comment += ' field=%s rule=%s' % (violate['field'], violate['rule'])
+        if size_class:
+            comment += ' size=%s' % size_class
         comment += ' seed=%d' % seed
         packets.append(Packet(transport, port, payload, comment))
-        entries.append({'frame': len(packets), 'unit': unit, 'message': msg, 'transport': transport,
-                        'port': port, 'any_wrapped': wrapped, 'expect': expect, 'violate': violate,
-                        'seed': seed, 'size': len(payload), 'hex': payload.hex()})
+        count = frame_count(transport, payload, mtu)
+        frames[0] += count
+        # A fragmented packet is reassembled (and dissected) at its last fragment.
+        entries.append({'frame': frames[0], 'fragments': count, 'unit': unit, 'message': msg,
+                        'transport': transport, 'port': port, 'any_wrapped': wrapped, 'expect': expect,
+                        'violate': violate, 'seed': seed, 'size': len(payload), 'size_class': size_class,
+                        'hex': payload.hex()})
         return True
 
     for unit in units:
@@ -461,10 +596,23 @@ def cmd_gen_packets(args):
                         break
                 else:
                     skipped.append('%s valid #%d: larger than the Any.value storage' % (msg, i))
+            for name, low, high in size_ranges:
+                try:
+                    data, got = sized_sample(gen, msg, low, high, args.seed,
+                                             lambda d, u=unit.name, m=msg: packet_of(u, m, d))
+                except Exception as exc:
+                    errors.append('%s %s: %s' % (msg, name, exc))
+                    continue
+                if data is None:
+                    skipped.append('%s %s (%d-%d bytes): its valid packets are %d to %d bytes'
+                                   % (msg, name, low, min(high, MAX_UDP_PAYLOAD), got[0], got[1]))
+                elif add(unit.name, msg, data, 'passed', args.seed, size_class=name):
+                    sized[name] = sized.get(name, 0) + 1
             count = 0
             for field, rule in gen.violatable_rules(msg):
                 if count >= args.max_invalid:
-                    skipped.append('%s: more rules than --max-invalid %d' % (msg, args.max_invalid))
+                    if args.max_invalid:
+                        skipped.append('%s: more rules than --max-invalid %d' % (msg, args.max_invalid))
                     break
                 if not c_enforced(messages, msg, field, rule):
                     skipped.append('%s.%s %s: not enforced by the C validator' % (msg, field, rule))
@@ -489,9 +637,9 @@ def cmd_gen_packets(args):
     capture = base + '.' + args.format
     start = time.time()
     if args.format == 'pcapng':
-        write_pcapng(capture, packets, start=start)
+        write_pcapng(capture, packets, start=start, mtu=mtu)
     else:
-        write_pcap(capture, packets, start=start, step=0.001)
+        write_pcap(capture, packets, start=start, step=0.001, mtu=mtu)
     packet_files = write_packet_files(args.out, entries)
     passed = sum(1 for e in entries if e['expect'] == 'passed')
     dropped = len(entries) - passed
@@ -508,20 +656,27 @@ def cmd_gen_packets(args):
                 'packets': entries}
     with open(base + '.json', 'w', newline='\n') as handle:
         json.dump(manifest, handle, indent=1)
-    lines = ['%d packets: %d expected PASSED, %d expected DROPPED' % (len(entries), passed, dropped),
+    fragmented = sum(1 for e in entries if e['fragments'] > 1)
+    lines = ['%d packets: %d expected PASSED, %d expected DROPPED' % (len(entries), passed, dropped)
+             + ('; %d sent as IPv4 fragments (MTU %d)' % (fragmented, mtu) if fragmented else ''),
              'Capture: ' + capture,
              'C arrays (packets/c_arrays/) and hex streams (packets/raw_data/): ' + ', '.join(sorted(packet_files)),
              'Ports:'] + ['  ' + p for p in ports]
-    lines += ['', 'frame  expect   message  [violated field / rule]']
+    if size_ranges:
+        lines.insert(3, 'Sizes: ' + ', '.join('%s %d-%d bytes: %d packet(s)' % (n, lo, min(hi, MAX_UDP_PAYLOAD),
+                                                                           sized.get(n, 0))
+                                              for n, lo, hi in size_ranges))
+    lines += ['', 'frame  expect   bytes  message  [size] [violated field / rule]']
     for e in entries:
         v = e['violate']
-        lines.append('%5d  %-7s  %s%s' % (e['frame'], e['expect'].upper(), e['message'],
-                                          '  [%s %s]' % (v['field'], v['rule']) if v else ''))
+        lines.append('%5d  %-7s %6d  %s%s%s' % (e['frame'], e['expect'].upper(), e['size'], e['message'],
+                                                '  [%s]' % e['size_class'] if e['size_class'] else '',
+                                                '  [%s %s]' % (v['field'], v['rule']) if v else ''))
     if skipped:
         lines += ['', 'Not generated:'] + ['  ' + s for s in skipped]
     with open(base + '.txt', 'w', newline='\n') as handle:
         handle.write('\n'.join(lines) + '\n')
-    summary = '\n'.join(lines[:4 + len(ports)])
+    summary = '\n'.join(lines[:4 + len(ports) + (1 if size_ranges else 0)])
     if skipped:
         summary += '\n%d rule(s) not generated, see %s.txt' % (len(skipped), base)
     if stale_ports:
@@ -530,7 +685,9 @@ def cmd_gen_packets(args):
               'packet_dirs': sorted(packet_files), 'mode': args.mode,
               'protocol_ports': ['%s:%d=%s' % p for p in protocol_ports],
               'passed': passed, 'dropped': dropped, 'port_map': port_map, 'ports': ports,
-              'skipped': skipped, 'errors': errors, 'schema_changed': changed, 'summary': summary}
+              'skipped': skipped, 'errors': errors, 'schema_changed': changed, 'summary': summary,
+              'sizes': dict((n, sized.get(n, 0)) for n, _, _ in size_ranges), 'fragmented': fragmented,
+              'mtu': mtu}
     if installed:
         result['installed'] = installed
     if stale_ports:

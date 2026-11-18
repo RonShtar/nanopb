@@ -154,6 +154,12 @@ def build_parser():
     p.add_argument('--any-port', type=int, default=DEFAULT_ANY_PORT,
                    help='UDP port for other messages, wrapped in google.protobuf.Any (default %d)' % DEFAULT_ANY_PORT)
     p.add_argument('--valid', type=int, default=2, help='valid packets per message (default 2)')
+    p.add_argument('--sizes', default=None, metavar='LIST',
+                   help='also, per message, one valid packet in each size range: small (100-256 bytes), '
+                        'medium (400-800), large (900-1470), fragmented (more than one MTU: IPv4 fragments '
+                        'in the capture), or MIN-MAX; comma separated, e.g. small,medium,large,fragmented')
+    p.add_argument('--mtu', type=int, default=1500,
+                   help='IP MTU of the capture (default 1500): bigger UDP datagrams are written as fragments')
     p.add_argument('--max-invalid', type=int, default=40, help='invalid packets per message at most (default 40)')
     p.add_argument('--seed', type=int, default=1, help='random seed (default 1)')
     p.add_argument('--format', choices=('pcapng', 'pcap'), default='pcapng')
@@ -186,6 +192,8 @@ def build_parser():
                    help='Generate C and packets: google.protobuf.Any.value bytes (0 = computed); saved')
     p.add_argument('--optimize', default=None, metavar='LEVEL',
                    help='Generate C: #pragma GCC optimize (e.g. O2) in every generated .c; saved')
+    p.add_argument('--packet-sizes', default=None, metavar='LIST',
+                   help='Generate packets: --sizes for the test packets (small,medium,large,fragmented); saved')
     p.set_defaults(func=cmd_install_studio)
     return parser
 

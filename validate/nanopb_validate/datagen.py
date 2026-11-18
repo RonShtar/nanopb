@@ -64,6 +64,9 @@ class DataGenerator(ValuesMixin, ContainersMixin, ViolationsMixin, EncodingMixin
         self.file_descriptor: Optional[descriptor_pb2.FileDescriptorProto] = None
         self.registry: Optional[DescriptorRegistry] = None
         self._random = random.Random()
+        # generate_valid(fill=...): 0.0 the smallest valid lengths and counts, 1.0 the
+        # largest; None (default) random. Lets a caller aim at an encoded size.
+        self._fill = None
         self._load_proto()
 
     def _load_proto(self) -> None:
@@ -179,17 +182,26 @@ class DataGenerator(ValuesMixin, ContainersMixin, ViolationsMixin, EncodingMixin
     # Public generation API
     # ------------------------------------------------------------------
 
-    def generate_valid(self, message_name: str, seed: Optional[int] = None) -> Dict[str, Any]:
+    def generate_valid(self, message_name: str, seed: Optional[int] = None,
+                       fill: Optional[float] = None) -> Dict[str, Any]:
         """Generate valid test data for a message.
 
         The data satisfies every validate.proto rule and fits the storage that
         nanopb allocates for the message (max_size, max_count, int_size, ...),
         so it can be decoded by pb_decode() and passes the generated validator.
+
+        ``fill`` (0.0 to 1.0) sets every string, bytes, repeated and map field to that
+        fraction of its allowed length or count (0.0 the minimum, 1.0 the maximum),
+        for data of a chosen size; None picks them at random.
         """
 
         self._random = random.Random(seed)
-        message_info = self.registry.resolve_message(message_name)
-        return self._generate_message(message_info.full_name, (message_info.full_name,))
+        self._fill = None if fill is None else min(1.0, max(0.0, float(fill)))
+        try:
+            message_info = self.registry.resolve_message(message_name)
+            return self._generate_message(message_info.full_name, (message_info.full_name,))
+        finally:
+            self._fill = None
 
     def generate_invalid(
         self,

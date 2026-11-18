@@ -206,10 +206,19 @@ message Inventory {
 
 ```protobuf
 message Config {
-    // Make optional field required for validation
-    optional string name = 1 [(validate.rules).required = true];
+    optional string name = 1 [(validate.rules).required = true];   // has_name must be set
+    string id = 2 [(validate.rules).required = true];              // must not be empty
+    uint32 port = 3 [(validate.rules).required = true];            // must not be 0
+    repeated uint32 hosts = 4 [(validate.rules).required = true];  // at least one item
 }
 ```
+
+`required` means the field is set, as in protovalidate: its `has_` flag where it has one
+(proto3 `optional`, sub-messages, proto2 `optional`); otherwise it differs from its default
+(a non-empty string or bytes, a non-zero number or enum, `true`, at least one item). A
+proto2 `required` field and a fixed-size array are always set. On a oneof member it is a
+generation error (a member is set exactly when it is the selected arm). The data generator
+and the Wireshark dissector use the same meaning.
 
 `oneof_required` (require a specific oneof arm to be selected) is declared in
 `validate.proto` but not yet enforced -- see

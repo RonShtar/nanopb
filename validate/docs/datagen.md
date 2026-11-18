@@ -389,3 +389,12 @@ This module is part of the nanopb project and follows the same license.
 - [nanopb documentation](https://jpa.kapsi.fi/nanopb/)
 - [protoc-gen-validate](https://github.com/bufbuild/protoc-gen-validate)
 - [validate.proto spec](https://github.com/bufbuild/protovalidate)
+
+## Sizes
+
+`generate_valid(message, seed=..., fill=F)` sets every string, bytes, repeated and map field
+to the fraction `F` (0.0 to 1.0) of its allowed length or count: 0.0 the smallest valid
+message, 1.0 the largest. `python -m nanopb_validate packets ... --sizes
+small,medium,large,fragmented` (or `MIN-MAX`) uses it to find, per message, a valid packet
+in each range (small 100-256, medium 400-800, large 900-1470 bytes, fragmented more than one
+MTU); packets over `--mtu` (default 1500) are written to the capture as IPv4 fragments.

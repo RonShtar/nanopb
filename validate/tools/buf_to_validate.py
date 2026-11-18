@@ -379,7 +379,8 @@ def convert_text(text, name, report, validate_import):
         elif c in '"\'':
             j = string_end(text, i)
             literal = text[i:j]
-            if literal[1:-1] == 'buf/validate/validate.proto':
+            # buf's validate.proto, also from a vendored path (third_party/buf/validate/validate.proto)
+            if literal[1:-1] == 'buf/validate/validate.proto' or literal[1:-1].endswith('/buf/validate/validate.proto'):
                 literal = '%s%s%s' % (c, validate_import, c)
             out.append(literal)
             i = j
@@ -439,10 +440,36 @@ def is_vendored(rel):
     return len(parts) >= 3 and parts[-3:-1] == ['buf', 'validate'] or parts[-3:] == ['buf', 'validate', 'validate.proto']
 
 
+IMPORT_RE = re.compile(r'^\s*import\s+(?:public\s+|weak\s+)?"([^"]+)"\s*;[^\n]*\n?', re.M)
+PACKAGE_RE = re.compile(r'^\s*package\s+[\w.]+\s*;[^\n]*\n?', re.M)
+SYNTAX_RE = re.compile(r'^\s*(?:syntax|edition)\s*=\s*"[^"]*"\s*;[^\n]*\n?', re.M)
+
+
+def ensure_validate_import(text, validate_import):
+    """Add  import "validate.proto";  to a file that uses (validate.rules) or (validate.message)
+    without importing a validate.proto: protoc otherwise stops with
+    'Option "(validate.rules)" unknown'."""
+
+    code = strip_comments(text)
+    if '(validate.rules)' not in code and '(validate.message)' not in code:
+        return text
+    imports = IMPORT_RE.findall(code)
+    if any(name == validate_import or name.endswith('validate.proto') for name in imports):
+        return text
+    line = 'import "%s";\n' % validate_import
+    anchors = list(IMPORT_RE.finditer(text)) or list(PACKAGE_RE.finditer(text)) or list(SYNTAX_RE.finditer(text))
+    if anchors:
+        end = anchors[-1].end()
+        if not text[:end].endswith('\n'):
+            line = '\n' + line
+        return text[:end] + line + text[end:]
+    return line + text
+
+
 def convert_file(src, dst, rel, report, validate_import):
     with open(src, encoding='utf-8', newline='') as handle:
         text = handle.read()
-    converted = convert_text(text, rel, report, validate_import)
+    converted = ensure_validate_import(convert_text(text, rel, report, validate_import), validate_import)
     os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
     with open(dst, 'w', encoding='utf-8', newline='') as handle:
         handle.write(converted)

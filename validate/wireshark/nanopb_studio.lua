@@ -47,7 +47,7 @@ end
 -- ---------------------------------------------------------------------------
 
 local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map",
-    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "optimize", "c_defines" }
+    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "optimize", "packet_sizes", "c_defines" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
@@ -65,6 +65,7 @@ local config = {
     first_include = "",     -- e.g. filter_source_include.h: #include before the #ifdef
     any_value_size = "",    -- Any.value bytes; empty = computed from nanopb's sizes
     optimize = "",          -- e.g. O2: #pragma GCC optimize in every generated .c
+    packet_sizes = "",      -- e.g. small,medium,large,fragmented: test packets per size range
     c_defines = "",         -- older name of compile_if, read once
 }
 
@@ -502,6 +503,10 @@ local function gen_packets()
                 args[#args + 1] = "--any-value-size"
                 args[#args + 1] = config.any_value_size
             end
+            if (config.packet_sizes or "") ~= "" then
+                args[#args + 1] = "--sizes"
+                args[#args + 1] = config.packet_sizes
+            end
             if config.port_map ~= "" then
                 args[#args + 1] = "--port-map"
                 args[#args + 1] = config.port_map
@@ -597,7 +602,9 @@ local function set_directory()
         { "Compile only if defined: #ifdef ... #endif around every .c/.h (e.g. CONFIG_COMPILE_FILTER)", config.compile_if },
         { "Any.value bytes (empty = computed from nanopb's sizes; set it for deeper nested Anys)", config.any_value_size },
         { "GCC optimization of the generated .c (e.g. O2; empty = your build's flags)", config.optimize },
-    }, function(input, output, prefix, author, header_dir, first_include, compile_if, any_value_size, optimize)
+        { "Test packet sizes (small,medium,large,fragmented or MIN-MAX; empty = random)", config.packet_sizes },
+    }, function(input, output, prefix, author, header_dir, first_include, compile_if, any_value_size, optimize,
+                packet_sizes)
         input = trim(input)
         if input == "" then
             show(title, false, "Enter the protos directory.")
@@ -622,6 +629,15 @@ local function set_directory()
             return
         end
         config.optimize = optimize
+        packet_sizes = trim(packet_sizes or ""):gsub("%s+", "")
+        for item in string.gmatch(packet_sizes, "[^,]+") do
+            if not (item == "small" or item == "medium" or item == "large" or item == "fragmented"
+                    or item:match("^%d+%-%d+$")) then
+                show(title, false, "Test packet sizes: small, medium, large, fragmented or MIN-MAX, comma separated.")
+                return
+            end
+        end
+        config.packet_sizes = packet_sizes
         config.protos_root_fixed = "1"
         save_config()
         load_now(title, "\n\nEvery Tools > nanopb item now uses this directory without asking."

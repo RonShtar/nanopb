@@ -644,16 +644,52 @@ class BytesSetRuleEmitter(RuleEmitter):
 
 
 class RequiredRuleEmitter(RuleEmitter):
-    """Emits C code for required field rule."""
-    
+    """Emits C code for the required rule: the field must be set, i.e. (as in
+    protovalidate) differ from its default where it has no presence flag.
+
+        has_<f> field (proto3 optional, message, proto2 optional)  -> has_<f>
+        string                                                   -> not empty
+        bytes                                                    -> size > 0
+        repeated / map                                           -> count > 0
+        number, enum, bool                                       -> != 0 / true
+        proto2 required, fixed_count / fixed_length arrays       -> always set
+    """
+
+    NUMERIC = ('INT32', 'INT64', 'UINT32', 'UINT64', 'SINT32', 'SINT64', 'FIXED32', 'FIXED64',
+               'SFIXED32', 'SFIXED64', 'FLOAT', 'DOUBLE', 'BOOL', 'ENUM', 'UENUM')
+
     def emit(self, rule_ir: RuleIR, proto_file: Any) -> str:
-        field = rule_ir.context.field
-        if getattr(field, 'rules', None) == 'OPTIONAL':
-            return ('        if (!msg->has_%s) {\n'
-                    '            PB_VALIDATE_RECORD(ctx, "%s", "Field is required");\n'
-                    '            if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
-                    '        }\n') % (rule_ir.field_name, rule_ir.constraint_id)
-        return ''
+        ctx = rule_ir.context
+        field = ctx.field
+        rules = getattr(field, 'rules', None)
+        pbtype = getattr(field, 'pbtype', None)
+        name = rule_ir.field_name
+        access = 'msg->' + ctx.field_access
+        if ctx.is_oneof:
+            raise ValidationRuleNotImplementedError(
+                'validate.proto option "required" on field "%s" inside oneof "%s": a oneof member is '
+                'set exactly when it is the selected arm, so "required" has no meaning there. Remove it '
+                '(protovalidate rejects it too).' % (name, ctx.oneof_name))
+        if rules == 'OPTIONAL':
+            missing = '!msg->has_%s' % name
+        elif rules == 'REPEATED':
+            missing = 'msg->%s_count == 0' % name
+        elif rules in ('REQUIRED', 'FIXARRAY') or pbtype == 'FIXED_LENGTH_BYTES':
+            return ''          # decoded only when present / always full
+        elif pbtype == 'STRING':
+            missing = "%s[0] == '\\0'" % access
+        elif pbtype == 'BYTES':
+            missing = '%s.size == 0' % access
+        elif pbtype in self.NUMERIC:
+            missing = '%s == 0' % access
+        else:
+            raise ValidationRuleNotImplementedError(
+                'validate.proto option "required" on field "%s" (%s, %s) is not supported.'
+                % (name, pbtype, rules))
+        return ('        if (%s) {\n'
+                '            PB_VALIDATE_RECORD(ctx, "%s", "Field is required");\n'
+                '            if (PB_VALIDATE_SHOULD_EXIT(ctx)) return false;\n'
+                '        }\n') % (missing, rule_ir.constraint_id)
 
 
 class InNotInRuleEmitter(RuleEmitter):
