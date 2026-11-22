@@ -68,4 +68,3 @@ Relevant when changing `<repo_root>/Package.swift`, `<repo_root>/spm_headers/`, 
 
 - `<repo_root>/tests/SConstruct` prefers clang on macOS when `CC` is not set
 - `<repo_root>/CMakeLists.txt` errors out immediately if `protoc` is missing
-- The development container under `<repo_root>/.devcontainer/` already includes the common compiler, Python, protobuf, and debugging tools
