@@ -265,6 +265,61 @@ class BufAppendTests(unittest.TestCase):
             buf.main([self.src, '--out', out, '--validate-name', 'validate.proto'])
 
 
+TRICKY_COMMENTS = '''syntax = "proto3";
+package fleet;
+import "buf/validate/validate.proto";
+
+// The robot's move command; it's sent every 10 ms.
+message Move {
+  // Name of the robot; don't leave it empty.
+  string name = 1 [(buf.validate.field).string.max_len = 20];
+  /* speed: can't be zero; {really} */ uint32 speed = 2 [(buf.validate.field).uint32.gte = 1];
+  // Tags; each one isn't longer than 8 {characters}.
+  repeated string tags = 3 [(buf.validate.field).repeated = {max_items: 4, items: {string: {max_len: 8}}}];
+  string mode = 4 [(buf.validate.field).string = {in: ["a;b", "it's {x}"]}];
+}
+'''
+
+
+class BufCommentTests(unittest.TestCase):
+    """Apostrophes, semicolons and braces in comments and strings (it used to stop with
+    'unterminated string'), and a file it cannot read is copied, not a crash."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='nanopb_buf_comments_')
+        self.src = os.path.join(self.tmp, 'protos', 'fleet')
+        os.makedirs(self.src)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_apostrophes_and_braces_in_comments(self):
+        with open(os.path.join(self.src, 'fleet.proto'), 'w', newline='') as handle:
+            handle.write(TRICKY_COMMENTS)
+        result = buf.convert_path(os.path.dirname(self.src), os.path.join(self.tmp, 'out'))
+        self.assertEqual(result.failed, [])
+        sized = dict(((field, option), value) for _, field, option, value in result.sized)
+        self.assertEqual(sized, {('fleet.Move.name', 'max_size'): 21, ('fleet.Move.tags', 'max_count'): 4,
+                                 ('fleet.Move.tags', 'max_size'): 9, ('fleet.Move.mode', 'max_size'): 9})
+        with open(os.path.join(self.tmp, 'out', 'fleet', 'fleet.proto'), newline='') as handle:
+            text = handle.read()
+        self.assertIn("// The robot's move command; it's sent every 10 ms.\n", text)
+        self.assertIn('[(buf.validate.field).uint32.gte = 1, (validate.rules).uint32.gte = 1]', text)
+
+    def test_unreadable_file_is_copied_and_reported(self):
+        broken = 'syntax = "proto3";\nmessage A {\n  string a = 1 [(buf.validate.field).string.const = "abc];\n}\n'
+        with open(os.path.join(self.src, 'broken.proto'), 'w', newline='') as handle:
+            handle.write(broken)
+        with open(os.path.join(self.src, 'fleet.proto'), 'w', newline='') as handle:
+            handle.write(TRICKY_COMMENTS)
+        out = os.path.join(self.tmp, 'out')
+        self.assertEqual(buf.main([os.path.dirname(self.src), '--out', out]), 1)
+        with open(os.path.join(out, 'fleet', 'broken.proto'), newline='') as handle:
+            self.assertEqual(handle.read(), broken)
+        with open(os.path.join(out, 'fleet', 'fleet.proto'), newline='') as handle:
+            self.assertIn('(validate.rules).string.max_len = 20', handle.read())   # the others still converted
+
+
 class OptionProtoDetectionTests(unittest.TestCase):
     """Files that only define options are never a protocol and never generated, whatever their
     name: protovalidate's buf/validate/*, and any file that extends google.protobuf.*Options."""

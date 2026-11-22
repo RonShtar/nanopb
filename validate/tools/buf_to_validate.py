@@ -567,11 +567,48 @@ MESSAGE_OPEN = re.compile(r'(?:^|[;{}\s])message\s+(\w+)\s*$')
 PACKAGE = re.compile(r'^\s*package\s+([\w.]+)\s*;', re.M)
 
 
-def declared_field(text, i):
-    """The name of the field whose options start at text[i] ('['), or None."""
+def code_mask(text):
+    """``text`` with every comment and string literal replaced by spaces (newlines kept), so
+    indexes stay the same and a look back from any position sees only code. Never raises:
+    an apostrophe in a comment (// don't) is inside the comment, and an unterminated
+    literal ends at its line."""
 
-    start = max(text.rfind(';', 0, i), text.rfind('{', 0, i), text.rfind('}', 0, i))
-    match = FIELD_DECL.search(strip_comments(text[start if start >= 0 else 0:i]))
+    out, i, n = list(text), 0, len(text)
+
+    def blank(a, b):
+        for k in range(a, b):
+            if out[k] != '\n':
+                out[k] = ' '
+
+    while i < n:
+        if text.startswith('//', i):
+            j = text.find('\n', i)
+            j = n if j < 0 else j
+            blank(i, j)
+            i = j
+        elif text.startswith('/*', i):
+            j = text.find('*/', i + 2)
+            j = n if j < 0 else j + 2
+            blank(i, j)
+            i = j
+        elif text[i] in '"\'':
+            quote, j = text[i], i + 1
+            while j < n and text[j] != quote and text[j] != '\n':
+                j += 2 if text[j] == '\\' else 1
+            j = min(j + 1, n)
+            blank(i, j)
+            i = j
+        else:
+            i += 1
+    return ''.join(out)
+
+
+def declared_field(code, i):
+    """The name of the field whose options start at code[i] ('['), or None (``code`` is the
+    file's code_mask)."""
+
+    start = max(code.rfind(';', 0, i), code.rfind('{', 0, i), code.rfind('}', 0, i))
+    match = FIELD_DECL.search(code[start if start >= 0 else 0:i].rstrip())
     return match.group(3) if match else None
 
 
@@ -604,7 +641,8 @@ def convert_text(text, name, report, validate_import, append=False, state=None):
 
     state = state or FileState(append)
     state.append = append
-    package = PACKAGE.search(strip_comments(text))
+    code = code_mask(text)
+    package = PACKAGE.search(code)
     state.package = package.group(1) if package else ''
     out, i, n = [], 0, len(text)
     scopes = []                       # message names, None for any other { }
@@ -631,7 +669,7 @@ def convert_text(text, name, report, validate_import, append=False, state=None):
             out.append(literal)
             i = j
         elif c == '{':
-            message = MESSAGE_OPEN.search(strip_comments(text[max(0, i - 200):i]))
+            message = MESSAGE_OPEN.search(code[max(0, i - 200):i].rstrip())
             scopes.append(message.group(1) if message else None)
             out.append(c)
             i += 1
@@ -650,7 +688,7 @@ def convert_text(text, name, report, validate_import, append=False, state=None):
                 i = j + 1
                 continue
             kept, added, dropped, buf_rules = result
-            field = declared_field(text, i)
+            field = declared_field(code, i)
             messages = [s for s in scopes if s]       # a oneof's braces are not a message
             if state.sizes is not None and field and messages:
                 full = '.'.join(([state.package] if state.package else []) + messages + [field])
@@ -790,6 +828,19 @@ def our_import(state, opts):
 
 
 def convert_file(src, dst, rel, report, opts, result):
+    """Convert one file; a file it cannot read is copied unchanged and listed in
+    result.failed (the others are still converted)."""
+
+    try:
+        return _convert_file(src, dst, rel, report, opts, result)
+    except Unparsable as exc:
+        result.failed.append((rel, str(exc)))
+        os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+        shutil.copyfile(src, dst)
+        return False
+
+
+def _convert_file(src, dst, rel, report, opts, result):
     text = read_text(src)
     options_text = read_text(os.path.splitext(src)[0] + '.options')
     state = FileState(opts.append, Sizes(options_text, text) if opts.sizes else None)
@@ -813,6 +864,7 @@ class Result(object):
         self.report = Report()
         self.converted, self.copied, self.written = [], [], []
         self.sized = []                  # (file, field, option, value)
+        self.failed = []                 # (file, why): copied unchanged
         self.validate_imports = set()
         self.uses_nanopb = False
 
@@ -934,6 +986,11 @@ def main(argv=None):
         print('\nnot enforced by nanopb-validate%s:' % ('' if args.replace else ' (the buf rules stay in the files)'))
         for where, rule, why in result.report.items:
             print('  %-28s %-34s %s' % (where, rule, why))
+    if result.failed:
+        print('\nNOT converted, copied unchanged (please send this file and message):')
+        for rel, why in result.failed:
+            print('  %-28s %s' % (rel, why))
+        return 1
     return 1 if (args.strict and result.report.items) else 0
 
 
