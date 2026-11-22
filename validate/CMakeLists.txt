@@ -98,6 +98,8 @@ target_include_directories(protobuf-nanopb-validate PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/nanopb>)
 if(NOT NANOPB_VALIDATE_WITH_NANOPB)
     nanopb_validate_apply_definitions(protobuf-nanopb-validate)
+else()
+    nanopb_validate_apply_optimize(protobuf-nanopb-validate)   # definitions come from nanopb's target
 endif()
 add_library(nanopb::protobuf-nanopb-validate ALIAS protobuf-nanopb-validate)
 

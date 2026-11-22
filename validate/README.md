@@ -132,6 +132,7 @@ Cost per packet, stack and the switches that change them:
 | | |
 |---|---|
 | CMake 3.14+, `pb_validate` inside nanopb's own library | `cmake -S validate -B build && cmake --build build && cmake --install build`. This builds nanopb from the repository root with nanopb's `CMakeLists.txt` unchanged, then adds `validate/runtime/pb_validate.c` to nanopb's `libprotobuf-nanopb` (so `pb_validate.o` is a member of the same `.a`) and installs `pb_validate.h` and `pb_filter_macros.h` next to `pb.h`. Use it as nanopb: `find_package(nanopb)`, link `nanopb::protobuf-nanopb-static`. Tested with CMake 3.18. (nanopb's own build alone has no `pb_validate`: it compiles only `pb_common`, `pb_encode`, `pb_decode`.) |
+| One optimization level | `-DNANOPB_VALIDATE_OPTIMIZE=O2` with any line above: nanopb's `pb_*.c` and `pb_validate.c` are compiled at `-O2` (MSVC `/O2`) in every build type, Debug too (after its `-g`; Release's `-O3` is overridden). It is a PRIVATE option of the library; compile the generated `.c` files with `gen --optimize O2`. Step-by-step build with checks: [docs/build-steps.md](docs/build-steps.md). |
 | Settings that must match everywhere | `-DNANOPB_VALIDATE_FIELD_32BIT=ON` (`PB_FIELD_32BIT`) and `-DNANOPB_VALIDATE_DEFINES="PB_BUFFER_ONLY;PB_NO_ERRMSG;..."` with any of the lines above: nanopb's `pb_*.c` and `pb_validate.c` are compiled with them and they are PUBLIC definitions of the installed library, so a project linking `nanopb::protobuf-nanopb-static` from `find_package(nanopb)` gets them with no `target_compile_definitions` of its own. A project that links the `.a` file directly must pass the same `-D`s itself. |
 | CMake 3.19+, the same from nanopb's own build | `cmake -S . -B build -DCMAKE_PROJECT_INCLUDE=validate/extra/nanopb_validate_hook.cmake`, then build and install as usual: the same result as the line above, for builds that must start at nanopb's root. Stops with a clear message on CMake 3.18 and older. |
 | CMake 3.14+, separate validation library | `cmake -S validate -B build -DNANOPB_VALIDATE_IN_NANOPB_LIBRARY=OFF`: nanopb as usual **and** a separate `libprotobuf-nanopb-validate`, with `find_package(nanopb-validate)` and `nanopb::protobuf-nanopb-validate` (it links the nanopb runtime too). `-DNANOPB_VALIDATE_WITH_NANOPB=OFF` adds only that library to an installed nanopb. |
@@ -172,7 +173,7 @@ validate/
   wireshark/           Lua dissector and Tools > nanopb menu
   CMakeLists.txt       cmake -S validate: nanopb + libprotobuf-nanopb-validate, installed
   extra/               CMake and make add-ons, find_package(nanopb-validate) config
-  tools/               buf_to_validate.py: buf.validate -> validate.rules (standalone, stdlib only)
+  tools/               buf_to_validate.py: adds validate.rules + nanopb sizes next to buf.validate (stdlib only)
   examples/stress/     a full protocol: protos, captures, C round trip
   tests/py/            tool, filters at run time, dissector, CLI, security, performance, build files, separation
   tests/c/             C tests of the runtime and generated code (SCons)
@@ -191,15 +192,78 @@ validate/
 `UPSTREAM`. All four groups of tests, nanopb's own included, step by step:
 [docs/testing.md](docs/testing.md).
 
-### Converting protovalidate (buf.validate) protos
+## Preparing a protos directory from protovalidate (buf.validate) protos
 
-`tools/buf_to_validate.py` is a separate script, not part of the generator:
+`tools/buf_to_validate.py` (one file, standard library only) adds our rules next to
+buf's, so the same `.proto` files work for buf and for this tool. The input is never
+changed.
 
-    python validate/tools/buf_to_validate.py PROTOS --out CONVERTED
+1. **Start from a protos directory buf can build.** One folder per protocol, plus
+   protovalidate's `buf/validate/validate.proto` where your imports find it (usually at
+   the top: `protos/buf/validate/validate.proto`, imported as `"buf/validate/validate.proto"`).
+   It may also be missing; it is then imported from your buf setup.
 
-It rewrites `(buf.validate.field)` options to `(validate.rules)`, keeps comments, never
-touches the input, and lists every rule nanopb-validate cannot enforce (CEL,
-`pattern`, ...) instead of converting it into something that only looks equivalent.
+       protos/
+         buf/validate/validate.proto      protovalidate (vendored)
+         fleet/fleet.proto                import "buf/validate/validate.proto";
+         fleet/fleet.options              optional nanopb sizes
+
+2. **Convert into a new folder:**
+
+       python validate/tools/buf_to_validate.py protos --out protos_nanopb
+
+   For every field with `(buf.validate.field)` rules it:
+   - keeps the buf options word for word and adds the `(validate.rules)` equivalents;
+   - adds `(nanopb).max_size` / `(nanopb).max_count` from the buf limits, so the field is
+     static storage instead of `pb_callback_t`. Strings get `max_len + 1` (also from `len`,
+     `const`, `in`, `email`, `ipv4`, ...), bytes get `max_len`, repeated fields get
+     `max_items` and maps get `max_pairs`. A size already set inline, in the `.options` file
+     or file-wide is never changed;
+   - adds `import "buf/validate/nanopb_validate.proto";` (our `validate.proto` under another
+     name, written next to buf's) and, when it added sizes, `import "nanopb.proto";` (copied to
+     the top of `protos_nanopb/` if your protos have none).
+
+   ```proto
+   // before
+   string name = 1 [(buf.validate.field).string = {min_len: 1, max_len: 20}];
+   // after
+   string name = 1 [(buf.validate.field).string = {min_len: 1, max_len: 20}, (validate.rules).string.min_len = 1,
+                    (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
+   ```
+
+   The result looks like this. Both `validate.proto` files sit side by side: buf keeps working,
+   and this tool never generates or counts either one.
+
+       protos_nanopb/
+         nanopb.proto
+         buf/validate/validate.proto            buf's, unchanged
+         buf/validate/nanopb_validate.proto     ours
+         fleet/fleet.proto, fleet/fleet.options
+
+3. **Read the report.** It lists the sizes it added, and every buf rule nanopb-validate
+   cannot enforce (CEL, `pattern`, `uri`, message-level and oneof rules, ...). Those stay in
+   the file for buf; nothing is converted into something that only looks equivalent.
+   `--strict` exits 1 if there are any.
+
+4. **Check and generate** from the converted folder:
+
+       python -m nanopb_validate check protos_nanopb
+       python -m nanopb_validate gen   protos_nanopb --out out --optimize O2
+
+   `check` names every field still without a size; give those a `max_size` / `max_count` in
+   the protocol's `.options` file.
+
+Options: `--validate-name rules.proto` (our file's name, default `nanopb_validate.proto`),
+`--no-sizes`, `--replace` (the old behaviour: buf options and import replaced by ours, buf's
+`validate.proto` not copied). Note that buf's `string.max_len` counts characters while ours
+counts bytes, so non-ASCII text hits our limit first.
+
+Files that only define options are never a protocol and never generated, whatever their
+name: `validate.proto`, `nanopb.proto`, everything under `buf/validate/`, and any file that
+`extend`s `google.protobuf.*Options`. Files only they import (buf's `duration.proto`) are not
+generated either. Before this, a buf `validate.proto` stored under another name or path became
+its own "buf" protocol, and `gen` stopped on about 100 `buf_validate_Rule.id: CALLBACK string`
+fields.
 
 ## Upgrading nanopb
 
@@ -225,3 +289,4 @@ anything moved; a fix goes in `nanopb_api.py`, never in nanopb's files.
 - [docs/datagen.md](docs/datagen.md): the test data generator
 - [docs/any-examples.md](docs/any-examples.md): `google.protobuf.Any` with many protos, static storage, the generated filter
 - [docs/testing.md](docs/testing.md): running all the tests, step by step
+- [docs/build-steps.md](docs/build-steps.md): building the library (Release + Debug, everything at -O2) for a target, with checks

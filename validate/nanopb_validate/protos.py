@@ -44,10 +44,73 @@ def setup_nanopb(nanopb_root):
     return env.GENERATOR_DIR
 
 
-def is_option_proto(name):
-    """True for a file that only defines generator options, in any folder."""
+# Option-definition files found in compiled descriptors (any name: buf/validate/validate.proto,
+# buf/validate/nanopb_validate.proto, a renamed copy of ours, ...); see register_option_files.
+_OPTION_FILES = set()
 
-    return name == 'google/protobuf/descriptor.proto' or name.rsplit('/', 1)[-1] in OPTION_PROTOS
+# protovalidate's own files: always vendored, never a protocol, never generated.
+VENDORED_PREFIXES = ('buf/validate/',)
+
+OPTIONS_TYPES = tuple('.google.protobuf.%sOptions' % kind for kind in (
+    'File', 'Message', 'Field', 'Oneof', 'Enum', 'EnumValue', 'Service', 'Method', 'ExtensionRange'))
+
+# `extend google.protobuf.FieldOptions {` in .proto text (before anything is compiled).
+EXTEND_OPTIONS_RE = re.compile(r'^\s*extend\s+\.?(?:google\.protobuf\.)?\w*Options\s*\{', re.M)
+
+
+def is_vendored(name):
+    """True for a file of protovalidate (buf/validate/...), in any folder."""
+
+    name = '/' + name.replace('\\', '/')
+    return any('/' + prefix in name for prefix in VENDORED_PREFIXES)
+
+
+def is_option_proto(name):
+    """True for a file that only defines generator or validation options, in any folder:
+    validate.proto and nanopb.proto by name, protovalidate's buf/validate/*, and every file
+    a compiled descriptor set showed to extend google.protobuf.*Options."""
+
+    name = name.replace('\\', '/')
+    return (name == 'google/protobuf/descriptor.proto' or name.rsplit('/', 1)[-1] in OPTION_PROTOS
+            or is_vendored(name) or name in _OPTION_FILES)
+
+
+def defines_options(path):
+    """True for a .proto file on disk that defines options (extend google.protobuf.*Options)."""
+
+    try:
+        with open(path, encoding='utf-8', errors='replace') as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    text = re.sub(r'/\*.*?\*/', ' ', text, flags=re.S)
+    text = re.sub(r'//[^\n]*', '', text)
+    return bool(EXTEND_OPTIONS_RE.search(text))
+
+
+def register_option_files(fds, roots):
+    """Remember the option-definition files of ``fds`` and drop from it the files that only
+    they import (buf/validate/validate.proto's google/protobuf/duration.proto, ...), so
+    neither is generated, merged or counted. ``roots`` are the protoc names compiled."""
+
+    by_name = dict((f.name, f) for f in fds.file)
+    for fdesc in fds.file:
+        if any(ext.extendee in OPTIONS_TYPES for ext in fdesc.extension) or is_vendored(fdesc.name):
+            _OPTION_FILES.add(fdesc.name)
+    reachable, todo = set(), [r for r in roots if r in by_name]
+    while todo:
+        name = todo.pop()
+        if name in reachable:
+            continue
+        reachable.add(name)
+        if is_option_proto(name):
+            continue                      # what only an option file imports is not ours
+        todo += [d for d in by_name[name].dependency if d in by_name]
+    keep = [f for f in fds.file if f.name in reachable or is_option_proto(f.name)]
+    if len(keep) != len(fds.file):
+        del fds.file[:]
+        fds.file.extend(keep)
+    return fds
 
 
 def find_units(protos_root):
@@ -64,25 +127,31 @@ def find_units(protos_root):
     units = []
     for name in sorted(os.listdir(protos_root)):
         path = os.path.join(protos_root, name)
-        if not skipped_folder(name) and os.path.isdir(path) and all_unit_protos(path):
+        if not skipped_folder(name, protos_root) and os.path.isdir(path) and all_unit_protos(path):
             units.append(name)
     if not units and unit_protos(protos_root):
         return [os.path.basename(os.path.abspath(protos_root))]
     return units
 
 
-def skipped_folder(name):
-    """Folders that never hold a unit's own protos: vendored google/, hidden ones."""
+def skipped_folder(name, parent=None):
+    """Folders that never hold a unit's own protos: vendored google/ and buf/validate/
+    (protovalidate), hidden ones."""
 
-    return name == 'google' or name.startswith('.')
+    if name == 'google' or name.startswith('.'):
+        return True
+    if name == 'buf' and parent is not None and os.path.isdir(os.path.join(parent, name, 'validate')):
+        return True
+    return name == 'validate' and parent is not None and os.path.basename(os.path.normpath(parent)) == 'buf'
 
 
 def unit_protos(unit_dir):
-    """The unit's .proto files directly in ``unit_dir``."""
+    """The unit's .proto files directly in ``unit_dir``: not option definitions
+    (validate.proto, nanopb.proto, any file that extends google.protobuf.*Options)."""
 
     return sorted(f for f in os.listdir(unit_dir)
                   if f.endswith('.proto') and os.path.isfile(os.path.join(unit_dir, f))
-                  and not is_option_proto(f))
+                  and not is_option_proto(f) and not defines_options(os.path.join(unit_dir, f)))
 
 
 def unit_subfolders(unit_dir):
@@ -90,7 +159,7 @@ def unit_subfolders(unit_dir):
 
     result = []
     for root, dirs, _ in os.walk(unit_dir):
-        dirs[:] = sorted(d for d in dirs if not skipped_folder(d))
+        dirs[:] = sorted(d for d in dirs if not skipped_folder(d, root))
         result += [os.path.join(root, d) for d in dirs]
     return result
 
@@ -221,7 +290,7 @@ def compile_descriptor_set(proto_names, include_paths):
         fds = descriptor_pb2.FileDescriptorSet()
         with open(out, 'rb') as handle:
             fds.ParseFromString(handle.read())
-        return fds
+        return register_option_files(fds, proto_names)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 

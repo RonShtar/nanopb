@@ -31,12 +31,57 @@ function(nanopb_validate_definitions out)
     set(${out} ${_defs} PARENT_SCOPE)
 endfunction()
 
-# Adds the settings to `target` as PUBLIC definitions (exported with the target).
+# One optimization level for the whole runtime, whatever CMAKE_BUILD_TYPE says
+# (Release defaults to -O3, Debug to none):
+#
+#   -DNANOPB_VALIDATE_OPTIMIZE=O2       nanopb's pb_*.c and pb_validate.c at -O2 (MSVC: /O2)
+#
+# It is added after the build type's flags, so it wins (the last -O counts); -g of a
+# Debug build stays. PRIVATE: projects linking the library keep their own level (the
+# generated code has `gen --optimize O2` for that).
+set(NANOPB_VALIDATE_OPTIMIZE "" CACHE STRING
+    "Optimization level for nanopb's runtime and pb_validate.c in every build type (O0, O1, O2, O3, Os; empty: the build type's)")
+
+function(nanopb_validate_optimize_flag out)
+    set(_level "${NANOPB_VALIDATE_OPTIMIZE}")
+    string(REGEX REPLACE "^[-/]" "" _level "${_level}")
+    if(_level STREQUAL "")
+        set(${out} "" PARENT_SCOPE)
+        return()
+    endif()
+    if(NOT _level MATCHES "^O([0-3]|s|z|fast|g)$")
+        message(FATAL_ERROR "NANOPB_VALIDATE_OPTIMIZE=${NANOPB_VALIDATE_OPTIMIZE}: give O0, O1, O2, O3, Os, Oz or Og")
+    endif()
+    if(MSVC)
+        if(_level MATCHES "^O[0g]$")
+            set(_level "Od")
+        elseif(_level MATCHES "^O[sz]$")
+            set(_level "O1")
+        elseif(_level MATCHES "^O(3|fast)$")
+            set(_level "O2")
+        endif()
+        set(${out} "/${_level}" PARENT_SCOPE)
+    else()
+        set(${out} "-${_level}" PARENT_SCOPE)
+    endif()
+endfunction()
+
+# Adds the settings to `target` as PUBLIC definitions (exported with the target), and
+# NANOPB_VALIDATE_OPTIMIZE as a PRIVATE compile option.
 function(nanopb_validate_apply_definitions target)
     nanopb_validate_definitions(_defs)
     if(_defs)
         target_compile_definitions(${target} PUBLIC ${_defs})
         message(STATUS "nanopb_validate: ${target} and its users are compiled with: ${_defs}")
+    endif()
+    nanopb_validate_apply_optimize(${target})
+endfunction()
+
+function(nanopb_validate_apply_optimize target)
+    nanopb_validate_optimize_flag(_opt)
+    if(_opt)
+        target_compile_options(${target} PRIVATE ${_opt})
+        message(STATUS "nanopb_validate: ${target} is compiled with ${_opt} in every build type")
     endif()
 endfunction()
 

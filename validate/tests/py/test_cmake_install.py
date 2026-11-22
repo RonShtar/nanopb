@@ -176,6 +176,28 @@ class CMakeInstallTests(unittest.TestCase):
         self.assertNotIn(b'_rel_f16', archive)
         self.consume(prefix, 'nanopb', 'nanopb::protobuf-nanopb-static', '-DEXPECT_FIELD_32BIT=ON')
 
+    def test_optimize_level_for_every_build_type(self):
+        """-DNANOPB_VALIDATE_OPTIMIZE=O2: nanopb's pb_*.c and pb_validate.c end with -O2 in
+        Release (after CMake's -O3) and Debug (after -g) alike."""
+        for build_type in ('Release', 'Debug'):
+            build = os.path.join(self.tmp, 'build_' + build_type)
+            self.run_step(['cmake', '-S', slash(VALIDATE_DIR), '-B', build, '-DCMAKE_BUILD_TYPE=' + build_type,
+                           '-Dnanopb_BUILD_GENERATOR=OFF', '-DNANOPB_VALIDATE_OPTIMIZE=O2'] + self.extra)
+            log = self.run_step(['cmake', '--build', build, '--verbose'])
+            lines = [l for l in log.splitlines() if re.search(r'[ /\\]pb_\w+\.c(\.o\w*)?( |$)', l)
+                     and (' -c ' in l or ' /c ' in l)]
+            compiled = set(re.findall(r'(pb_\w+\.c)(?:\s|$)', ' '.join(lines)))
+            self.assertTrue({'pb_common.c', 'pb_encode.c', 'pb_decode.c', 'pb_validate.c'} <= compiled,
+                            (build_type, compiled, log[-2000:]))
+            for line in lines:
+                levels = re.findall(r'(?:^|\s)[-/](O[0-3sdzg]?)(?=\s)', line)
+                self.assertTrue(levels and levels[-1] == 'O2', (build_type, line))
+        proc = subprocess.run([CMAKE, '-S', slash(VALIDATE_DIR), '-B', os.path.join(self.tmp, 'bad'),
+                               '-DNANOPB_VALIDATE_OPTIMIZE=fast'] + self.extra,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('NANOPB_VALIDATE_OPTIMIZE=fast', proc.stdout)
+
     def test_hook_puts_pb_validate_into_nanopbs_own_library(self):
         """cmake -S . with the hook (CMake 3.19+): the same, from nanopb's own build."""
         if cmake_version() < (3, 19):

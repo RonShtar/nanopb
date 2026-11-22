@@ -1,39 +1,60 @@
 #!/usr/bin/env python3
-"""Convert protovalidate (buf.validate) annotations to nanopb-validate's (validate.rules).
+"""Add nanopb-validate's (validate.rules) next to protovalidate's (buf.validate) annotations.
 
-A standalone script: one file, Python 3 standard library only, no import from
-nanopb_validate. Copy it anywhere.
+One file, Python 3 standard library only, no import from nanopb_validate.
 
     python buf_to_validate.py PROTOS --out CONVERTED
     python buf_to_validate.py one.proto --out CONVERTED
+    python buf_to_validate.py PROTOS --out CONVERTED --replace      # the old behaviour
 
 PROTOS is a .proto file or a folder of them. Every .proto file is rewritten into
 CONVERTED with the same relative path (the original is never modified); every
-other file (for example *.options) is copied unchanged. A folder named
-buf/validate (the vendored validate.proto of protovalidate) is not copied.
+other file (for example *.options) and buf's own buf/validate/validate.proto are
+copied unchanged.
 
-What is converted, field by field, keeping comments and layout:
+Append mode (the default) keeps the buf setup and adds ours, field by field,
+keeping comments and layout:
 
-    import "buf/validate/validate.proto";   ->  import "validate.proto";
-    (buf.validate.field).string.min_len = 1 ->  (validate.rules).string.min_len = 1
-    (buf.validate.field).uint32 = {gte: 1, lte: 9}
-                                            ->  (validate.rules).uint32.gte = 1, (validate.rules).uint32.lte = 9
+    import "buf/validate/validate.proto";                 stays
+                                                          + import "buf/validate/nanopb_validate.proto";
+    string name = 1 [(buf.validate.field).string.max_len = 20];
+        -> string name = 1 [(buf.validate.field).string.max_len = 20,
+                            (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
+                                                          + import "nanopb.proto";
+
     const -> const_value;   len -> min_len + max_len (strings and bytes)
 
-Rules nanopb-validate cannot enforce are dropped and reported, never converted
-into something that only looks equivalent: cel, ignore, pattern, *_bytes,
-uri/uuid/... formats, absolute timestamp bounds, duration rules, message-level
-cel and oneof rules, (buf.validate.oneof). A dropped option leaves a short
-/* comment */ in the output, and the report lists file, line and rule.
+Our validate.proto is written next to buf's, under another name
+(buf/validate/nanopb_validate.proto, --validate-name), so both are there and each
+file imports both: buf keeps working, nanopb-validate enforces its part. Fields
+that buf limits get nanopb sizes, so they are static storage instead of
+pb_callback_t: string max_len/len/const/in/email/... -> (nanopb).max_size (+1
+for the NUL), bytes -> max_size, repeated max_items / map max_pairs ->
+(nanopb).max_count; never where a size is already set (inline, the .options
+file, or file-wide). Then "nanopb.proto" is imported, and copied to the top of
+CONVERTED if PROTOS has none. --no-sizes turns this off.
 
-Exit status 0; with --strict, 1 if anything was dropped.
+Rules nanopb-validate cannot enforce are listed (file, line, rule), never
+converted into something that only looks equivalent: cel, ignore, pattern,
+*_bytes, uri/uuid/... formats, absolute timestamp bounds, duration rules,
+message-level cel and oneof rules, (buf.validate.oneof). When appending they
+stay in the file for buf; with --replace they are dropped and leave a short
+/* comment */.
+
+Exit status 0; with --strict, 1 if any rule is not enforced by nanopb-validate.
 """
 
 import argparse
+import fnmatch
 import os
 import re
 import shutil
 import sys
+
+DEFAULT_NAME = 'nanopb_validate.proto'
+_HERE = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_VALIDATE_PROTO = os.path.join(_HERE, '..', 'nanopb_validate', 'validate_proto', 'validate.proto')
+DEFAULT_NANOPB_PROTO = os.path.join(_HERE, '..', '..', 'generator', 'proto', 'nanopb.proto')
 
 # ---------------------------------------------------------------------------
 # What nanopb-validate understands: {buf rule: [our rule names]}
@@ -323,11 +344,42 @@ def matching(text, i, open_char, close_char):
     raise Unparsable('missing %s' % close_char)
 
 
-def convert_group(inner, text, start, report, where):
-    """The options inside one [ ... ]; returns (new inner text, indent) or None if unchanged."""
+def last_code_end(inner):
+    """Index just after the last character of ``inner`` that is code, not blank or comment."""
+
+    end, i = 0, 0
+    while i < len(inner):
+        c = inner[i]
+        if c in '"\'':
+            i = string_end(inner, i)
+            end = i
+            continue
+        if inner.startswith('//', i):
+            j = inner.find('\n', i)
+            i = len(inner) if j < 0 else j
+            continue
+        if inner.startswith('/*', i):
+            j = inner.find('*/', i + 2)
+            i = len(inner) if j < 0 else j + 2
+            continue
+        if c not in ' \t\r\n':
+            end = i + 1
+        i += 1
+    return end
+
+
+def convert_group(inner, report, where, append=False):
+    """The options inside one [ ... ]: (kept, added, dropped, buf_rules), or None without buf.validate.
+
+    kept      the original options that stay: every one when appending, else the non-buf ones
+    added     the (validate.rules) options for the buf rules nanopb-validate can enforce
+    dropped   the buf rules it cannot enforce (reported)
+    buf_rules the buf FieldRules as (key, value) pairs, for the nanopb sizes
+    """
+
     if 'buf.validate' not in inner:
         return None
-    options, dropped = [], []
+    kept, added, dropped, buf_rules = [], [], [], []
     for part in split_options(inner):
         stripped = strip_comments(part)
         if not stripped:
@@ -335,11 +387,16 @@ def convert_group(inner, text, start, report, where):
         match = FIELD_OPTION.match(stripped)
         if not match:
             if 'buf.validate' in stripped:
-                report.drop(where, stripped.split('=')[0].strip(), 'unknown buf.validate option')
-                dropped.append(stripped.split('=')[0].strip())
+                name = stripped.split('=')[0].strip()
+                report.drop(where, name, 'unknown buf.validate option')
+                dropped.append(name)
+                if append:
+                    kept.append(part.strip())
             else:
-                options.append(part.strip())
+                kept.append(part.strip())
             continue
+        if append:
+            kept.append(part.strip())
         path = [p.strip() for p in match.group(1).split('.') if p.strip()]
         try:
             value, end = parse_value(match.group(2), 0)
@@ -351,19 +408,206 @@ def convert_group(inner, text, start, report, where):
         for name in reversed(path):
             tree = ('m', [(name, tree)])
         pairs = tree[1] if tree[0] == 'm' else [('', tree)]
+        buf_rules += pairs
         before = len(report.items)
         converted = convert_field(pairs, report, where)
         dropped += [item[1] for item in report.items[before:]]
-        options += [option_text(p, s) for p, s in flatten(converted)]
-    return options, dropped
+        added += [option_text(p, s) for p, s in flatten(converted)]
+    return kept, added, dropped, buf_rules
+
+
+# ---------------------------------------------------------------------------
+# nanopb sizes from the buf limits: static storage instead of pb_callback_t
+# ---------------------------------------------------------------------------
+
+# Longest value of a well-known string format, in bytes.
+STRING_FORMATS = {'email': 254, 'hostname': 253, 'ip': 45, 'ipv4': 15, 'ipv6': 45, 'uuid': 36, 'tuuid': 32}
+LENGTH_KEYS = {'string': ('max_len', 'len', 'max_bytes', 'len_bytes'), 'bytes': ('max_len', 'len')}
+
+
+def literal_length(token):
+    """Bytes in a protobuf string literal ("ab\\x01" -> 3), or None if it is not one."""
+
+    if len(token) < 2 or token[0] not in '"\'' or token[-1] != token[0]:
+        return None
+    body, i, n = token[1:-1], 0, 0
+    while i < len(body):
+        if body[i] == '\\' and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in 'xX':
+                i += 2
+                digits = 0
+                while i < len(body) and digits < 2 and body[i] in '0123456789abcdefABCDEF':
+                    i += 1
+                    digits += 1
+            elif nxt in '01234567':
+                i += 1
+                digits = 0
+                while i < len(body) and digits < 3 and body[i] in '01234567':
+                    i += 1
+                    digits += 1
+            elif nxt in 'uU':
+                width = 4 if nxt == 'u' else 8
+                code = int(body[i + 2:i + 2 + width] or '0', 16)
+                i += 2 + width
+                n += len(chr(code).encode('utf-8')) - 1 if code < 0x110000 else 0
+            else:
+                i += 2
+        else:
+            n += len(body[i].encode('utf-8')) - 1
+            i += 1
+        n += 1
+    return n
+
+
+def scalar_int(value):
+    if value[0] != 's':
+        return None
+    try:
+        return int(value[1], 0)
+    except ValueError:
+        return None
+
+
+def merged(pairs):
+    """{key: [sub pairs]} of the message values in ``pairs`` (one option may be split in many)."""
+
+    result = {}
+    for key, value in pairs:
+        if value[0] == 'm':
+            result.setdefault(key, []).extend(value[1])
+    return result
+
+
+def longest_value(kind, pairs):
+    """The most bytes a string or bytes field can hold under these buf rules, or None."""
+
+    bounds = []
+    for key, value in pairs:
+        if key in LENGTH_KEYS[kind]:
+            if scalar_int(value) is not None:
+                bounds.append(scalar_int(value))
+        elif key == 'const' and value[0] == 's' and literal_length(value[1]) is not None:
+            bounds.append(literal_length(value[1]))
+        elif key == 'in':
+            items = value[1] if value[0] == 'l' else [value]
+            lengths = [literal_length(item[1]) for item in items if item[0] == 's']
+            if lengths and None not in lengths:
+                bounds.append(max(lengths))
+        elif kind == 'string' and key in STRING_FORMATS and value == ('s', 'true'):
+            bounds.append(STRING_FORMATS[key])
+    return min(bounds) if bounds else None
+
+
+def nanopb_sizes(buf_rules):
+    """[(nanopb option, value)] that give a field static storage: max_size for strings
+    (+1 for the NUL) and bytes, max_count for repeated fields and maps."""
+
+    rules, out = merged(buf_rules), []
+
+    def size_of(kind, pairs):
+        n = longest_value(kind, pairs)
+        if n is not None:
+            out.append(('max_size', n + 1 if kind == 'string' else n))
+
+    for kind in ('string', 'bytes'):
+        if kind in rules:
+            size_of(kind, rules[kind])
+    if 'repeated' in rules:
+        for key, value in rules['repeated']:
+            if key == 'max_items' and scalar_int(value):
+                out.append(('max_count', scalar_int(value)))
+        items = merged(rules['repeated']).get('items')
+        if items:
+            for kind, pairs in merged(items).items():
+                if kind in LENGTH_KEYS:
+                    size_of(kind, pairs)
+    if 'map' in rules:
+        for key, value in rules['map']:
+            if key == 'max_pairs' and scalar_int(value):
+                out.append(('max_count', scalar_int(value)))
+    seen, result = set(), []
+    for option, value in out:
+        if option not in seen:
+            seen.add(option)
+            result.append((option, value))
+    return result
+
+
+class Sizes(object):
+    """What already sizes the fields of one file: its .options file and file-level options."""
+
+    def __init__(self, options_text='', file_text=''):
+        self.lines = []
+        for line in options_text.splitlines():
+            line = line.split('#', 1)[0].split('//', 1)[0].strip()
+            if line:
+                parts = line.split(None, 1)
+                self.lines.append((parts[0], parts[1] if len(parts) > 1 else ''))
+        self.file_wide = set(re.findall(r'\(\s*nanopb_fileopt\s*\)\s*\.\s*(\w+)', strip_comments(file_text)))
+
+    def has(self, option, full_name, inner):
+        code = strip_comments(inner)
+        if re.search(r'\(\s*nanopb\s*\)\s*\.\s*(%s|type|max_length)\b' % option, code) or \
+                re.search(r'\(\s*nanopb\s*\)\s*=', code):
+            return True
+        if option in self.file_wide:
+            return True
+        short = full_name.split('.', 1)[1] if '.' in full_name else full_name
+        for pattern, settings in self.lines:
+            if (fnmatch.fnmatchcase(full_name, pattern) or fnmatch.fnmatchcase(short, pattern)) and \
+                    re.search(r'\b(%s|type|max_length)\s*:' % option, settings):
+                return True
+        return False
+
+
+FIELD_DECL = re.compile(r'(?:^|[;{}])\s*(?:(repeated|optional|required)\s+)?(map\s*<[^>]*>|\.?[\w.]+)\s+(\w+)\s*=\s*\d+\s*$',
+                        re.S)
+MESSAGE_OPEN = re.compile(r'(?:^|[;{}\s])message\s+(\w+)\s*$')
+PACKAGE = re.compile(r'^\s*package\s+([\w.]+)\s*;', re.M)
+
+
+def declared_field(text, i):
+    """The name of the field whose options start at text[i] ('['), or None."""
+
+    start = max(text.rfind(';', 0, i), text.rfind('{', 0, i), text.rfind('}', 0, i))
+    match = FIELD_DECL.search(strip_comments(text[start if start >= 0 else 0:i]))
+    return match.group(3) if match else None
+
+
+# ---------------------------------------------------------------------------
+# One .proto file
+# ---------------------------------------------------------------------------
+
+class FileState(object):
+    """Per file: replace or append, what it imports, which nanopb sizes were added."""
+
+    def __init__(self, append=False, sizes=None, package=''):
+        self.append = append
+        self.sizes = sizes            # a Sizes, or None to add no nanopb options
+        self.package = package
+        self.buf_imports = []
+        self.sized = []               # (field, option, value)
 
 
 def line_of(text, index):
     return text.count('\n', 0, index) + 1
 
 
-def convert_text(text, name, report, validate_import):
+def is_buf_import(name):
+    return name == 'buf/validate/validate.proto' or name.endswith('/buf/validate/validate.proto')
+
+
+def convert_text(text, name, report, validate_import, append=False, state=None):
+    """Convert one file's text. ``validate_import`` replaces buf's import (replace mode);
+    when appending, buf's import stays."""
+
+    state = state or FileState(append)
+    state.append = append
+    package = PACKAGE.search(strip_comments(text))
+    state.package = package.group(1) if package else ''
     out, i, n = [], 0, len(text)
+    scopes = []                       # message names, None for any other { }
     while i < n:
         c = text[i]
         if text.startswith('//', i):
@@ -380,30 +624,62 @@ def convert_text(text, name, report, validate_import):
             j = string_end(text, i)
             literal = text[i:j]
             # buf's validate.proto, also from a vendored path (third_party/buf/validate/validate.proto)
-            if literal[1:-1] == 'buf/validate/validate.proto' or literal[1:-1].endswith('/buf/validate/validate.proto'):
-                literal = '%s%s%s' % (c, validate_import, c)
+            if is_buf_import(literal[1:-1]):
+                state.buf_imports.append(literal[1:-1])
+                if not append:
+                    literal = '%s%s%s' % (c, validate_import, c)
             out.append(literal)
             i = j
+        elif c == '{':
+            message = MESSAGE_OPEN.search(strip_comments(text[max(0, i - 200):i]))
+            scopes.append(message.group(1) if message else None)
+            out.append(c)
+            i += 1
+        elif c == '}':
+            if scopes:
+                scopes.pop()
+            out.append(c)
+            i += 1
         elif c == '[':
             j = matching(text, i, '[', ']')
             inner = text[i + 1:j]
             where = '%s:%d' % (name, line_of(text, i))
-            result = convert_group(inner, text, i, report, where)
+            result = convert_group(inner, report, where, append)
             if result is None:
                 out.append(text[i:j + 1])
+                i = j + 1
+                continue
+            kept, added, dropped, buf_rules = result
+            field = declared_field(text, i)
+            messages = [s for s in scopes if s]       # a oneof's braces are not a message
+            if state.sizes is not None and field and messages:
+                full = '.'.join(([state.package] if state.package else []) + messages + [field])
+                for option, value in nanopb_sizes(buf_rules):
+                    if not state.sizes.has(option, full, inner):
+                        added.append('(nanopb).%s = %d' % (option, value))
+                        state.sized.append((full, option, value))
+            what = 'not enforced by nanopb-validate (kept for buf)' if append else 'dropped'
+            note = ('/* nanopb-validate: %s %s */' % (what, ', '.join(sorted(set(dropped))))) if dropped else ''
+            multiline = '\n' in inner
+            line_start = text.rfind('\n', 0, i) + 1
+            indent = re.match(r'[ \t]*', text[line_start:i]).group(0)
+            if append:
+                # The original text stays exactly as it was; ours goes after its last option.
+                end = last_code_end(inner)
+                if multiline:
+                    extra = ''.join(',\n%s    %s' % (indent, o) for o in added)
+                else:
+                    extra = ''.join(', %s' % o for o in added)
+                out.append('[%s%s%s]%s' % (inner[:end], extra, inner[end:], (' ' + note) if note else ''))
             else:
-                options, dropped = result
-                note = ('/* nanopb-validate: dropped %s */' % ', '.join(sorted(set(dropped)))) if dropped else ''
+                options = kept + added
                 if not options:
                     out.append(note)
+                elif multiline:
+                    body = ',\n'.join(indent + '    ' + o for o in options)
+                    out.append('[\n%s\n%s]%s' % (body, indent, (' ' + note) if note else ''))
                 else:
-                    if '\n' in inner:
-                        line_start = text.rfind('\n', 0, i) + 1
-                        indent = re.match(r'[ \t]*', text[line_start:i]).group(0)
-                        body = ',\n'.join(indent + '    ' + o for o in options)
-                        out.append('[\n%s\n%s]%s' % (body, indent, (' ' + note) if note else ''))
-                    else:
-                        out.append('[%s]%s' % (', '.join(options), (' ' + note) if note else ''))
+                    out.append('[%s]%s' % (', '.join(options), (' ' + note) if note else ''))
             i = j + 1
         elif text.startswith('option', i) and (i == 0 or not IDENT.match(text[i - 1])):
             match = BUF_MESSAGE_OPTION.match(text, i)
@@ -420,10 +696,12 @@ def convert_text(text, name, report, validate_import):
                 else:
                     j += 1
             what = 'buf.validate.%s%s' % (match.group(1), re.sub(r'\s+', '', match.group(2) or ''))
-            report.drop('%s:%d' % (name, line_of(text, i)), what,
-                        'message-level rules are not supported' if match.group(1) != 'oneof'
-                        else 'oneof rules are not supported')
-            out.append('/* nanopb-validate: dropped option (%s) */' % what)
+            why = 'message-level rules are not supported' if match.group(1) != 'oneof' else 'oneof rules are not supported'
+            report.drop('%s:%d' % (name, line_of(text, i)), what, why + (' (kept for buf)' if append else ''))
+            if append:
+                out.append(text[i:j + 1])
+            else:
+                out.append('/* nanopb-validate: dropped option (%s) */' % what)
             i = j + 1
         else:
             out.append(c)
@@ -445,18 +723,8 @@ PACKAGE_RE = re.compile(r'^\s*package\s+[\w.]+\s*;[^\n]*\n?', re.M)
 SYNTAX_RE = re.compile(r'^\s*(?:syntax|edition)\s*=\s*"[^"]*"\s*;[^\n]*\n?', re.M)
 
 
-def ensure_validate_import(text, validate_import):
-    """Add  import "validate.proto";  to a file that uses (validate.rules) or (validate.message)
-    without importing a validate.proto: protoc otherwise stops with
-    'Option "(validate.rules)" unknown'."""
-
-    code = strip_comments(text)
-    if '(validate.rules)' not in code and '(validate.message)' not in code:
-        return text
-    imports = IMPORT_RE.findall(code)
-    if any(name == validate_import or name.endswith('validate.proto') for name in imports):
-        return text
-    line = 'import "%s";\n' % validate_import
+def add_import(text, name):
+    line = 'import "%s";\n' % name
     anchors = list(IMPORT_RE.finditer(text)) or list(PACKAGE_RE.finditer(text)) or list(SYNTAX_RE.finditer(text))
     if anchors:
         end = anchors[-1].end()
@@ -466,66 +734,207 @@ def ensure_validate_import(text, validate_import):
     return line + text
 
 
-def convert_file(src, dst, rel, report, validate_import):
-    with open(src, encoding='utf-8', newline='') as handle:
-        text = handle.read()
-    converted = ensure_validate_import(convert_text(text, rel, report, validate_import), validate_import)
+def ensure_validate_import(text, validate_import):
+    """Add  import "<validate_import>";  to a file that uses (validate.rules) or (validate.message)
+    without importing our validate.proto: protoc otherwise stops with
+    'Option "(validate.rules)" unknown'. buf's own validate.proto does not count."""
+
+    code = strip_comments(text)
+    if '(validate.rules)' not in code and '(validate.message)' not in code:
+        return text
+    ours = os.path.basename(validate_import)
+    for name in IMPORT_RE.findall(code):
+        if is_buf_import(name):
+            continue
+        if name == validate_import or name.endswith('/' + ours) or name == ours or name.endswith('validate.proto'):
+            return text
+    return add_import(text, validate_import)
+
+
+def ensure_nanopb_import(text):
+    code = strip_comments(text)
+    if not re.search(r'\(\s*nanopb(_fileopt|_msgopt|_enumopt)?\s*\)', code):
+        return text
+    if any(name == 'nanopb.proto' or name.endswith('/nanopb.proto') for name in IMPORT_RE.findall(code)):
+        return text
+    return add_import(text, 'nanopb.proto')
+
+
+def read_text(path):
+    try:
+        with open(path, encoding='utf-8', newline='') as handle:
+            return handle.read()
+    except OSError:
+        return ''
+
+
+class Options(object):
+    """How convert_path works; the defaults are append mode with nanopb sizes."""
+
+    def __init__(self, append=True, validate_import='validate.proto', validate_name=DEFAULT_NAME,
+                 sizes=True, validate_proto=None, nanopb_proto=None):
+        self.append = append
+        self.validate_import = validate_import      # replace mode: what replaces buf's import
+        self.validate_name = validate_name          # append mode: our file, next to buf's
+        self.sizes = sizes
+        self.validate_proto = validate_proto or DEFAULT_VALIDATE_PROTO
+        self.nanopb_proto = nanopb_proto or DEFAULT_NANOPB_PROTO
+
+
+def our_import(state, opts):
+    """Append mode: our validate.proto's import, in the folder buf's validate.proto is imported from."""
+
+    if state.buf_imports:
+        return state.buf_imports[0].rsplit('/', 1)[0] + '/' + opts.validate_name
+    return 'buf/validate/' + opts.validate_name
+
+
+def convert_file(src, dst, rel, report, opts, result):
+    text = read_text(src)
+    options_text = read_text(os.path.splitext(src)[0] + '.options')
+    state = FileState(opts.append, Sizes(options_text, text) if opts.sizes else None)
+    converted = convert_text(text, rel, report, opts.validate_import, opts.append, state)
+    validate_import = our_import(state, opts) if opts.append else opts.validate_import
+    converted = ensure_nanopb_import(ensure_validate_import(converted, validate_import))
+    if '(validate.rules)' in converted or '(validate.message)' in converted:
+        result.validate_imports.add(validate_import)
+    if state.sized:
+        result.sized += [(rel,) + s for s in state.sized]
+    if re.search(r'^\s*import\s+"nanopb\.proto"', converted, re.M):
+        result.uses_nanopb = True
     os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
     with open(dst, 'w', encoding='utf-8', newline='') as handle:
         handle.write(converted)
     return converted != text
 
 
-def convert_path(source, out, validate_import='validate.proto'):
-    """Convert a .proto file or a folder. Returns (Report, [converted files], [copied files])."""
-    report, converted, copied = Report(), [], []
+class Result(object):
+    def __init__(self):
+        self.report = Report()
+        self.converted, self.copied, self.written = [], [], []
+        self.sized = []                  # (file, field, option, value)
+        self.validate_imports = set()
+        self.uses_nanopb = False
+
+    def __iter__(self):                  # report, converted, copied = convert_path(...)
+        return iter((self.report, self.converted, self.copied))
+
+
+def copy_support_file(source, out, rel, result, what):
+    target = os.path.join(out, *rel.split('/'))
+    if os.path.exists(target):
+        return
+    if not os.path.isfile(source):
+        raise SystemExit('error: %s not found (%s); give its path with --%s-proto'
+                         % (source, rel, what))
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    shutil.copyfile(source, target)
+    result.written.append(rel)
+
+
+def convert_path(source, out, validate_import='validate.proto', opts=None):
+    """Convert a .proto file or a folder. Returns a Result, which also unpacks as
+    (Report, [converted files], [copied files])."""
+
+    opts = opts or Options(validate_import=validate_import)
+    result = Result()
     if os.path.isfile(source):
         rel = os.path.basename(source)
-        if convert_file(source, os.path.join(out, rel), rel, report, validate_import):
-            converted.append(rel)
-        return report, converted, copied
-    if not os.path.isdir(source):
+        if convert_file(source, os.path.join(out, rel), rel, result.report, opts, result):
+            result.converted.append(rel)
+        source_files = [rel]
+    elif os.path.isdir(source):
+        source_files = []
+        for root, dirs, files in os.walk(source):
+            dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+            for name in sorted(files):
+                path = os.path.join(root, name)
+                rel = os.path.relpath(path, source).replace(os.sep, '/')
+                source_files.append(rel)
+                target = os.path.join(out, *rel.split('/'))
+                if is_vendored(rel):
+                    if opts.append:               # buf's own files stay, unchanged
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        shutil.copyfile(path, target)
+                        result.copied.append(rel)
+                    continue
+                if name.endswith('.proto'):
+                    if convert_file(path, target, rel, result.report, opts, result):
+                        result.converted.append(rel)
+                else:
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    shutil.copyfile(path, target)
+                    result.copied.append(rel)
+    else:
         raise SystemExit('error: %s is neither a file nor a folder' % source)
-    for root, dirs, files in os.walk(source):
-        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
-        for name in sorted(files):
-            path = os.path.join(root, name)
-            rel = os.path.relpath(path, source).replace(os.sep, '/')
-            if is_vendored(rel):
-                continue
-            target = os.path.join(out, *rel.split('/'))
-            if name.endswith('.proto'):
-                if convert_file(path, target, rel, report, validate_import):
-                    converted.append(rel)
-            else:
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                shutil.copyfile(path, target)
-                copied.append(rel)
-    return report, converted, copied
+    if opts.append:
+        # Our validate.proto under its own name, in the folder of buf's validate.proto: the
+        # imports added above name it there ("buf/validate/nanopb_validate.proto").
+        # buf's file may sit deeper (third_party/buf/validate/validate.proto, imported as
+        # "buf/validate/validate.proto" through -I third_party): ours goes next to it.
+        vendored = [r.rsplit('/', 1)[0] for r in source_files
+                    if is_vendored(r) and r.endswith('buf/validate/validate.proto')]
+        for name in sorted(result.validate_imports):
+            folder = name.rsplit('/', 1)[0] if '/' in name else ''
+            beside = [v for v in vendored if v == folder or v.endswith('/' + folder)]
+            folder = beside[0] if beside else folder
+            copy_support_file(opts.validate_proto, out, (folder + '/' if folder else '') + os.path.basename(name),
+                              result, 'validate')
+    if result.uses_nanopb and opts.sizes and not any(r.rsplit('/', 1)[-1] == 'nanopb.proto' for r in source_files):
+        # At the top of the protos folder, where import "nanopb.proto" finds it (nanopb's
+        # generator also brings its own copy, under the same name).
+        copy_support_file(opts.nanopb_proto, out, 'nanopb.proto', result, 'nanopb')
+    return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Convert protovalidate (buf.validate) options to nanopb-validate.')
     parser.add_argument('source', help='a .proto file or a folder of .proto files')
     parser.add_argument('--out', required=True, help='folder for the converted files (never the source folder)')
+    parser.add_argument('--replace', action='store_true',
+                        help='replace the buf.validate options and import instead of adding ours next to them '
+                             '(buf\'s validate.proto is then not copied)')
+    parser.add_argument('--validate-name', default=DEFAULT_NAME, metavar='NAME',
+                        help='file name of our validate.proto next to buf\'s (default: %s)' % DEFAULT_NAME)
     parser.add_argument('--validate-import', default='validate.proto', metavar='PATH',
-                        help='what replaces import "buf/validate/validate.proto" (default: validate.proto; '
-                             'use validate/validate.proto if your folders carry that copy)')
-    parser.add_argument('--strict', action='store_true', help='exit 1 if any rule had to be dropped')
+                        help='--replace only: what replaces import "buf/validate/validate.proto" '
+                             '(default: validate.proto)')
+    parser.add_argument('--no-sizes', action='store_true',
+                        help='do not add (nanopb).max_size / max_count from the buf limits')
+    parser.add_argument('--validate-proto', metavar='FILE', help='our validate.proto to copy (default: the one of '
+                        'this checkout, %s)' % os.path.relpath(DEFAULT_VALIDATE_PROTO))
+    parser.add_argument('--nanopb-proto', metavar='FILE', help='nanopb.proto to copy (default: the one of this '
+                        'checkout, %s)' % os.path.relpath(DEFAULT_NANOPB_PROTO))
+    parser.add_argument('--strict', action='store_true', help='exit 1 if any rule is not enforced by nanopb-validate')
     args = parser.parse_args(argv)
 
     if os.path.abspath(args.out) == os.path.abspath(args.source):
         parser.error('--out must be a different folder than the source: the original is never modified')
-    report, converted, copied = convert_path(args.source, args.out, args.validate_import)
+    if os.path.basename(args.validate_name) != args.validate_name or not args.validate_name.endswith('.proto') or \
+            args.validate_name == 'validate.proto':
+        parser.error('--validate-name must be a file name ending in .proto, other than buf\'s validate.proto')
+    opts = Options(append=not args.replace, validate_import=args.validate_import, validate_name=args.validate_name,
+                   sizes=not args.no_sizes, validate_proto=args.validate_proto, nanopb_proto=args.nanopb_proto)
+    result = convert_path(args.source, args.out, opts=opts)
 
-    print('converted %d file(s) into %s' % (len(converted), args.out))
-    if copied:
-        print('copied unchanged: %d file(s)' % len(copied))
-    if report.items:
-        print('\nnot converted (nanopb-validate cannot enforce these):')
-        for where, rule, why in report.items:
+    print('converted %d file(s) into %s (%s)' % (len(result.converted), args.out,
+                                                 'replaced buf.validate' if args.replace else
+                                                 'buf.validate kept, (validate.rules) added'))
+    if result.copied:
+        print('copied unchanged: %d file(s)' % len(result.copied))
+    for rel in result.written:
+        print('added: %s' % rel)
+    if result.validate_imports:
+        print('imports added where rules are used: %s' % ', '.join(sorted(result.validate_imports)))
+    if result.sized:
+        print('\nnanopb sizes added from the buf limits (static storage):')
+        for rel, field, option, value in result.sized:
+            print('  %-28s %-40s %s = %d' % (rel, field, option, value))
+    if result.report.items:
+        print('\nnot enforced by nanopb-validate%s:' % ('' if args.replace else ' (the buf rules stay in the files)'))
+        for where, rule, why in result.report.items:
             print('  %-28s %-34s %s' % (where, rule, why))
-    return 1 if (args.strict and report.items) else 0
+    return 1 if (args.strict and result.report.items) else 0
 
 
 if __name__ == '__main__':
