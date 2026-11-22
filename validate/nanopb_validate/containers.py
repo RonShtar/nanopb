@@ -267,6 +267,11 @@ class ContainersMixin:
             return False
         if message_info.file_descriptor.name in self._SYSTEM_ANY_EXCLUDED_FILES:
             return False
+        # Set by `packets`: only the messages the protocol filter and dissector accept
+        # (google.protobuf.Timestamp is not one of them).
+        allowed = getattr(self, 'any_allowed', None)
+        if allowed is not None and message_info.full_name not in allowed:
+            return False
         return True
 
     def _resolve_any_type_url(self, type_url: str) -> Optional[MessageInfo]:

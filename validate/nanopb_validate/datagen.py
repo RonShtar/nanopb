@@ -27,7 +27,7 @@ from nanopb_api import invoke_protoc  # noqa: E402
 from nanopb_api import TemporaryDirectory  # noqa: E402
 from schema import (DescriptorRegistry, MessageInfo, NanopbOptionsResolver, OutputFormat, ProtoFieldInfo,  # noqa: E402
                     ValidationConstraint, ValidationRuleNotViolatableError, _OMIT_FIELD, _load_nanopb_pb2,
-                    _load_validate_pb2, read_options_file)
+                    _load_validate_pb2, read_options_file, _INTEGER_TYPES)
 from values import ValuesMixin  # noqa: E402
 from containers import ContainersMixin  # noqa: E402
 from violations import ViolationsMixin  # noqa: E402
@@ -306,6 +306,104 @@ class DataGenerator(ValuesMixin, ContainersMixin, ViolationsMixin, EncodingMixin
                 if (name, constraint.rule_type) not in pairs:
                     pairs.append((name, constraint.rule_type))
         return pairs
+
+    def generate_edge(self, message_name: str, field: str, rule: str,
+                      seed: Optional[int] = None) -> Dict[str, Any]:
+        """Valid data that tests ``rule`` of ``field`` from the passing side: the
+        counterpart of generate_invalid(message, field, rule), so every rule gets one
+        PASSED and one DROPPED packet.
+
+        lte/gte: the bound itself; lt/gt: the closest value inside; min_len/max_len: a
+        value of exactly that length; min_items/max_items: exactly that many entries;
+        items.<rule>: the first entry at that edge. Rules without an edge (in, const,
+        prefix, email, defined_only, required, ...) get a valid value of the field, set.
+        Every other rule of the message still holds. Raises
+        ValidationRuleNotViolatableError when no valid value reaches the edge (e.g. a
+        max_len above what the nanopb storage holds).
+        """
+
+        self._random = random.Random(seed)
+        message_info = self.registry.resolve_message(message_name)
+        stack = (message_info.full_name,)
+        data = self._generate_message(message_info.full_name, stack)
+        if field not in message_info.fields:
+            raise ValueError(f"Field {field} does not exist in message {message_name}")
+        field_info = message_info.fields[field]
+        value = self._edge_value(field_info, rule, stack)
+        self._drop_oneof_siblings(message_info, field_info, data)
+        data[field] = value
+        return data
+
+    _EDGE_RULES = ('lt', 'lte', 'gt', 'gte')
+
+    def _edge_value(self, field_info: ProtoFieldInfo, rule: str, stack: Tuple[str, ...]) -> Any:
+        def unreachable(why: str) -> ValidationRuleNotViolatableError:
+            return ValidationRuleNotViolatableError(
+                "No valid value of field '%s' sits at its %s limit: %s" % (field_info.name, rule, why))
+
+        constraints = field_info.constraint_map()
+        if rule.startswith('items.'):
+            items = list(self._generate_valid_repeated(field_info, stack))
+            edge = self._edge_element(field_info, self._element_constraints(field_info), rule[len('items.'):],
+                                      stack, unreachable)
+            rest = [i for i in items[1:] if not (constraints.get('unique') and self._contains_equivalent([edge], i))]
+            items = [edge] + rest
+            low, _ = self._count_window(field_info, constraints.get('min_items'), constraints.get('max_items'))
+            if len(items) < low:
+                raise unreachable('min_items %d cannot be kept with distinct entries' % low)
+            return items
+        if field_info.is_repeated() and not field_info.is_map() and rule in ('min_items', 'max_items'):
+            low, high = self._count_window(field_info, constraints.get('min_items'), constraints.get('max_items'))
+            count = low if rule == 'min_items' else high
+            if count != constraints[rule]:
+                raise unreachable('nanopb stores at most %d entries (max_count)' % high)
+            items = self._generate_valid_repeated(field_info, stack, count=count)
+            if len(items) != count:
+                raise unreachable('only %d distinct entries could be generated' % len(items))
+            return items
+        if field_info.is_repeated() or field_info.is_map():
+            return self._generate_valid_value(field_info, stack)
+        return self._edge_element(field_info, self._element_constraints(field_info), rule, stack, unreachable)
+
+    def _edge_element(self, field_info: ProtoFieldInfo, constraints: Dict[str, Any], rule: str,
+                      stack: Tuple[str, ...], unreachable) -> Any:
+        type_name = field_info.get_type_name()
+        if rule in self._EDGE_RULES and rule in constraints and type_name in _INTEGER_TYPES:
+            low, high = self._int_range(field_info, constraints)
+            value = low if rule in ('gt', 'gte') else high
+            expected = int(constraints[rule]) + {'gt': 1, 'lt': -1}.get(rule, 0)
+            if value != expected:
+                raise unreachable('the storage or another rule stops at %d' % value)
+        elif rule in self._EDGE_RULES and rule in constraints and type_name in ('float', 'double'):
+            single = type_name == 'float'
+            bound = float(constraints[rule])
+            value = self._to_float32(bound) if single else bound
+            if rule == 'gt' or (rule == 'gte' and value < bound):
+                value = self._float_step(value, True, single)
+            elif rule == 'lt' or (rule == 'lte' and value > bound):
+                value = self._float_step(value, False, single)
+        elif rule in ('min_len', 'max_len') and rule in constraints and type_name in ('string', 'bytes'):
+            length = int(constraints[rule])
+            narrowed = dict(constraints, min_len=length, max_len=length)
+            try:
+                value = (self._generate_valid_string if type_name == 'string'
+                         else self._generate_valid_bytes)(field_info, narrowed)
+            except (ValueError, ValidationRuleNotViolatableError) as exc:
+                raise unreachable(str(exc).splitlines()[0])
+            if self._blob_size(value) != length:
+                raise unreachable('nanopb stores at most %d bytes (max_size)' % self._blob_size(value))
+            if self._blob_violations(field_info, constraints, value, type_name == 'string'):
+                raise unreachable('a value of %d bytes breaks another rule' % length)
+            return value
+        else:
+            value = self._generate_valid_element(field_info, constraints, stack)
+            if value is None:
+                raise unreachable('no valid value')
+            return self._required_value(field_info, value, stack) if rule == 'required' else value
+        broken = self._number_violations(field_info, constraints, value)
+        if broken:
+            raise unreachable('the value %r also breaks %s' % (value, ', '.join(broken)))
+        return value
 
     @staticmethod
     def _split_names(names: Optional[Union[str, List[str]]]) -> List[str]:

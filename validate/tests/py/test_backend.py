@@ -290,6 +290,30 @@ class BackendTests(unittest.TestCase):
                 self.assertEqual('passed' if verdicts[entry['frame']] else 'dropped', entry['expect'],
                                  '%s frame %d %s %s' % (unit, entry['frame'], entry['message'], entry['violate']))
 
+    def test_every_rule_from_both_sides_and_pcap_per_protocol(self):
+        """Each rule with a DROPPED packet also has a PASSED one at its limit, and every
+        protocol's packets/pcap/ holds its packets (all, passed, dropped)."""
+        result, manifest = self.gen_packets(FIXTURES, '--mode', 'protocol')
+        dropped = set((e['message'], e['violate']['field'], e['violate']['rule'])
+                      for e in manifest['packets'] if e['violate'])
+        edges = set((e['message'], e['edge']['field'], e['edge']['rule'])
+                    for e in manifest['packets'] if e.get('edge'))
+        self.assertTrue(dropped)
+        self.assertEqual(dropped - edges, set())
+        for e in manifest['packets']:
+            if e.get('edge'):
+                self.assertEqual(e['expect'], 'passed')
+        with open(result['summary_file']) as handle:
+            self.assertIn('Rule coverage:', handle.read())
+        from traffic import read_capture
+        for unit in set(e['unit'] for e in manifest['packets']):
+            pcap_dir = os.path.join(self.tmp, 'packets', unit, 'packets', 'pcap')
+            mine = [e for e in manifest['packets'] if e['unit'] == unit]
+            for kind in ('all', 'passed', 'dropped'):
+                path = os.path.join(pcap_dir, '%s_%s.pcapng' % (unit, kind))
+                want = [e['hex'] for e in mine if kind in ('all', e['expect'])]
+                self.assertEqual([p.payload.hex() for p in read_capture(path)], want, path)
+
     def test_protocol_packets_files_and_schema(self):
         result, manifest = self.gen_packets(FIXTURES, '--mode', 'protocol')
         self.assertEqual(manifest['protocol_ports'], ['udp:16000=envelope', 'udp:16001=telemetry'])
@@ -297,8 +321,9 @@ class BackendTests(unittest.TestCase):
             port = {'envelope': 16000, 'telemetry': 16001}[entry['unit']]
             # telemetry never uses Any and has one root message: it is sent as it is.
             self.assertEqual((entry['port'], entry['any_wrapped']), (port, entry['unit'] != 'telemetry'))
-            arrays, hexfile = entry['files']
+            arrays, hexfile, unit_pcap = entry['files']
             packets_dir = os.path.join(self.tmp, 'packets', entry['unit'], 'packets')
+            self.assertEqual(unit_pcap, os.path.join(packets_dir, 'pcap', '%s_all.pcapng' % entry['unit']))
             self.assertEqual(arrays, os.path.join(packets_dir, 'c_arrays', 'c_arrays_%s.txt' % entry['expect']))
             self.assertEqual(hexfile, os.path.join(packets_dir, 'raw_data', '%s_%s.txt'
                                                    % (entry['message'].replace('.', '_'), entry['expect'])))

@@ -225,6 +225,7 @@ The output directory contains:
 | `nanopb_test_packets.txt` | the same as a table, plus the rules that couldn't be generated |
 | `<protocol>/packets/c_arrays/c_arrays_passed.txt`, `c_arrays_dropped.txt` | every packet of that verdict as a C array, `static const uint8_t packet_NNN_<Message>_<verdict>[]`, with the broken rule in a comment |
 | `<protocol>/packets/raw_data/<Message>_passed.txt`, `<Message>_dropped.txt` | one hex stream per line, for every message |
+| `<protocol>/packets/pcap/<protocol>_all.pcapng`, `_passed.pcapng`, `_dropped.pcapng` | that protocol's packets as captures: all of them, or only one verdict |
 
 The C arrays are meant for firmware unit tests: feed each array to the
 generated filter and expect `0` (passed) or `-1` (dropped).

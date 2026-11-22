@@ -204,7 +204,10 @@ window has **Show dropped only** (filter `nanopb.validation == "dropped"`),
 - `nanopb_test_packets.json`: per frame the message, port, expected verdict, violated field and rule, seed and bytes;
 - `nanopb_test_packets.txt`: the same as a table, plus what was not generated;
 - `<unit>/packets/c_arrays/c_arrays_passed.txt` and `c_arrays_dropped.txt`: every packet of that verdict as a C array (`static const uint8_t packet_<frame>_<Message>_<verdict>[]`, with a comment naming the broken rule), ready to feed to `<unit>_udp` in a unit test;
-- `<unit>/packets/raw_data/<Message>_passed.txt` and `<Message>_dropped.txt`: one hex stream per line, for every message (empty when it has no packet of that verdict).
+- `<unit>/packets/raw_data/<Message>_passed.txt` and `<Message>_dropped.txt`: one hex stream per line, for every message (empty when it has no packet of that verdict);
+- `<unit>/packets/pcap/<unit>_all.pcapng`, `_passed.pcapng`, `_dropped.pcapng`: that unit's packets as captures (all, or one verdict), in the format of the main capture.
+
+Every rule is tested from both sides: one DROPPED packet that breaks it and one PASSED packet with the field at the limit the rule allows (`lte`/`gte`: the bound itself, `lt`/`gt`: the closest value inside, `min_len`/`max_len`: exactly that length, `min_items`/`max_items`: exactly that many entries; other rules: a valid value of that field). The comment of such a PASSED packet says `field=... rule=... at=limit`. `nanopb_test_packets.txt` ends with the rule coverage and lists any rule that has only one side (e.g. a `max_len` larger than the nanopb storage cannot be broken by a decodable packet).
 
 Each packet also carries its expectation as a packet comment
 (`expect=DROPPED msg=... field=... rule=...`, column `frame.comment`).
