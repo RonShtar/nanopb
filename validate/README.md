@@ -223,13 +223,21 @@ other file stay exactly as they are.
      get `max_pairs`. A size already set inline, in the `.options` file or file-wide is never
      changed.
 
-   And to the project:
-   - `validate_rules.proto`, our rules file: **next to buf's `validate.proto`** when the project
-     has it (`buf/validate/validate_rules.proto`, imported as
-     `"buf/validate/validate_rules.proto"`), otherwise **at the top of the project**
-     (`protos/validate_rules.proto`, imported as `"validate_rules.proto"`);
-   - `nanopb.proto` at the top of the project, when sizes were added and the project has none;
-   - the imports of both in every file that uses them, after its existing imports.
+   And to the project, **next to every buf `validate.proto` it holds** (at the top, inside a
+   protocol folder, several copies, or a copy of package `buf.validate` under another name),
+   otherwise **at the top of the project**:
+   - `validate_rules.proto`, our rules file;
+   - `nanopb.proto`, when sizes were added; a `nanopb.proto` the project already has is used
+     instead (two copies in one compile define everything twice);
+   - the imports of both in every file that uses them, after its existing imports, named the
+     way the file imports buf's: `import "buf/validate/validate.proto";` gets
+     `import "buf/validate/validate_rules.proto";` and `import "buf/validate/nanopb.proto";`
+     (without buf's file in the project: `"validate_rules.proto"`, `"nanopb.proto"`).
+
+   Only an import of our rules file counts as one, by its name or its content: an import of
+   buf's `validate.proto` or of any other `*validate.proto` does not. A project converted by an
+   earlier version imports `buf/validate/nanopb_validate.proto`: that import is switched to
+   `validate_rules.proto` (both define the same rules).
 
    ```proto
    // before
@@ -254,9 +262,9 @@ other file stay exactly as they are.
    tool never generates or counts either one.
 
        protos/
-         nanopb.proto                           added
          buf/validate/validate.proto            buf's, unchanged
          buf/validate/validate_rules.proto      added (ours)
+         buf/validate/nanopb.proto              added
          fleet/fleet.proto                      rules, sizes and imports added
          fleet/fleet.options                    unchanged
 

@@ -212,8 +212,8 @@ class BufAppendTests(unittest.TestCase):
     def test_ours_is_added_next_to_buf(self):
         self.assertTrue(os.path.isfile(os.path.join(self.out, 'buf', 'validate', 'validate_rules.proto')))
         self.assertIn('import "buf/validate/validate_rules.proto";', self.text)
-        self.assertIn('import "nanopb.proto";', self.text)
-        self.assertTrue(os.path.isfile(os.path.join(self.out, 'nanopb.proto')))
+        self.assertIn('import "buf/validate/nanopb.proto";', self.text)
+        self.assertTrue(os.path.isfile(os.path.join(self.out, 'buf', 'validate', 'nanopb.proto')))
         self.assertIn('(buf.validate.field).string = {min_len: 1, max_len: 20}, (validate.rules).string.min_len = 1, '
                       '(validate.rules).string.max_len = 20, (nanopb).max_size = 21]', self.text)
         self.assertIn('(validate.rules).uint32.gte = 1, (validate.rules).uint32.lte = 100]', self.text)
@@ -355,12 +355,12 @@ class BufInPlaceTests(unittest.TestCase):
         self.assertEqual(buf.main([self.project]), 0)
         after = self.snapshot()
         self.assertEqual(sorted(set(after) - set(before)),
-                         ['buf/validate/validate_rules.proto', 'nanopb.proto'])
+                         ['buf/validate/nanopb.proto', 'buf/validate/validate_rules.proto'])
         changed = sorted(rel for rel in before if before[rel] != after[rel])
         self.assertEqual(changed, ['fleet/fleet.proto'])        # buf's file, .options, README untouched
         text = after['fleet/fleet.proto']
         self.assertIn('import "buf/validate/validate.proto";\nimport "buf/validate/validate_rules.proto";\n'
-                      'import "nanopb.proto";\n', text)
+                      'import "buf/validate/nanopb.proto";\n', text)
         # Every original line is still there: only additions.
         for line in APPEND_SOURCE.splitlines():
             if '[' not in line and line.strip():
@@ -406,6 +406,115 @@ class BufInPlaceTests(unittest.TestCase):
             buf.main([self.project, '--replace'])
         with self.assertRaises(SystemExit):
             buf.main([self.project, '--replace', '--out', self.project])
+
+
+IMPORT_FIELD = 'message M { string name = 1 [(buf.validate.field).string.max_len = 20]; }\n'
+
+
+class BufImportAndPlacementTests(unittest.TestCase):
+    """The import of our rules file is always added (only an import of our rules file counts),
+    and the rules file and nanopb.proto go next to every buf validate.proto of the project."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='nanopb_buf_imports_')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def project(self, files):
+        for rel, text in files.items():
+            path = os.path.join(self.tmp, *rel.split('/'))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', newline='') as handle:
+                handle.write(text)
+        return buf.convert_path(self.tmp)
+
+    def imports(self, rel):
+        with open(os.path.join(self.tmp, *rel.split('/')), newline='') as handle:
+            return [name for _, name in buf.imports_of(handle.read())]
+
+    def added(self):
+        return sorted(r for r in buf.list_files(self.tmp) if r.endswith(('validate_rules.proto', 'nanopb.proto')))
+
+    def buf_file(self):
+        with open(os.path.join(PROTOVALIDATE, 'buf', 'validate', 'validate.proto'), newline='') as handle:
+            return handle.read()
+
+    def test_other_validate_imports_do_not_count(self):
+        # Ending in validate.proto is not enough: it must be our rules file.
+        self.project({'buf/validate/validate.proto': self.buf_file(),
+                      'common/validate.proto': 'syntax = "proto3";\npackage common;\nmessage X {}\n',
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   'import "common/validate.proto";\nimport \'my_validate.proto\';\n' + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'),
+                         ['buf/validate/validate.proto', 'common/validate.proto', 'my_validate.proto',
+                          'buf/validate/validate_rules.proto', 'buf/validate/nanopb.proto'])
+
+    def test_single_quoted_imports(self):
+        self.project({'p/p.proto': "syntax = 'proto3';\npackage p;\nimport 'buf/validate/validate.proto';\n"
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'),
+                         ['buf/validate/validate.proto', 'validate_rules.proto', 'nanopb.proto'])
+
+    def test_earlier_name_is_switched(self):
+        # A project converted by the earlier version imports buf/validate/nanopb_validate.proto:
+        # it defines the same rules, so it is replaced, not imported next to ours.
+        result = self.project({'buf/validate/validate.proto': self.buf_file(),
+                               'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                            'import "buf/validate/nanopb_validate.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'),
+                         ['buf/validate/validate.proto', 'buf/validate/validate_rules.proto',
+                          'buf/validate/nanopb.proto'])
+        self.assertEqual(len(result.migrated), 1)
+
+    def test_our_rules_under_another_name_count(self):
+        # Our rules file already imported under any name (found by its content): nothing added.
+        with open(buf.DEFAULT_VALIDATE_PROTO, newline='') as handle:
+            ours = handle.read()
+        self.project({'rules/mine.proto': ours,
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   'import "rules/mine.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'rules/mine.proto', 'nanopb.proto'])
+        self.assertNotIn('validate_rules.proto', ' '.join(self.added()))
+
+    def test_next_to_every_buf_validate(self):
+        self.project({'p/buf/validate/validate.proto': self.buf_file(),
+                      'q/buf/validate/validate.proto': self.buf_file(),
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.added(), ['p/buf/validate/nanopb.proto', 'p/buf/validate/validate_rules.proto',
+                                        'q/buf/validate/nanopb.proto', 'q/buf/validate/validate_rules.proto'])
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'buf/validate/validate_rules.proto',
+                                                     'buf/validate/nanopb.proto'])
+
+    def test_buf_copy_found_by_its_package(self):
+        self.project({'vendor/buf/validate/validate.proto': self.buf_file(),
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.added(), ['vendor/buf/validate/nanopb.proto', 'vendor/buf/validate/validate_rules.proto'])
+
+    def test_existing_nanopb_proto_is_reused(self):
+        with open(buf.DEFAULT_NANOPB_PROTO, newline='') as handle:
+            nanopb = handle.read()
+        self.project({'buf/validate/validate.proto': self.buf_file(), 'nanopb.proto': nanopb,
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.added(), ['buf/validate/validate_rules.proto', 'nanopb.proto'])
+        self.assertEqual(self.imports('p/p.proto')[-1], 'nanopb.proto')
+
+    def test_generated_with_buf_inside_the_protocol(self):
+        self.project({'p/buf/validate/validate.proto': self.buf_file(),
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   + IMPORT_FIELD})
+        out = os.path.join(self.tmp, '..', os.path.basename(self.tmp) + '_gen')
+        try:
+            status, result, err = run_backend('gen-c', '--protos-root', self.tmp, '--out', out, '--no-filter')
+            self.assertEqual(status, 0, err or result)
+            self.assertEqual(sorted(os.listdir(out)), ['p'])
+            with open(os.path.join(out, 'p', 'p.pb.h')) as handle:
+                self.assertIn('char name[21];', handle.read())
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
 
 
 class OptionProtoDetectionTests(unittest.TestCase):
