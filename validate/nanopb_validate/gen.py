@@ -15,7 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 import any_storage  # noqa: E402
 from protos import (BackendError, INCLUDE_RE, OPTION_PROTOS, RUNTIME_FILES, Unit, VALIDATE_RUNTIME_FILES,  # noqa: E402
-                    c_identifier, field_rules, is_option_proto, protocol_name, select_units, unit_entrypoints)
+                    c_identifier, field_rules, is_option_proto, protocol_name, select_units, unit_entrypoints,
+                    unit_root)
 
 
 def generator_env():
@@ -723,6 +724,13 @@ def cmd_gen_c(args):
     try:
         for name in select_units(args):
             unit = Unit(args.protos_root, name, args.include)
+            # One <protocol>_udp/_tcp for every protocol: one without Any and with more than one
+            # root message is sent as google.protobuf.Any (as `packets` and the dissector do), so
+            # it gets the Any protocol filter with its type_url switch. Only a protocol with a
+            # single root message and no Any keeps the filter that decodes that message directly.
+            if validate and not args.no_filter and protocol_name(unit) is None and unit_root(unit) is None \
+                    and unit.messages() and not args.port_map:
+                unit.ensure_any()
             unit.any_value_override = getattr(args, 'any_value_size', None)
             optdir = tempfile.mkdtemp(prefix='nanopb_ws_opt_')
             tempdirs.append(optdir)

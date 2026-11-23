@@ -72,8 +72,10 @@ if (fleet_udp(NULL, data, size) != 0)
 - Use `pb_validate.c/.h` from the same checkout as the generator: generated code stops with
   `#error "pb_validate.h is older than this generated code"` otherwise.
 - One filter per protocol, named after its folder: `<protocol>_udp/_tcp` accepts any message of the
-  protocol (by its `Any` type_url); a protocol without `Any` gets one filter for its
-  root message, under the same name.
+  protocol (a `switch` on its `Any` type_url). A protocol whose `.proto` files never use
+  `Any` gets the same function (its packets are `Any`s, as `packets` and the dissector
+  have them); only one with a single root message and no `Any` gets a filter for that
+  message itself, under the same name.
 - Imports from outside the protocol folder (`google/protobuf/*`, shared protos) get the
   protocol's prefix (`camera_google_protobuf_Any`), so protocols never clash, even
   when generated separately.

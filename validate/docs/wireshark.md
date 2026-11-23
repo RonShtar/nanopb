@@ -281,8 +281,10 @@ Build switches such as `PB_VALIDATE_MAX_PATH_DEPTH` or
 build. For what each one costs, see [Validation performance](validation_performance.md);
 for the rules, see [Validation](validation.md).
 
-Generate C makes one filter per protocol, named after its folder: `<protocol>_udp` / `_tcp`
-(a protocol without `Any` gets one for its root message instead). To choose
+Generate C makes one filter per protocol, named after its folder: `<protocol>_udp` / `_tcp`,
+a `switch` on the packet's `Any` type_url over every message of the protocol (also for a
+protocol whose `.proto` files never use `Any`; only one with a single root message and no
+`Any` gets a filter that decodes that message directly, under the same name). To choose
 the name, pass `gen --filter-name <name>`: `{unit}` stands for the protocol
 folder, so `--filter-name net_{unit}` gives `net_fleet_udp` /
 `net_fleet_tcp`.

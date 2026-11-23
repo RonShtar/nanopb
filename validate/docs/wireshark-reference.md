@@ -132,11 +132,14 @@ Every packet is a `google.protobuf.Any`, and its `type_url` is the opcode: a
 `Any` fields inside it are resolved by their URL the same way, recursively. An
 unknown `type_url`, or `Any` nested deeper than `PB_VALIDATE_FILTER_MAX_ANY_DEPTH`
 (4), is dropped. Oneofs are ordinary fields here, and are not used as opcodes. See
-`--protocol-filter` in `docs/validation.md`. A unit without `Any` gets no
-protocol filter, and the result window says so.
+`--protocol-filter` in `docs/validation.md`. A unit whose `.proto` files never use
+`Any` but that has several root messages gets the same protocol filter: its packets
+are `google.protobuf.Any` too (as `packets` writes them and the dissector reads them),
+and `google/protobuf/any.proto` is compiled with the unit for it.
 
-**Per-message filters.** Only for a protocol that does **not** use `Any` (and so has
-no protocol filter): its root message gets a filter whose packet is that message itself:
+**Root-message filter.** Only for a protocol that does **not** use `Any` and has exactly
+one root message (or when a port map is given): the filter's packet is that message itself,
+under the same name:
 
 ```c
 int <unit>_udp(void *ctx, const uint8_t *packet, size_t packet_size);

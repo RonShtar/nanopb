@@ -393,6 +393,17 @@ class Unit(object):
             raise BackendError('protocol %s: protoc (the protobuf compiler) rejected its .proto files:\n  %s'
                                % (name, '\n  '.join('\n  '.join(e.splitlines()) for e in unique)))
 
+    def ensure_any(self):
+        """Compile google/protobuf/any.proto with the unit's files when none of them imports
+        it, so the protocol gets <unit>_google_protobuf_Any and one <unit>_udp/_tcp that
+        dispatches on the type_url, like a protocol that uses Any. Returns True if added."""
+
+        if any(f.name == 'google/protobuf/any.proto' for f in self.fds.file):
+            return False
+        self.fds = compile_descriptor_set(list(self.names) + ['google/protobuf/any.proto'], self.includes)
+        self.any_added = True
+        return True
+
     def generated_files(self):
         """Descriptor file names to generate, dependencies first."""
 

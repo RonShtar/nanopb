@@ -369,6 +369,34 @@ class BackendTests(unittest.TestCase):
                 _, manifest = self.gen_packets(root, '--mode', 'protocol')
                 self.check_with_protocol_filter(root, manifest)
 
+    def test_protocol_without_any_gets_one_filter(self):
+        """A protocol that never uses Any and has several root messages still gets one
+        <protocol>_udp/_tcp that switches on the Any type_url (its packets are Anys, as in
+        `packets` and the dissector), not one filter per message."""
+
+        root = os.path.join(self.tmp, 'noany')
+        os.makedirs(os.path.join(root, 'robot'))
+        with open(os.path.join(root, 'robot', 'robot.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage robot;\nimport "validate.proto";\n'
+                         'message Move { uint32 speed = 1 [(validate.rules).uint32.lte = 9]; }\n'
+                         'message Stop { uint32 code = 1 [(validate.rules).uint32.gte = 1, '
+                         '(validate.rules).uint32.lte = 3]; }\n')
+        out = os.path.join(self.tmp, 'noany_gen')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out)
+        self.assertEqual(status, 0, err)
+        self.assertEqual(result['units'][0]['protocol_filter'], 'robot_udp')
+        self.assertEqual(result['units'][0]['filters'], [])
+        with open(os.path.join(out, 'robot', 'robot.pb.h')) as handle:
+            header = handle.read()
+        self.assertEqual(re.findall(r'^int (\w+)\(void \*ctx', header, re.M), ['robot_udp', 'robot_tcp'])
+        with open(os.path.join(out, 'robot', 'robot.pb.c')) as handle:
+            self.assertEqual(sorted(re.findall(r'case (ROBOT_HASH_\w+):', handle.read())),
+                             ['ROBOT_HASH_ROBOT_MOVE', 'ROBOT_HASH_ROBOT_STOP'])
+        shutil.rmtree(os.path.join(self.tmp, 'packets'), ignore_errors=True)
+        _, manifest = self.gen_packets(root, '--mode', 'protocol')
+        self.assertTrue(all(e['any_wrapped'] for e in manifest['packets']))
+        self.check_with_protocol_filter(root, manifest)
+
     def check_with_protocol_filter(self, root, manifest):
         by_unit = {}
         for entry in manifest['packets']:
