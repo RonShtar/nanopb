@@ -13,8 +13,8 @@ import sys
 import tempfile
 import unittest
 
-from helpers import (FIXTURES, STRESS_PROTOS, TOOL_DIR, WIRESHARK_INCLUDE, f_bytes, f_varint, option_proto,
-                     unit_build,
+from helpers import (FIXTURES, PKG_DIR, STRESS_PROTOS, TOOL_DIR, WIRESHARK_INCLUDE, f_bytes, f_varint,
+                     option_proto, unit_build,
                      run_backend)
 
 RULES_PROTOS = os.path.join(os.path.dirname(FIXTURES), 'rules')
@@ -395,6 +395,35 @@ class BackendTests(unittest.TestCase):
         shutil.rmtree(os.path.join(self.tmp, 'packets'), ignore_errors=True)
         _, manifest = self.gen_packets(root, '--mode', 'protocol')
         self.assertTrue(all(e['any_wrapped'] for e in manifest['packets']))
+        self.check_with_protocol_filter(root, manifest)
+
+    def test_vendored_any_is_not_defined_twice(self):
+        """A protocol with its own copy of any.proto under another path (vendor/google/protobuf/
+        any.proto) uses that copy: google/protobuf/any.proto is not compiled as well (protoc:
+        "google.protobuf.Any" is already defined), and its Any gets the exact sizes."""
+
+        root = os.path.join(self.tmp, 'vendored')
+        vendor = os.path.join(root, 'robot', 'vendor', 'google', 'protobuf')
+        os.makedirs(vendor)
+        shutil.copyfile(os.path.join(PKG_DIR, 'validate_proto', 'google', 'protobuf', 'any.proto'),
+                        os.path.join(vendor, 'any.proto'))
+        with open(os.path.join(root, 'robot', 'robot.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage robot;\nimport "validate.proto";\n'
+                         'import "vendor/google/protobuf/any.proto";\n'
+                         'message Move { uint32 speed = 1 [(validate.rules).uint32.lte = 9]; }\n'
+                         'message Stop { uint32 code = 1 [(validate.rules).uint32.lte = 3]; }\n'
+                         'message Box { google.protobuf.Any item = 1; }\n')
+        out = os.path.join(self.tmp, 'vendored_gen')
+        status, result, err = run_backend('gen-c', '--protos-root', root, '--out', out, '--with-runtime')
+        self.assertEqual(status, 0, err or result)
+        unit = result['units'][0]
+        self.assertEqual(unit['protocol_filter'], 'robot_udp')
+        self.assertEqual(unit['prefixed_imports'], {'vendor/google/protobuf/any.proto': 'robot_google_protobuf'})
+        with open(os.path.join(out, 'robot', 'robot.pb.h')) as handle:
+            header = handle.read()
+        self.assertRegex(header, r'char type_url\[\d+\];')            # static, sized
+        shutil.rmtree(os.path.join(self.tmp, 'packets'), ignore_errors=True)
+        _, manifest = self.gen_packets(root, '--mode', 'protocol')
         self.check_with_protocol_filter(root, manifest)
 
     def check_with_protocol_filter(self, root, manifest):

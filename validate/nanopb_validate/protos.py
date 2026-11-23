@@ -58,6 +58,17 @@ OPTIONS_TYPES = tuple('.google.protobuf.%sOptions' % kind for kind in (
 EXTEND_OPTIONS_RE = re.compile(r'^\s*extend\s+\.?(?:google\.protobuf\.)?\w*Options\s*\{', re.M)
 
 
+def any_file(fds):
+    """Name of the file of ``fds`` that defines google.protobuf.Any, or None. Found by its
+    package and message, not its name: a copy under another path (vendor/google/protobuf/
+    any.proto) is the same type, and compiling the standard one as well defines it twice."""
+
+    for fdesc in fds.file:
+        if fdesc.package == 'google.protobuf' and any(m.name == 'Any' for m in fdesc.message_type):
+            return fdesc.name
+    return None
+
+
 def is_vendored(name):
     """True for a file of protovalidate (buf/validate/...), in any folder."""
 
@@ -394,11 +405,12 @@ class Unit(object):
                                % (name, '\n  '.join('\n  '.join(e.splitlines()) for e in unique)))
 
     def ensure_any(self):
-        """Compile google/protobuf/any.proto with the unit's files when none of them imports
-        it, so the protocol gets <unit>_google_protobuf_Any and one <unit>_udp/_tcp that
-        dispatches on the type_url, like a protocol that uses Any. Returns True if added."""
+        """Compile google/protobuf/any.proto with the unit's files when none of them defines
+        google.protobuf.Any (under any file name: a vendored copy counts), so the protocol gets
+        <unit>_google_protobuf_Any and one <unit>_udp/_tcp that dispatches on the type_url,
+        like a protocol that uses Any. Returns True if added."""
 
-        if any(f.name == 'google/protobuf/any.proto' for f in self.fds.file):
+        if any_file(self.fds):
             return False
         self.fds = compile_descriptor_set(list(self.names) + ['google/protobuf/any.proto'], self.includes)
         self.any_added = True
@@ -474,7 +486,7 @@ def unit_entrypoints(unit, port_map):
 def protocol_name(unit):
     """C name of the unit's protocol filter, or None if the unit never uses Any."""
 
-    if not any(f.name == 'google/protobuf/any.proto' for f in unit.fds.file):
+    if not any_file(unit.fds):
         return None
     return c_identifier(unit.name)
 

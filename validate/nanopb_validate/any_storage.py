@@ -18,17 +18,26 @@ import subprocess
 import tempfile
 
 import env
-from protos import BackendError, OPTION_PROTOS, field_rules, is_option_proto
+from protos import BackendError, OPTION_PROTOS, any_file, field_rules, is_option_proto
 
-ANY_PROTO = 'google/protobuf/any.proto'
+ANY_PROTO = 'google/protobuf/any.proto'     # the usual name; any_file() finds it under any name
 ANY_TYPE = '.google.protobuf.Any'
 TYPE_URL_PREFIX = 'type.googleapis.com/'
 SIZE_RE = re.compile(r'^#define (\w+)_size\s+(\d+)\s*$', re.M)
 ANY_FIELD_RE = r'^(\S*google\.protobuf\.Any\.%s\s+.*?)\bmax_size\s*:\s*\d+(.*)$'
 
 
+def any_options_parts(unit):
+    """Path parts of the .options file nanopb reads for the unit's google.protobuf.Any:
+    next to the file that defines it (google/protobuf/any.options, or
+    vendor/google/protobuf/any.options for a copy there)."""
+
+    name = any_file(unit.fds) or ANY_PROTO
+    return (os.path.splitext(name)[0] + '.options').split('/')
+
+
 def uses_any(unit):
-    return any(f.name == ANY_PROTO for f in unit.fds.file)
+    return any_file(unit.fds) is not None
 
 
 def own_messages(unit):
@@ -42,8 +51,9 @@ def own_messages(unit):
             found[name] = msg
             walk(name + '.', msg.nested_type)
 
+    any_name = any_file(unit.fds)
     for fdesc in unit.fds.file:
-        if not is_option_proto(fdesc.name) and fdesc.name != ANY_PROTO:
+        if not is_option_proto(fdesc.name) and fdesc.name != any_name:
             walk(fdesc.package + '.' if fdesc.package else '', fdesc.message_type)
     return found
 
@@ -102,8 +112,9 @@ def _measure(unit, any_options_text):
         first = []
         if any_options_text is not None:
             optdir = os.path.join(outdir, '_options')
-            os.makedirs(os.path.join(optdir, 'google', 'protobuf'))
-            with open(os.path.join(optdir, 'google', 'protobuf', 'any.options'), 'w', newline='\n') as handle:
+            target = os.path.join(optdir, *any_options_parts(unit))
+            os.makedirs(os.path.dirname(target))
+            with open(target, 'w', newline='\n') as handle:
                 handle.write(any_options_text)
             first = [optdir]
         opts = ['-I' + p for p in first + includes] + ['-q']
@@ -232,7 +243,7 @@ def project_any_options(unit):
     """Text of the first google/protobuf/any.options on the unit's include path ('' if none)."""
 
     for include in unit.includes:
-        path = os.path.join(include, 'google', 'protobuf', 'any.options')
+        path = os.path.join(include, *any_options_parts(unit))
         if os.path.isfile(path):
             with open(path, encoding='utf-8') as handle:
                 return handle.read()
@@ -246,7 +257,7 @@ def write_exact_options_dir(unit, folder):
     sizes = exact_any_sizes(unit)
     if sizes is None:
         return False
-    target = os.path.join(folder, 'google', 'protobuf', 'any.options')
+    target = os.path.join(folder, *any_options_parts(unit))
     os.makedirs(os.path.dirname(target), exist_ok=True)
     with open(target, 'w', encoding='utf-8', newline='\n') as handle:
         handle.write(exact_options(project_any_options(unit), 'google.protobuf', sizes))

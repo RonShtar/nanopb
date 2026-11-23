@@ -544,7 +544,7 @@ def prefix_imports(unit, optdir):
                 break
         package = ident + ('.' + fdesc.package if fdesc.package else '')
         existing = renamed_option_lines(existing, fdesc.package, package)
-        if fdesc.name == any_storage.ANY_PROTO:
+        if fdesc.name == any_storage.any_file(unit.fds):
             # Exact static storage: type_url for the longest URL, value for the largest
             # message (nanopb's own sizes); any_storage.py.
             existing = any_storage.exact_options(existing, package, any_storage.exact_any_sizes(unit))
