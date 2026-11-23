@@ -3,20 +3,22 @@
 
 One file, Python 3 standard library only, no import from nanopb_validate.
 
-    python buf_to_validate.py PROTOS --out CONVERTED
-    python buf_to_validate.py one.proto --out CONVERTED
+    python buf_to_validate.py PROTOS                       # in place: only additions
+    python buf_to_validate.py PROTOS --backup              # ... keeping <file>.proto.bak first
+    python buf_to_validate.py PROTOS --out CONVERTED       # into another folder
     python buf_to_validate.py PROTOS --out CONVERTED --replace      # the old behaviour
 
-PROTOS is a .proto file or a folder of them. Every .proto file is rewritten into
-CONVERTED with the same relative path (the original is never modified); every
-other file (for example *.options) and buf's own buf/validate/validate.proto are
-copied unchanged.
+PROTOS is a project folder of .proto files (or one .proto file). In place, only the
+.proto files that get something added are rewritten; buf's own buf/validate/*, every
+other file and every original line stay as they are, and a second run changes
+nothing. With --out the result goes to CONVERTED (same relative paths) and the
+project is not touched.
 
 Append mode (the default) keeps the buf setup and adds ours, field by field,
 keeping comments and layout:
 
     import "buf/validate/validate.proto";                 stays
-                                                          + import "buf/validate/nanopb_validate.proto";
+                                                          + import "buf/validate/validate_rules.proto";
     string name = 1 [(buf.validate.field).string.max_len = 20];
         -> string name = 1 [(buf.validate.field).string.max_len = 20,
                             (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
@@ -24,15 +26,15 @@ keeping comments and layout:
 
     const -> const_value;   len -> min_len + max_len (strings and bytes)
 
-Our validate.proto is written next to buf's, under another name
-(buf/validate/nanopb_validate.proto, --validate-name), so both are there and each
-file imports both: buf keeps working, nanopb-validate enforces its part. Fields
+Our validate.proto is added as validate_rules.proto (--validate-name): next to buf's
+validate.proto when the project has it, else at the top of the project; each file
+that uses rules imports both: buf keeps working, nanopb-validate enforces its part. Fields
 that buf limits get nanopb sizes, so they are static storage instead of
 pb_callback_t: string max_len/len/const/in/email/... -> (nanopb).max_size (+1
 for the NUL), bytes -> max_size, repeated max_items / map max_pairs ->
 (nanopb).max_count; never where a size is already set (inline, the .options
-file, or file-wide). Then "nanopb.proto" is imported, and copied to the top of
-CONVERTED if PROTOS has none. --no-sizes turns this off.
+file, or file-wide). Then "nanopb.proto" is imported, and added at the top of the
+project if it has none. --no-sizes turns this off.
 
 Rules nanopb-validate cannot enforce are listed (file, line, rule), never
 converted into something that only looks equivalent: cel, ignore, pattern,
@@ -51,7 +53,7 @@ import re
 import shutil
 import sys
 
-DEFAULT_NAME = 'nanopb_validate.proto'
+DEFAULT_NAME = 'validate_rules.proto'
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_VALIDATE_PROTO = os.path.join(_HERE, '..', 'nanopb_validate', 'validate_proto', 'validate.proto')
 DEFAULT_NANOPB_PROTO = os.path.join(_HERE, '..', '..', 'generator', 'proto', 'nanopb.proto')
@@ -413,6 +415,10 @@ def convert_group(inner, report, where, append=False):
         converted = convert_field(pairs, report, where)
         dropped += [item[1] for item in report.items[before:]]
         added += [option_text(p, s) for p, s in flatten(converted)]
+    if append:
+        # Run again on its own output: what is already there is not added twice.
+        present = set(re.sub(r'\s+', '', strip_comments(p)) for p in split_options(inner))
+        added = [o for o in added if re.sub(r'\s+', '', o) not in present]
     return kept, added, dropped, buf_rules
 
 
@@ -703,12 +709,20 @@ def convert_text(text, name, report, validate_import, append=False, state=None):
             indent = re.match(r'[ \t]*', text[line_start:i]).group(0)
             if append:
                 # The original text stays exactly as it was; ours goes after its last option.
+                # A note already written by an earlier run is not written again.
+                if note and text[j + 1:].lstrip(' \t').startswith(note):
+                    note = ''
                 end = last_code_end(inner)
                 if multiline:
-                    extra = ''.join(',\n%s    %s' % (indent, o) for o in added)
+                    # Each of ours on a line of its own that starts with the comma, after the
+                    # line of the last option: every original line, its comment included, stays.
+                    pos = inner.find('\n', end)
+                    pos = len(inner) if pos < 0 else pos
+                    extra = ''.join('\n%s    , %s' % (indent, o) for o in added)
+                    out.append('[%s%s%s]%s' % (inner[:pos], extra, inner[pos:], (' ' + note) if note else ''))
                 else:
                     extra = ''.join(', %s' % o for o in added)
-                out.append('[%s%s%s]%s' % (inner[:end], extra, inner[end:], (' ' + note) if note else ''))
+                    out.append('[%s%s%s]%s' % (inner[:end], extra, inner[end:], (' ' + note) if note else ''))
             else:
                 options = kept + added
                 if not options:
@@ -806,37 +820,47 @@ def read_text(path):
         return ''
 
 
+
+
 class Options(object):
     """How convert_path works; the defaults are append mode with nanopb sizes."""
 
     def __init__(self, append=True, validate_import='validate.proto', validate_name=DEFAULT_NAME,
-                 sizes=True, validate_proto=None, nanopb_proto=None):
+                 sizes=True, validate_proto=None, nanopb_proto=None, backup=False):
         self.append = append
         self.validate_import = validate_import      # replace mode: what replaces buf's import
-        self.validate_name = validate_name          # append mode: our file, next to buf's
+        self.validate_name = validate_name          # append mode: our rules file
         self.sizes = sizes
         self.validate_proto = validate_proto or DEFAULT_VALIDATE_PROTO
         self.nanopb_proto = nanopb_proto or DEFAULT_NANOPB_PROTO
+        self.backup = backup                        # in place: keep <file>.proto.bak
+        self.vendored_dir = None                    # set by convert_path: buf's validate.proto folder
 
 
 def our_import(state, opts):
-    """Append mode: our validate.proto's import, in the folder buf's validate.proto is imported from."""
+    """Append mode: how a file imports our rules file. Next to buf's validate.proto when the
+    project has it (named like buf's import: "buf/validate/validate_rules.proto"), else at
+    the top of the project ("validate_rules.proto")."""
 
-    if state.buf_imports:
-        return state.buf_imports[0].rsplit('/', 1)[0] + '/' + opts.validate_name
-    return 'buf/validate/' + opts.validate_name
+    if opts.vendored_dir is not None and state.buf_imports:
+        folder = state.buf_imports[0].rsplit('/', 1)[0] if '/' in state.buf_imports[0] else ''
+        return (folder + '/' if folder else '') + opts.validate_name
+    if opts.vendored_dir:
+        return opts.vendored_dir + '/' + opts.validate_name
+    return opts.validate_name
 
 
 def convert_file(src, dst, rel, report, opts, result):
-    """Convert one file; a file it cannot read is copied unchanged and listed in
+    """Convert one file; a file it cannot read is left (copied) unchanged and listed in
     result.failed (the others are still converted)."""
 
     try:
         return _convert_file(src, dst, rel, report, opts, result)
     except Unparsable as exc:
         result.failed.append((rel, str(exc)))
-        os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
-        shutil.copyfile(src, dst)
+        if os.path.abspath(src) != os.path.abspath(dst):
+            os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+            shutil.copyfile(src, dst)
         return False
 
 
@@ -853,6 +877,12 @@ def _convert_file(src, dst, rel, report, opts, result):
         result.sized += [(rel,) + s for s in state.sized]
     if re.search(r'^\s*import\s+"nanopb\.proto"', converted, re.M):
         result.uses_nanopb = True
+    in_place = os.path.abspath(src) == os.path.abspath(dst)
+    if in_place and converted == text:
+        return False                              # nothing to add: the file is not touched
+    if in_place and opts.backup and not os.path.exists(src + '.bak'):
+        shutil.copyfile(src, src + '.bak')
+        result.backups.append(rel + '.bak')
     os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
     with open(dst, 'w', encoding='utf-8', newline='') as handle:
         handle.write(converted)
@@ -862,11 +892,12 @@ def _convert_file(src, dst, rel, report, opts, result):
 class Result(object):
     def __init__(self):
         self.report = Report()
-        self.converted, self.copied, self.written = [], [], []
+        self.converted, self.copied, self.written, self.backups = [], [], [], []
         self.sized = []                  # (file, field, option, value)
-        self.failed = []                 # (file, why): copied unchanged
+        self.failed = []                 # (file, why): left unchanged
         self.validate_imports = set()
         self.uses_nanopb = False
+        self.in_place = False
 
     def __iter__(self):                  # report, converted, copied = convert_path(...)
         return iter((self.report, self.converted, self.copied))
@@ -884,70 +915,87 @@ def copy_support_file(source, out, rel, result, what):
     result.written.append(rel)
 
 
-def convert_path(source, out, validate_import='validate.proto', opts=None):
-    """Convert a .proto file or a folder. Returns a Result, which also unpacks as
-    (Report, [converted files], [copied files])."""
+def list_files(source):
+    """'/'-separated paths of the files below ``source`` (hidden folders skipped)."""
+
+    found = []
+    for root, dirs, files in os.walk(source):
+        dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
+        for name in sorted(files):
+            found.append(os.path.relpath(os.path.join(root, name), source).replace(os.sep, '/'))
+    return found
+
+
+def convert_path(source, out=None, validate_import='validate.proto', opts=None):
+    """Convert a .proto file or a folder, into ``out`` or, without it (or with out ==
+    source), in place: only .proto files that get something added are rewritten, nothing
+    else is touched. Returns a Result, which also unpacks as (Report, [converted files],
+    [copied files])."""
 
     opts = opts or Options(validate_import=validate_import)
     result = Result()
     if os.path.isfile(source):
-        rel = os.path.basename(source)
-        if convert_file(source, os.path.join(out, rel), rel, result.report, opts, result):
-            result.converted.append(rel)
-        source_files = [rel]
+        base = os.path.dirname(os.path.abspath(source))
+        source_files = [os.path.basename(source)]
     elif os.path.isdir(source):
-        source_files = []
-        for root, dirs, files in os.walk(source):
-            dirs[:] = sorted(d for d in dirs if not d.startswith('.'))
-            for name in sorted(files):
-                path = os.path.join(root, name)
-                rel = os.path.relpath(path, source).replace(os.sep, '/')
-                source_files.append(rel)
-                target = os.path.join(out, *rel.split('/'))
-                if is_vendored(rel):
-                    if opts.append:               # buf's own files stay, unchanged
-                        os.makedirs(os.path.dirname(target), exist_ok=True)
-                        shutil.copyfile(path, target)
-                        result.copied.append(rel)
-                    continue
-                if name.endswith('.proto'):
-                    if convert_file(path, target, rel, result.report, opts, result):
-                        result.converted.append(rel)
-                else:
-                    os.makedirs(os.path.dirname(target), exist_ok=True)
-                    shutil.copyfile(path, target)
-                    result.copied.append(rel)
+        base = source
+        source_files = list_files(source)
     else:
         raise SystemExit('error: %s is neither a file nor a folder' % source)
-    if opts.append:
-        # Our validate.proto under its own name, in the folder of buf's validate.proto: the
-        # imports added above name it there ("buf/validate/nanopb_validate.proto").
-        # buf's file may sit deeper (third_party/buf/validate/validate.proto, imported as
-        # "buf/validate/validate.proto" through -I third_party): ours goes next to it.
-        vendored = [r.rsplit('/', 1)[0] for r in source_files
-                    if is_vendored(r) and r.endswith('buf/validate/validate.proto')]
-        for name in sorted(result.validate_imports):
-            folder = name.rsplit('/', 1)[0] if '/' in name else ''
-            beside = [v for v in vendored if v == folder or v.endswith('/' + folder)]
-            folder = beside[0] if beside else folder
-            copy_support_file(opts.validate_proto, out, (folder + '/' if folder else '') + os.path.basename(name),
-                              result, 'validate')
+    out = out or base
+    result.in_place = os.path.abspath(out) == os.path.abspath(base)
+    if result.in_place and not opts.append:
+        raise SystemExit('error: --replace needs --out: it removes the buf.validate options, so it never '
+                         'works in place')
+    # buf's validate.proto in the project (buf/validate/validate.proto, or deeper such as
+    # third_party/buf/validate/validate.proto): our rules file goes next to it.
+    vendored = [r.rsplit('/', 1)[0] for r in source_files
+                if is_vendored(r) and r.endswith('buf/validate/validate.proto')]
+    opts.vendored_dir = vendored[0] if vendored else None
+    ours = opts.validate_name if opts.append else None
+
+    for rel in source_files:
+        path = os.path.join(base, *rel.split('/'))
+        target = os.path.join(out, *rel.split('/'))
+        if is_vendored(rel) or rel.rsplit('/', 1)[-1] in (ours, 'nanopb.proto'):
+            # buf's own files, our rules file and nanopb.proto stay as they are.
+            if not result.in_place and opts.append:
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copyfile(path, target)
+                result.copied.append(rel)
+            continue
+        if rel.endswith('.proto'):
+            if convert_file(path, target, rel, result.report, opts, result):
+                result.converted.append(rel)
+        elif not result.in_place and not rel.endswith('.proto.bak'):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copyfile(path, target)
+            result.copied.append(rel)
+    if opts.append and result.validate_imports:
+        # Our rules file under its own name: next to buf's validate.proto, or at the top.
+        location = (opts.vendored_dir + '/' if opts.vendored_dir else '') + opts.validate_name
+        copy_support_file(opts.validate_proto, out, location, result, 'validate')
     if result.uses_nanopb and opts.sizes and not any(r.rsplit('/', 1)[-1] == 'nanopb.proto' for r in source_files):
-        # At the top of the protos folder, where import "nanopb.proto" finds it (nanopb's
+        # At the top of the project, where import "nanopb.proto" finds it (nanopb's
         # generator also brings its own copy, under the same name).
         copy_support_file(opts.nanopb_proto, out, 'nanopb.proto', result, 'nanopb')
     return result
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description='Convert protovalidate (buf.validate) options to nanopb-validate.')
-    parser.add_argument('source', help='a .proto file or a folder of .proto files')
-    parser.add_argument('--out', required=True, help='folder for the converted files (never the source folder)')
+    parser = argparse.ArgumentParser(
+        description='Add nanopb-validate rules (and nanopb sizes) next to protovalidate (buf.validate) options.')
+    parser.add_argument('source', help='a .proto file or a project folder of .proto files')
+    parser.add_argument('--out', help='write the result into this folder; without it the project is '
+                                      'changed in place (only additions)')
+    parser.add_argument('--backup', action='store_true',
+                        help='in place: keep each changed file as <file>.proto.bak first')
     parser.add_argument('--replace', action='store_true',
                         help='replace the buf.validate options and import instead of adding ours next to them '
-                             '(buf\'s validate.proto is then not copied)')
+                             '(needs --out; buf\'s validate.proto is then not copied)')
     parser.add_argument('--validate-name', default=DEFAULT_NAME, metavar='NAME',
-                        help='file name of our validate.proto next to buf\'s (default: %s)' % DEFAULT_NAME)
+                        help='file name of our rules file (default: %s), next to buf\'s validate.proto '
+                             'or at the top of the project' % DEFAULT_NAME)
     parser.add_argument('--validate-import', default='validate.proto', metavar='PATH',
                         help='--replace only: what replaces import "buf/validate/validate.proto" '
                              '(default: validate.proto)')
@@ -960,22 +1008,27 @@ def main(argv=None):
     parser.add_argument('--strict', action='store_true', help='exit 1 if any rule is not enforced by nanopb-validate')
     args = parser.parse_args(argv)
 
-    if os.path.abspath(args.out) == os.path.abspath(args.source):
-        parser.error('--out must be a different folder than the source: the original is never modified')
+    if args.replace and (not args.out or os.path.abspath(args.out) == os.path.abspath(args.source)):
+        parser.error('--replace needs --out, a folder other than the source: it removes the buf.validate options')
     if os.path.basename(args.validate_name) != args.validate_name or not args.validate_name.endswith('.proto') or \
-            args.validate_name == 'validate.proto':
-        parser.error('--validate-name must be a file name ending in .proto, other than buf\'s validate.proto')
+            args.validate_name in ('validate.proto', 'nanopb.proto'):
+        parser.error('--validate-name must be a file name ending in .proto, other than validate.proto and '
+                     'nanopb.proto')
     opts = Options(append=not args.replace, validate_import=args.validate_import, validate_name=args.validate_name,
-                   sizes=not args.no_sizes, validate_proto=args.validate_proto, nanopb_proto=args.nanopb_proto)
+                   sizes=not args.no_sizes, validate_proto=args.validate_proto, nanopb_proto=args.nanopb_proto,
+                   backup=args.backup)
     result = convert_path(args.source, args.out, opts=opts)
 
-    print('converted %d file(s) into %s (%s)' % (len(result.converted), args.out,
-                                                 'replaced buf.validate' if args.replace else
-                                                 'buf.validate kept, (validate.rules) added'))
+    where = 'in place' if result.in_place else 'into ' + args.out
+    print('%d file(s) changed %s (%s)' % (len(result.converted), where,
+                                          'replaced buf.validate' if args.replace else
+                                          'buf.validate kept, (validate.rules) added'))
     if result.copied:
         print('copied unchanged: %d file(s)' % len(result.copied))
     for rel in result.written:
         print('added: %s' % rel)
+    for rel in result.backups:
+        print('backup: %s' % rel)
     if result.validate_imports:
         print('imports added where rules are used: %s' % ', '.join(sorted(result.validate_imports)))
     if result.sized:
@@ -987,7 +1040,7 @@ def main(argv=None):
         for where, rule, why in result.report.items:
             print('  %-28s %-34s %s' % (where, rule, why))
     if result.failed:
-        print('\nNOT converted, copied unchanged (please send this file and message):')
+        print('\nNOT converted, left unchanged (please send this file and message):')
         for rel, why in result.failed:
             print('  %-28s %s' % (rel, why))
         return 1

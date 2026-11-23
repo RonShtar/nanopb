@@ -133,9 +133,9 @@ class BufReplaceTests(unittest.TestCase):
         self.assertIn('150', c)          # age lte
         self.assertIn('18', c)           # age gte
 
-    def test_in_place_conversion_is_refused(self):
+    def test_in_place_replace_is_refused(self):
         with self.assertRaises(SystemExit):
-            buf.main([self.src, '--out', self.src])
+            buf.main([self.src, '--out', self.src, '--replace'])
 
     def test_strict_exit_status(self):
         out = os.path.join(self.tmp, 'strict')
@@ -210,16 +210,18 @@ class BufAppendTests(unittest.TestCase):
                 self.assertIn(line.split('[', 1)[-1].split('];')[0].split(' //')[0].strip(), self.text)
 
     def test_ours_is_added_next_to_buf(self):
-        self.assertTrue(os.path.isfile(os.path.join(self.out, 'buf', 'validate', 'nanopb_validate.proto')))
-        self.assertIn('import "buf/validate/nanopb_validate.proto";', self.text)
+        self.assertTrue(os.path.isfile(os.path.join(self.out, 'buf', 'validate', 'validate_rules.proto')))
+        self.assertIn('import "buf/validate/validate_rules.proto";', self.text)
         self.assertIn('import "nanopb.proto";', self.text)
         self.assertTrue(os.path.isfile(os.path.join(self.out, 'nanopb.proto')))
         self.assertIn('(buf.validate.field).string = {min_len: 1, max_len: 20}, (validate.rules).string.min_len = 1, '
                       '(validate.rules).string.max_len = 20, (nanopb).max_size = 21]', self.text)
         self.assertIn('(validate.rules).uint32.gte = 1, (validate.rules).uint32.lte = 100]', self.text)
-        # multi-line group: ours after the last option, the trailing comment untouched
-        self.assertIn('(buf.validate.field).repeated.max_items = 8,\n      (validate.rules).repeated.max_items = 8,\n'
-                      '      (nanopb).max_count = 8 // at most eight\n  ];', self.text)
+        # multi-line group: the original line with its comment stays exactly; ours follow,
+        # each on its own line starting with the comma
+        self.assertIn('    (buf.validate.field).repeated.max_items = 8 // at most eight\n'
+                      '      , (validate.rules).repeated.max_items = 8\n'
+                      '      , (nanopb).max_count = 8\n  ];', self.text)
 
     def test_nanopb_sizes(self):
         sized = dict(((field, option), value) for _, field, option, value in self.result.sized)
@@ -318,6 +320,92 @@ class BufCommentTests(unittest.TestCase):
             self.assertEqual(handle.read(), broken)
         with open(os.path.join(out, 'fleet', 'fleet.proto'), newline='') as handle:
             self.assertIn('(validate.rules).string.max_len = 20', handle.read())   # the others still converted
+
+
+class BufInPlaceTests(unittest.TestCase):
+    """Without --out the project itself gets the additions: buf's files and everything else
+    stay byte for byte, validate_rules.proto goes next to buf's validate.proto (or to the top
+    of the project), a second run changes nothing."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix='nanopb_buf_inplace_')
+        self.project = os.path.join(self.tmp, 'protos')
+        shutil.copytree(PROTOVALIDATE, self.project)
+        os.makedirs(os.path.join(self.project, 'fleet'))
+        self.write('fleet/fleet.proto', APPEND_SOURCE)
+        self.write('fleet/fleet.options', 'fleet.Move.sized max_size:40\n')
+        self.write('fleet/README.txt', 'not a proto\n')
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def write(self, rel, text):
+        with open(os.path.join(self.project, *rel.split('/')), 'w', newline='') as handle:
+            handle.write(text)
+
+    def read(self, rel):
+        with open(os.path.join(self.project, *rel.split('/')), newline='') as handle:
+            return handle.read()
+
+    def snapshot(self):
+        return dict((rel, self.read(rel)) for rel in buf.list_files(self.project))
+
+    def test_in_place_only_adds(self):
+        before = self.snapshot()
+        self.assertEqual(buf.main([self.project]), 0)
+        after = self.snapshot()
+        self.assertEqual(sorted(set(after) - set(before)),
+                         ['buf/validate/validate_rules.proto', 'nanopb.proto'])
+        changed = sorted(rel for rel in before if before[rel] != after[rel])
+        self.assertEqual(changed, ['fleet/fleet.proto'])        # buf's file, .options, README untouched
+        text = after['fleet/fleet.proto']
+        self.assertIn('import "buf/validate/validate.proto";\nimport "buf/validate/validate_rules.proto";\n'
+                      'import "nanopb.proto";\n', text)
+        # Every original line is still there: only additions.
+        for line in APPEND_SOURCE.splitlines():
+            if '[' not in line and line.strip():
+                self.assertIn(line, text)
+
+    def test_second_run_changes_nothing(self):
+        self.assertEqual(buf.main([self.project]), 0)
+        first = self.snapshot()
+        self.assertEqual(buf.main([self.project]), 0)
+        self.assertEqual(self.snapshot(), first)
+        self.assertEqual(first['fleet/fleet.proto'].count('(validate.rules).string.max_len = 20'), 1)
+
+    def test_backup(self):
+        original = self.read('fleet/fleet.proto')
+        self.assertEqual(buf.main([self.project, '--backup']), 0)
+        self.assertEqual(self.read('fleet/fleet.proto.bak'), original)
+        self.assertEqual(buf.main([self.project, '--backup']), 0)          # the .bak is the original
+        self.assertEqual(self.read('fleet/fleet.proto.bak'), original)
+
+    def test_without_buf_validate_in_the_project(self):
+        shutil.rmtree(os.path.join(self.project, 'buf'))
+        self.assertEqual(buf.main([self.project]), 0)
+        self.assertTrue(os.path.isfile(os.path.join(self.project, 'validate_rules.proto')))
+        self.assertIn('import "validate_rules.proto";', self.read('fleet/fleet.proto'))
+        # buf's file comes from outside the project (-I), as in a buf setup.
+        out = os.path.join(self.tmp, 'gen')
+        status, result, err = run_backend('gen-c', '--protos-root', self.project, '--out', out, '--no-filter',
+                                          '-I', PROTOVALIDATE)
+        self.assertEqual(status, 0, err or result)
+        self.assertEqual(sorted(os.listdir(out)), ['fleet'])
+
+    def test_generated_from_the_project(self):
+        self.assertEqual(buf.main([self.project]), 0)
+        out = os.path.join(self.tmp, 'gen')
+        status, result, err = run_backend('gen-c', '--protos-root', self.project, '--out', out, '--no-filter')
+        self.assertEqual(status, 0, err or result)
+        self.assertEqual(sorted(os.listdir(out)), ['fleet'])
+        with open(os.path.join(out, 'fleet', 'fleet.pb.h')) as handle:
+            self.assertIn('char name[21];', handle.read())
+
+    def test_replace_is_refused_in_place(self):
+        with self.assertRaises(SystemExit):
+            buf.main([self.project, '--replace'])
+        with self.assertRaises(SystemExit):
+            buf.main([self.project, '--replace', '--out', self.project])
 
 
 class OptionProtoDetectionTests(unittest.TestCase):

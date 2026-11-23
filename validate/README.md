@@ -196,34 +196,40 @@ validate/
 
 ## Preparing a protos directory from protovalidate (buf.validate) protos
 
-`tools/buf_to_validate.py` (one file, standard library only) adds our rules next to
-buf's, so the same `.proto` files work for buf and for this tool. The input is never
-changed.
+`tools/buf_to_validate.py` (one file, standard library only) adds our rules to a buf
+project **in place**: it only adds, so the same `.proto` files keep working for buf and work
+for this tool. buf's `validate.proto`, every buf option and import, every comment and every
+other file stay exactly as they are.
 
-1. **Start from a protos directory buf can build.** One folder per protocol, plus
-   protovalidate's `buf/validate/validate.proto` where your imports find it (usually at
-   the top: `protos/buf/validate/validate.proto`, imported as `"buf/validate/validate.proto"`).
-   It may also be missing; it is then imported from your buf setup.
+1. **Start from the project buf builds.** One folder per protocol; protovalidate's
+   `buf/validate/validate.proto` may be in the project (usually
+   `protos/buf/validate/validate.proto`, imported as `"buf/validate/validate.proto"`) or come
+   from your buf setup.
 
        protos/
-         buf/validate/validate.proto      protovalidate (vendored)
+         buf/validate/validate.proto      protovalidate (optional here)
          fleet/fleet.proto                import "buf/validate/validate.proto";
          fleet/fleet.options              optional nanopb sizes
 
-2. **Convert into a new folder:**
+2. **Add our rules:**
 
-       python validate/tools/buf_to_validate.py protos --out protos_nanopb
+       python validate/tools/buf_to_validate.py protos
 
-   For every field with `(buf.validate.field)` rules it:
-   - keeps the buf options word for word and adds the `(validate.rules)` equivalents;
-   - adds `(nanopb).max_size` / `(nanopb).max_count` from the buf limits, so the field is
-     static storage instead of `pb_callback_t`. Strings get `max_len + 1` (also from `len`,
-     `const`, `in`, `email`, `ipv4`, ...), bytes get `max_len`, repeated fields get
-     `max_items` and maps get `max_pairs`. A size already set inline, in the `.options` file
-     or file-wide is never changed;
-   - adds `import "buf/validate/nanopb_validate.proto";` (our `validate.proto` under another
-     name, written next to buf's) and, when it added sizes, `import "nanopb.proto";` (copied to
-     the top of `protos_nanopb/` if your protos have none).
+   For every field with `(buf.validate.field)` rules it adds, after the buf options:
+   - the `(validate.rules)` equivalents;
+   - `(nanopb).max_size` / `(nanopb).max_count` from the buf limits, so the field is static
+     storage instead of `pb_callback_t`. Strings get `max_len + 1` (also from `len`, `const`,
+     `in`, `email`, `ipv4`, ...), bytes get `max_len`, repeated fields get `max_items` and maps
+     get `max_pairs`. A size already set inline, in the `.options` file or file-wide is never
+     changed.
+
+   And to the project:
+   - `validate_rules.proto`, our rules file: **next to buf's `validate.proto`** when the project
+     has it (`buf/validate/validate_rules.proto`, imported as
+     `"buf/validate/validate_rules.proto"`), otherwise **at the top of the project**
+     (`protos/validate_rules.proto`, imported as `"validate_rules.proto"`);
+   - `nanopb.proto` at the top of the project, when sizes were added and the project has none;
+   - the imports of both in every file that uses them, after its existing imports.
 
    ```proto
    // before
@@ -233,32 +239,51 @@ changed.
                     (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
    ```
 
-   The result looks like this. Both `validate.proto` files sit side by side: buf keeps working,
-   and this tool never generates or counts either one.
+   In an option list over several lines every original line stays as it was (comments
+   included); each added option is a line of its own that starts with the comma:
 
-       protos_nanopb/
-         nanopb.proto
+   ```proto
+   repeated uint32 waypoints = 3 [
+     (buf.validate.field).repeated.max_items = 8 // at most eight
+       , (validate.rules).repeated.max_items = 8
+       , (nanopb).max_count = 8
+   ];
+   ```
+
+   The project afterwards. Both rules files sit side by side: buf keeps working, and this
+   tool never generates or counts either one.
+
+       protos/
+         nanopb.proto                           added
          buf/validate/validate.proto            buf's, unchanged
-         buf/validate/nanopb_validate.proto     ours
-         fleet/fleet.proto, fleet/fleet.options
+         buf/validate/validate_rules.proto      added (ours)
+         fleet/fleet.proto                      rules, sizes and imports added
+         fleet/fleet.options                    unchanged
 
-3. **Read the report.** It lists the sizes it added, and every buf rule nanopb-validate
-   cannot enforce (CEL, `pattern`, `uri`, message-level and oneof rules, ...). Those stay in
-   the file for buf; nothing is converted into something that only looks equivalent.
-   `--strict` exits 1 if there are any.
+   Running it again changes nothing. `--backup` keeps each file it changes as
+   `<file>.proto.bak` first; `--out DIR` writes the result into another folder instead
+   (the project untouched).
 
-4. **Check and generate** from the converted folder:
+3. **Read the report.** It lists the files it changed or added, the sizes it added, and
+   every buf rule nanopb-validate cannot enforce (CEL, `pattern`, `uri`, message-level and
+   oneof rules, ...). Those stay in the file for buf; nothing is converted into something
+   that only looks equivalent. `--strict` exits 1 if there are any.
 
-       python -m nanopb_validate check protos_nanopb
-       python -m nanopb_validate gen   protos_nanopb --out out --optimize O2
+4. **Check and generate** from the project:
 
+       python -m nanopb_validate check protos
+       python -m nanopb_validate gen   protos --out out --optimize O2
+
+   If buf's `validate.proto` is not in the project, give its folder (the one that holds
+   `buf/validate/validate.proto`) with `-I`: `check protos -I path/to/buf_deps`.
    `check` names every field still without a size; give those a `max_size` / `max_count` in
    the protocol's `.options` file.
 
-Options: `--validate-name rules.proto` (our file's name, default `nanopb_validate.proto`),
-`--no-sizes`, `--replace` (the old behaviour: buf options and import replaced by ours, buf's
-`validate.proto` not copied). Note that buf's `string.max_len` counts characters while ours
-counts bytes, so non-ASCII text hits our limit first.
+Options: `--validate-name rules.proto` (our file's name, default `validate_rules.proto`),
+`--no-sizes`, `--backup`, `--out DIR`, `--replace` (the old behaviour, only with `--out`:
+buf options and import replaced by ours, buf's `validate.proto` not copied). Note that buf's
+`string.max_len` counts characters while ours counts bytes, so non-ASCII text hits our limit
+first.
 
 Files that only define options are never a protocol and never generated, whatever their
 name: `validate.proto`, `nanopb.proto`, everything under `buf/validate/`, and any file that
