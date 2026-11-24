@@ -715,13 +715,22 @@ def convert_text(text, name, report, validate_import, append=False, state=None):
                 if note and text[j + 1:].lstrip(' \t').startswith(note):
                     note = ''
                 end = last_code_end(inner)
-                if multiline:
-                    # Each of ours on a line of its own that starts with the comma, after the
-                    # line of the last option: every original line, its comment included, stays.
+                if multiline and added:
+                    # A comma right after the last option (before its comment, which stays on
+                    # that line), then each of ours on a line of its own, indented like it.
                     pos = inner.find('\n', end)
                     pos = len(inner) if pos < 0 else pos
-                    extra = ''.join('\n%s    , %s' % (indent, o) for o in added)
-                    out.append('[%s%s%s]%s' % (inner[:pos], extra, inner[pos:], (' ' + note) if note else ''))
+                    option_line = inner.rfind('\n', 0, end) + 1
+                    if option_line == 0:            # the last option is on the line of the '['
+                        option_indent = indent + '    '
+                    else:
+                        option_indent = re.match(r'[ \t]*', inner[option_line:]).group(0)
+                    lines = ''.join('\n%s%s%s' % (option_indent, o, ',' if k < len(added) - 1 else '')
+                                    for k, o in enumerate(added))
+                    out.append('[%s,%s%s%s]%s' % (inner[:end], inner[end:pos], lines, inner[pos:],
+                                                  (' ' + note) if note else ''))
+                elif multiline:
+                    out.append('[%s]%s' % (inner, (' ' + note) if note else ''))
                 else:
                     extra = ''.join(', %s' % o for o in added)
                     out.append('[%s%s%s]%s' % (inner[:end], extra, inner[end:], (' ' + note) if note else ''))
@@ -843,6 +852,61 @@ def ensure_validate_import(text, validate_import, roots=(), changes=None):
     return add_import(text, validate_import)
 
 
+BUF_OPTION_RE = re.compile(r'\(\s*\.?buf\.validate\.')
+OUR_OPTION_RE = re.compile(r'\(\s*\.?validate\.(?:rules|message|validate)\s*\)')
+NANOPB_OPTION_RE = re.compile(r'\(\s*\.?nanopb(?:_fileopt|_msgopt|_enumopt)?\s*\)')
+_BUF_PACKAGE_RE = re.compile(r'^\s*package\s+buf\.validate\s*;', re.M)
+
+
+def option_import_kind(name, validate_import, roots):
+    """'buf', 'ours' or 'nanopb' for an import of one of the option files this script
+    handles (buf's validate.proto under any name, our rules file under any name,
+    nanopb.proto), else None: any other import is never added or removed."""
+
+    if name.rsplit('/', 1)[-1] == 'nanopb.proto':
+        return 'nanopb'
+    kind = import_kind(name, validate_import, roots)
+    if kind in ('ours', 'old'):
+        return 'ours'
+    if kind == 'buf':
+        return 'buf'
+    for root in roots:
+        path = os.path.join(root, *name.split('/'))
+        if os.path.isfile(path):
+            return 'buf' if _BUF_PACKAGE_RE.search(code_mask(read_text(path))) else None
+    return None
+
+
+def ensure_buf_import(text, buf_import, roots):
+    """Add  import "<buf_import>";  to a file that uses (buf.validate...) options without
+    importing buf's validate.proto."""
+
+    if not BUF_OPTION_RE.search(strip_comments(text)):
+        return text
+    if any(option_import_kind(n, '', roots) == 'buf' for _, n in imports_of(text)):
+        return text
+    return add_import(text, buf_import)
+
+
+def remove_unused_imports(text, validate_import, roots, removed=None):
+    """Remove the imports of buf's validate.proto, our rules file and nanopb.proto from a file
+    that uses none of their options (protoc warns "Import ... is unused"). Every other import,
+    and an `import public`, stays."""
+
+    code = strip_comments(text)
+    used = {'buf': BUF_OPTION_RE.search(code), 'ours': OUR_OPTION_RE.search(code),
+            'nanopb': NANOPB_OPTION_RE.search(code)}
+    for match, name in reversed(imports_of(text)):
+        if re.match(r'\s*import\s+public\b', match.group(0)):
+            continue
+        kind = option_import_kind(name, validate_import, roots)
+        if kind and not used[kind]:
+            text = text[:match.start()] + text[match.end():]
+            if removed is not None:
+                removed.append(name)
+    return text
+
+
 def ensure_nanopb_import(text, name='nanopb.proto'):
     """Add  import "<name>";  to a file that uses (nanopb) options without importing a
     nanopb.proto (any one it already imports is kept)."""
@@ -881,6 +945,7 @@ class Options(object):
         self.buf_dirs = []                          # folders holding buf's validate.proto ('' = top)
         self.nanopb_files = []                      # nanopb.proto files the project already has
         self.roots = []                             # folders imports may be relative to
+        self.buf_files = []                         # buf validate.proto files of the project
 
 
 BUF_PACKAGE_RE = re.compile(r'^\s*package\s+buf\.validate\s*;', re.M)
@@ -913,6 +978,16 @@ def support_import(state, opts, filename):
     else:
         folder = opts.buf_dirs[0]
     return (folder + '/' if folder else '') + filename
+
+
+def buf_import_name(opts):
+    """How a file that misses it imports buf's validate.proto: "buf/validate/validate.proto"
+    (the protovalidate name), or the project path of a copy stored under another name."""
+
+    for rel in opts.buf_files:
+        if rel.endswith('buf/validate/validate.proto'):
+            return 'buf/validate/validate.proto'
+    return opts.buf_files[0] if opts.buf_files else 'buf/validate/validate.proto'
 
 
 def nanopb_import(state, opts):
@@ -949,13 +1024,24 @@ def _convert_file(src, dst, rel, report, opts, result):
     options_text = read_text(os.path.splitext(src)[0] + '.options')
     state = FileState(opts.append, Sizes(options_text, text) if opts.sizes else None)
     converted = convert_text(text, rel, report, opts.validate_import, opts.append, state)
-    validate_import = support_import(state, opts, opts.validate_name) if opts.append else opts.validate_import
     roots = [os.path.dirname(os.path.abspath(src))] + opts.roots
+    if opts.append:
+        # buf options without buf's import: add it (our imports are named after it).
+        before = converted
+        converted = ensure_buf_import(converted, buf_import_name(opts), roots)
+        if converted != before:
+            result.imports_added.append('%s: %s' % (rel, buf_import_name(opts)))
+            if not state.buf_imports:
+                state.buf_imports.append(buf_import_name(opts))
+    validate_import = support_import(state, opts, opts.validate_name) if opts.append else opts.validate_import
     changes = []
     converted = ensure_validate_import(converted, validate_import, roots, changes)
     result.migrated += ['%s: %s' % (rel, c) for c in changes]
     nanopb_name = nanopb_import(state, opts) if opts.append else 'nanopb.proto'
     converted = ensure_nanopb_import(converted, nanopb_name)
+    removed = []
+    converted = remove_unused_imports(converted, validate_import, roots, removed)
+    result.imports_removed += ['%s: %s' % (rel, name) for name in removed]
     names = [name for _, name in imports_of(converted)]
     if validate_import in names:
         result.validate_imports.add(validate_import)
@@ -981,6 +1067,8 @@ class Result(object):
         self.converted, self.copied, self.written, self.backups = [], [], [], []
         self.sized = []                  # (file, field, option, value)
         self.failed = []                 # (file, why): left unchanged
+        self.imports_added = []          # "file: name" of buf imports added
+        self.imports_removed = []        # "file: name" of unused option imports removed
         self.migrated = []               # "file: import "old" -> "new""
         self.validate_imports = set()    # how files import our rules file
         self.nanopb_imports = set()      # how files import nanopb.proto
@@ -1057,6 +1145,7 @@ def convert_path(source, out=None, validate_import='validate.proto', opts=None):
     # folder): our rules file and nanopb.proto go next to each one.
     buf_files = [r for r in source_files if is_buf_validate(base, r)]
     opts.buf_dirs = sorted(set(folder_of(r) for r in buf_files if r.endswith('.proto')))
+    opts.buf_files = [r for r in buf_files if r.endswith('.proto')]
     ours = opts.validate_name if opts.append else None
     opts.nanopb_files = [r for r in source_files if r.rsplit('/', 1)[-1] == 'nanopb.proto']
     roots = set([os.path.abspath(base)])
@@ -1149,6 +1238,10 @@ def main(argv=None):
         print('nanopb.proto imported as: %s' % ', '.join(sorted(result.nanopb_imports)))
     for change in result.migrated:
         print('updated (earlier version\'s name of our rules file): %s' % change)
+    for change in result.imports_added:
+        print('missing import of buf\'s validate.proto added: %s' % change)
+    for change in result.imports_removed:
+        print('unused import removed: %s' % change)
     if result.sized:
         print('\nnanopb sizes added from the buf limits (static storage):')
         for rel, field, option, value in result.sized:

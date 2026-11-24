@@ -217,11 +217,12 @@ class BufAppendTests(unittest.TestCase):
         self.assertIn('(buf.validate.field).string = {min_len: 1, max_len: 20}, (validate.rules).string.min_len = 1, '
                       '(validate.rules).string.max_len = 20, (nanopb).max_size = 21]', self.text)
         self.assertIn('(validate.rules).uint32.gte = 1, (validate.rules).uint32.lte = 100]', self.text)
-        # multi-line group: the original line with its comment stays exactly; ours follow,
-        # each on its own line starting with the comma
-        self.assertIn('    (buf.validate.field).repeated.max_items = 8 // at most eight\n'
-                      '      , (validate.rules).repeated.max_items = 8\n'
-                      '      , (nanopb).max_count = 8\n  ];', self.text)
+        # multi-line group: a comma right after the last option (its comment stays on its line),
+        # then each of ours on its own line, indented like it, no space before a comma
+        self.assertIn('    (buf.validate.field).repeated.max_items = 8, // at most eight\n'
+                      '    (validate.rules).repeated.max_items = 8,\n'
+                      '    (nanopb).max_count = 8\n  ];', self.text)
+        self.assertNotRegex(self.text, r'\n\s*,')
 
     def test_nanopb_sizes(self):
         sized = dict(((field, option), value) for _, field, option, value in self.result.sized)
@@ -361,10 +362,13 @@ class BufInPlaceTests(unittest.TestCase):
         text = after['fleet/fleet.proto']
         self.assertIn('import "buf/validate/validate.proto";\nimport "buf/validate/validate_rules.proto";\n'
                       'import "buf/validate/nanopb.proto";\n', text)
-        # Every original line is still there: only additions.
+        # Every original line is still there: only additions (the last option of a multi-line
+        # list gets the comma that separates it from ours, before its comment).
         for line in APPEND_SOURCE.splitlines():
             if '[' not in line and line.strip():
-                self.assertIn(line, text)
+                code, _, comment = line.partition(' //')
+                with_comma = code + ',' + (' //' + comment if comment else '')
+                self.assertTrue(line in text or with_comma in text, line)
 
     def test_second_run_changes_nothing(self):
         self.assertEqual(buf.main([self.project]), 0)
@@ -501,6 +505,40 @@ class BufImportAndPlacementTests(unittest.TestCase):
                                    + IMPORT_FIELD})
         self.assertEqual(self.added(), ['buf/validate/validate_rules.proto', 'nanopb.proto'])
         self.assertEqual(self.imports('p/p.proto')[-1], 'nanopb.proto')
+
+    def test_missing_buf_import_is_added(self):
+        result = self.project({'buf/validate/validate.proto': self.buf_file(),
+                               'p/p.proto': 'syntax = "proto3";\npackage p;\n' + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto',
+                                                     'buf/validate/validate_rules.proto',
+                                                     'buf/validate/nanopb.proto'])
+        self.assertEqual(result.imports_added, ['p/p.proto: buf/validate/validate.proto'])
+
+    def test_unused_option_imports_are_removed(self):
+        result = self.project({
+            'buf/validate/validate.proto': self.buf_file(),
+            'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                         'import "buf/validate/validate_rules.proto";\nimport "nanopb.proto";\n'
+                         'import "google/protobuf/timestamp.proto";\nimport public "nanopb.proto";\n'
+                         'message O { google.protobuf.Timestamp t = 1; }\n',
+            'p/q.proto': 'syntax = "proto3";\npackage p;\nimport "nanopb.proto";\n'
+                         'message Q { uint32 x = 1 [(validate.rules).uint32.lte = 3]; }\n'})
+        # Only the option files' imports go; other imports and `import public` stay.
+        self.assertEqual(self.imports('p/p.proto'), ['google/protobuf/timestamp.proto', 'nanopb.proto'])
+        self.assertEqual(self.imports('p/q.proto'), ['buf/validate/validate_rules.proto'])
+        self.assertEqual(sorted(result.imports_removed),
+                         ['p/p.proto: buf/validate/validate.proto', 'p/p.proto: buf/validate/validate_rules.proto',
+                          'p/p.proto: nanopb.proto', 'p/q.proto: nanopb.proto'])
+
+    def test_used_imports_stay(self):
+        text = ('syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                'import "buf/validate/validate_rules.proto";\nimport "buf/validate/nanopb.proto";\n'
+                'message M { string name = 1 [(buf.validate.field).string.max_len = 20, '
+                '(validate.rules).string.max_len = 20, (nanopb).max_size = 21]; }\n')
+        result = self.project({'buf/validate/validate.proto': self.buf_file(), 'p/p.proto': text})
+        with open(os.path.join(self.tmp, 'p', 'p.proto'), newline='') as handle:
+            self.assertEqual(handle.read(), text)
+        self.assertEqual(result.imports_removed, [])
 
     def test_generated_with_buf_inside_the_protocol(self):
         self.project({'p/buf/validate/validate.proto': self.buf_file(),

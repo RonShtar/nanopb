@@ -239,6 +239,12 @@ other file stay exactly as they are.
    earlier version imports `buf/validate/nanopb_validate.proto`: that import is switched to
    `validate_rules.proto` (both define the same rules).
 
+   Imports of these three option files are kept in line with what each file uses: a file
+   that uses `(buf.validate...)`, `(validate.rules)` or `(nanopb)` options without importing
+   their file gets the import, and an import of buf's `validate.proto`, our rules file or
+   `nanopb.proto` that the file does not use is removed (protoc would warn "Import ... is
+   unused"). Every other import, and any `import public`, stays.
+
    ```proto
    // before
    string name = 1 [(buf.validate.field).string = {min_len: 1, max_len: 20}];
@@ -247,14 +253,15 @@ other file stay exactly as they are.
                     (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
    ```
 
-   In an option list over several lines every original line stays as it was (comments
-   included); each added option is a line of its own that starts with the comma:
+   In an option list over several lines the last option gets the comma that separates it
+   from ours (before its comment, which stays on its line), and each added option is a line
+   of its own, indented like it:
 
    ```proto
    repeated uint32 waypoints = 3 [
-     (buf.validate.field).repeated.max_items = 8 // at most eight
-       , (validate.rules).repeated.max_items = 8
-       , (nanopb).max_count = 8
+     (buf.validate.field).repeated.max_items = 8, // at most eight
+     (validate.rules).repeated.max_items = 8,
+     (nanopb).max_count = 8
    ];
    ```
 
