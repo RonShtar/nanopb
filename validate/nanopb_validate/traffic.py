@@ -13,7 +13,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from protos import (BackendError, Unit, c_identifier, parse_port_map, protocol_messages, protocol_name,  # noqa: E402
                     select_units, unit_data_generator, unit_entrypoints, unit_root)
-from wireshark import (default_plugins_dir, install_schema, prune_port_map, schema_text, stale_ports_note)  # noqa: E402
+from wireshark import (default_plugins_dir, install_schema, prune_port_map, schema_text,  # noqa: E402
+                       skipped_protocols_note, stale_ports_note)
 
 
 # ---------------------------------------------------------------------------
@@ -540,8 +541,9 @@ def cmd_gen_packets(args):
     if not protocol_mode and not any(port == args.any_port for _, port, _ in parse_port_map(port_map, None)):
         port_map = ','.join(p for p in (port_map, 'udp:%d=%s' % (args.any_port, ANY_MESSAGE)) if p)
 
+    skipped_protocols = []
     if args.no_install:
-        _, messages, _ = schema_text(args.protos_root, args.include)
+        _, messages, _ = schema_text(args.protos_root, args.include, skipped_protocols)
         installed, changed = None, False
         stale_ports = []
         if args.drop_stale_ports:
@@ -552,6 +554,7 @@ def cmd_gen_packets(args):
                                                       protocol_ports, drop_stale=args.drop_stale_ports)
         stale_ports = installed.get('stale_ports', [])
         port_map = installed.get('port_map', port_map)
+        skipped_protocols = [(s['protocol'], s['error']) for s in installed.get('skipped_protocols', [])]
     roots = dict((msg, (proto, port)) for proto, port, msg in parse_port_map(port_map, messages)
                  if msg != ANY_MESSAGE)
     any_value = field_by_name(messages, ANY_MESSAGE, 'value') or {}
@@ -737,6 +740,8 @@ def cmd_gen_packets(args):
         summary += '\n%d rule(s) not generated, see %s.txt' % (len(skipped), base)
     if stale_ports:
         summary += '\n' + stale_ports_note(stale_ports)
+    if skipped_protocols:
+        summary += '\n' + skipped_protocols_note(skipped_protocols)
     result = {'pcap': capture, 'manifest': base + '.json', 'summary_file': base + '.txt',
               'packet_dirs': sorted(packet_files), 'mode': args.mode,
               'protocol_ports': ['%s:%d=%s' % p for p in protocol_ports],
@@ -748,4 +753,6 @@ def cmd_gen_packets(args):
         result['installed'] = installed
     if stale_ports:
         result['ports_pruned'] = True
+    if skipped_protocols:
+        result['skipped_protocols'] = [{'protocol': name, 'error': error} for name, error in skipped_protocols]
     return result

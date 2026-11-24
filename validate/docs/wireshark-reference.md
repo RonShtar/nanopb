@@ -212,6 +212,8 @@ window has **Show dropped only** (filter `nanopb.validation == "dropped"`),
 
 Every rule is tested from both sides: one DROPPED packet that breaks it and one PASSED packet with the field at the limit the rule allows (`lte`/`gte`: the bound itself, `lt`/`gt`: the closest value inside, `min_len`/`max_len`: exactly that length, `min_items`/`max_items`: exactly that many entries; other rules: a valid value of that field). The comment of such a PASSED packet says `field=... rule=... at=limit`. `nanopb_test_packets.txt` ends with the rule coverage and lists any rule that has only one side (e.g. a `max_len` larger than the nanopb storage cannot be broken by a decodable packet).
 
+The dissector schema written with the packets holds every protocol of the protos directory. A protocol protoc rejects (an import it cannot find, a syntax error) is left out of it and named in the result (`skipped_protocols`, "Left out of the dissector"), so packets for `--unit A` work even when protocol B is broken; the protocols asked for with `--unit` must compile. Loading the protos in Wireshark (`wireshark load` / `refresh`) does the same.
+
 Each packet also carries its expectation as a packet comment
 (`expect=DROPPED msg=... field=... rule=...`, column `frame.comment`).
 

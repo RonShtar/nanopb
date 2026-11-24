@@ -397,6 +397,29 @@ class BackendTests(unittest.TestCase):
         self.assertTrue(all(e['any_wrapped'] for e in manifest['packets']))
         self.check_with_protocol_filter(root, manifest)
 
+    def test_packets_for_one_protocol_when_another_is_broken(self):
+        """packets --unit good works when another protocol of the protos directory does not
+        compile (a missing import): that one is left out of the dissector schema and named."""
+
+        root = os.path.join(self.tmp, 'onebroken')
+        for unit, text in (('good', 'syntax = "proto3";\npackage good;\nimport "validate.proto";\n'
+                                    'message Move { uint32 speed = 1 [(validate.rules).uint32.lte = 9]; }\n'),
+                           ('bad', 'syntax = "proto3";\npackage bad;\nimport "somewhere/missing.proto";\n'
+                                   'message X { uint32 a = 1; }\n')):
+            os.makedirs(os.path.join(root, unit))
+            with open(os.path.join(root, unit, unit + '.proto'), 'w') as handle:
+                handle.write(text)
+        result, manifest = self.gen_packets(root, '--unit', 'good')
+        self.assertEqual(set(e['unit'] for e in manifest['packets']), {'good'})
+        self.assertEqual([s['protocol'] for s in result['skipped_protocols']], ['bad'])
+        self.assertIn('missing.proto', result['skipped_protocols'][0]['error'])
+        self.assertIn('Left out of the dissector', result['summary'])
+        # The protocol asked for must still compile: its own errors stop the run.
+        out = os.path.join(self.tmp, 'packets_bad')
+        status, _, err = run_backend('gen-packets', '--protos-root', root, '--out', out, '--unit', 'bad',
+                                     '--plugins-dir', os.path.join(self.tmp, 'plugins'))
+        self.assertNotEqual(status, 0)
+
     def test_vendored_any_is_not_defined_twice(self):
         """A protocol with its own copy of any.proto under another path (vendor/google/protobuf/
         any.proto) uses that copy: google/protobuf/any.proto is not compiled as well (protoc:

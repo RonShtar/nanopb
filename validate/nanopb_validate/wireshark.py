@@ -373,11 +373,24 @@ def merge_unit_schemas(unit_schemas):
     return messages, enums, scoped, sorted(conflicts)
 
 
-def schema_text(protos_root, extra_includes):
-    """(Lua schema text, messages, names defined differently by several units) for every unit."""
+def schema_text(protos_root, extra_includes, skipped=None):
+    """(Lua schema text, messages, names defined differently by several units) for every unit.
 
-    units = [Unit(protos_root, name, extra_includes) for name in find_units(protos_root)]
+    A unit protoc rejects (an import it cannot find, a syntax error) is left out of the
+    schema, so one broken protocol does not stop the others; ``skipped`` (a list) gets
+    (unit, first line of the error) for each. With no unit left, the first error is raised."""
+
+    units, broken = [], []
+    for name in find_units(protos_root):
+        try:
+            units.append(Unit(protos_root, name, extra_includes))
+        except BackendError as exc:
+            broken.append((name, str(exc)))
+    if skipped is not None:
+        skipped.extend((name, protoc_error_line(error)) for name, error in broken)
     if not units:
+        if broken:
+            raise BackendError(broken[0][1])
         raise BackendError(no_units_message(protos_root))
     # Always know google.protobuf.Any, even if no unit imports it.
     any_fds = compile_descriptor_set(['google/protobuf/any.proto'], [DEFAULT_INCLUDE])
@@ -393,6 +406,21 @@ def schema_text(protos_root, extra_includes):
     protocols = dict((u.name, m) for u, m in ((u, protocol_messages(u)) for u in units) if m)
     roots = dict((u.name, unit_root(u)) for u in units if u.name in protocols and unit_root(u))
     return render_schema_lua(messages, enums, protocols, scoped, roots), messages, conflicts
+
+
+def protoc_error_line(error):
+    """The first line of a protoc rejection that says what is wrong (not the header)."""
+
+    lines = [l.strip() for l in error.splitlines() if l.strip()]
+    for line in lines:
+        if not line.startswith('protocol ') and not line.startswith('->'):
+            return line
+    return lines[0] if lines else error
+
+
+def skipped_protocols_note(skipped):
+    return ('Left out of the dissector (protoc rejected them; the other protocols are not affected): '
+            + '; '.join('%s: %s' % item for item in skipped))
 
 
 def write_if_changed(path, text):
@@ -498,7 +526,8 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None
     data_dir = os.path.join(plugins, 'nanopb')
     schema_path = os.path.join(data_dir, 'schema.luadata')
     fingerprint = protos_fingerprint(protos_root, includes)
-    text, messages, conflicts = schema_text(protos_root, includes)
+    skipped = []
+    text, messages, conflicts = schema_text(protos_root, includes, skipped)
     changed = write_if_changed(schema_path, text)
     # refresh-schema compares against this to skip work when nothing changed.
     write_if_changed(os.path.join(data_dir, 'schema.fingerprint'), fingerprint + '\n')
@@ -531,6 +560,8 @@ def install_schema(protos_root, includes, plugins, port_map, protocol_ports=None
               'decode_as': [c_identifier(name).upper() for name in sorted(protocols_of(text))]}
     if conflicts:
         result['shared_names'] = conflicts
+    if skipped:
+        result['skipped_protocols'] = [{'protocol': name, 'error': error} for name, error in skipped]
     if stale:
         result.update({'ports_pruned': True, 'port_map': port_map, 'stale_ports': stale})
     return result, changed, messages
@@ -573,6 +604,9 @@ def cmd_refresh_schema(args):
     result, changed, _ = install_schema(protos_root, includes, plugins, port_map, drop_stale=True)
     result['changed'] = changed
     result['summary'] = 'Schema rebuilt from %s (%d messages).' % (protos_root, result['messages'])
+    if result.get('skipped_protocols'):
+        result['summary'] += '\n' + skipped_protocols_note(
+            [(s['protocol'], s['error']) for s in result['skipped_protocols']])
     return result
 
 
@@ -596,6 +630,8 @@ def cmd_install_dissector(args):
         lines.append(stale_ports_note(result['stale_ports']))
     if result.get('shared_names'):
         lines.append(shared_names_note(result['shared_names']))
+    if result.get('skipped_protocols'):
+        lines.append(skipped_protocols_note([(s['protocol'], s['error']) for s in result['skipped_protocols']]))
     result['summary'] = '\n'.join(lines)
     return result
 
