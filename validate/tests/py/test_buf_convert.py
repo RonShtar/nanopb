@@ -215,7 +215,7 @@ class BufAppendTests(unittest.TestCase):
         self.assertIn('import "buf/validate/nanopb.proto";', self.text)
         self.assertTrue(os.path.isfile(os.path.join(self.out, 'buf', 'validate', 'nanopb.proto')))
         self.assertIn('(buf.validate.field).string = {min_len: 1, max_len: 20}, (validate.rules).string.min_len = 1, '
-                      '(validate.rules).string.max_len = 20, (nanopb).max_size = 21]', self.text)
+                      '(validate.rules).string.max_len = 20, (nanopb).max_length = 20]', self.text)
         self.assertIn('(validate.rules).uint32.gte = 1, (validate.rules).uint32.lte = 100]', self.text)
         # multi-line group: a comma right after the last option (its comment stays on its line),
         # then each of ours on its own line, indented like it, no space before a comma
@@ -226,15 +226,30 @@ class BufAppendTests(unittest.TestCase):
 
     def test_nanopb_sizes(self):
         sized = dict(((field, option), value) for _, field, option, value in self.result.sized)
-        self.assertEqual(sized[('fleet.Move.name', 'max_size')], 21)
-        self.assertEqual(sized[('fleet.Move.blob', 'max_size')], 16)          # bytes: no NUL
-        self.assertEqual(sized[('fleet.Move.code', 'max_size')], 5)           # longest of "in" + NUL
+        # Strings: (nanopb).max_length, the longest string itself (nanopb adds the NUL).
+        self.assertEqual(sized[('fleet.Move.name', 'max_length')], 20)
+        self.assertEqual(sized[('fleet.Move.blob', 'max_size')], 16)          # bytes: max_size
+        self.assertEqual(sized[('fleet.Move.code', 'max_length')], 4)         # longest of "in"
         self.assertEqual(sized[('fleet.Move.tags', 'max_count')], 3)
-        self.assertEqual(sized[('fleet.Move.tags', 'max_size')], 6)           # items.string.max_len + NUL
-        self.assertEqual(sized[('fleet.Move.ip', 'max_size')], 16)            # oneof member, ipv4
-        self.assertEqual(sized[('fleet.Move.re', 'max_size')], 5)
-        self.assertNotIn(('fleet.Move.sized', 'max_size'), sized)             # .options already sizes it
-        self.assertNotIn('(nanopb).max_size = 10', self.text)
+        self.assertEqual(sized[('fleet.Move.tags', 'max_length')], 5)         # items.string.max_len
+        self.assertEqual(sized[('fleet.Move.ip', 'max_length')], 15)          # oneof member, ipv4
+        self.assertEqual(sized[('fleet.Move.re', 'max_length')], 4)
+        self.assertNotIn(('fleet.Move.sized', 'max_length'), sized)           # .options already sizes it
+        self.assertNotIn('(nanopb).max_length = 9', self.text)
+        self.assertNotRegex(self.text, r'\(nanopb\)\.max_size = \d+\]?;?\s*$')  # no max_size on strings
+
+    def test_unsized_fields_are_reported(self):
+        # A rule with no upper limit gives no number: the report names the field.
+        self.assertEqual(self.result.unsized, [])
+        project = os.path.join(self.tmp, 'unsized')
+        os.makedirs(os.path.join(project, 'p'))
+        with open(os.path.join(project, 'p', 'p.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                         'message S { string e = 1 [(buf.validate.field).string.min_len = 1];\n'
+                         '  repeated string i = 2 [(buf.validate.field).repeated.min_items = 1]; }\n')
+        result = buf.convert_path(project)
+        self.assertEqual(result.unsized, [('p/p.proto', 'p.S.e', 'max_length'), ('p/p.proto', 'p.S.i', 'max_length'),
+                                          ('p/p.proto', 'p.S.i', 'max_count')])
 
     def test_unenforced_rules_are_listed_and_kept(self):
         rules = {rule for _, rule, _ in self.result.report.items}
@@ -302,8 +317,8 @@ class BufCommentTests(unittest.TestCase):
         result = buf.convert_path(os.path.dirname(self.src), os.path.join(self.tmp, 'out'))
         self.assertEqual(result.failed, [])
         sized = dict(((field, option), value) for _, field, option, value in result.sized)
-        self.assertEqual(sized, {('fleet.Move.name', 'max_size'): 21, ('fleet.Move.tags', 'max_count'): 4,
-                                 ('fleet.Move.tags', 'max_size'): 9, ('fleet.Move.mode', 'max_size'): 9})
+        self.assertEqual(sized, {('fleet.Move.name', 'max_length'): 20, ('fleet.Move.tags', 'max_count'): 4,
+                                 ('fleet.Move.tags', 'max_length'): 8, ('fleet.Move.mode', 'max_length'): 8})
         with open(os.path.join(self.tmp, 'out', 'fleet', 'fleet.proto'), newline='') as handle:
             text = handle.read()
         self.assertIn("// The robot's move command; it's sent every 10 ms.\n", text)
@@ -529,6 +544,51 @@ class BufImportAndPlacementTests(unittest.TestCase):
         self.assertEqual(sorted(result.imports_removed),
                          ['p/p.proto: buf/validate/validate.proto', 'p/p.proto: buf/validate/validate_rules.proto',
                           'p/p.proto: nanopb.proto', 'p/q.proto: nanopb.proto'])
+
+    def test_buf_imported_through_another_include_root(self):
+        # buf's file at deps/protovalidate/validate.proto, imported as "protovalidate/..."
+        # (built with -I deps): no second import of it, and ours are named the same way.
+        self.project({'deps/protovalidate/validate.proto': self.buf_file(),
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "protovalidate/validate.proto";\n'
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'), ['protovalidate/validate.proto',
+                                                     'protovalidate/validate_rules.proto',
+                                                     'protovalidate/nanopb.proto'])
+        self.assertEqual(self.added(), ['deps/protovalidate/nanopb.proto', 'deps/protovalidate/validate_rules.proto'])
+        out = os.path.join(self.tmp, '..', os.path.basename(self.tmp) + '_gen')
+        try:
+            # protoc loads buf's file once ("buf.validate.Rule ... already defined" otherwise).
+            status, result, err = run_backend('gen-c', '--protos-root', self.tmp, '--unit', 'p', '--out', out,
+                                              '--no-filter', '-I', os.path.join(self.tmp, 'deps'))
+            self.assertEqual(status, 0, err or result)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_buf_from_outside_the_project_is_not_added_again(self):
+        self.project({'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "validate/validate.proto";\n'
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'), ['validate/validate.proto', 'validate_rules.proto',
+                                                     'nanopb.proto'])
+
+    def test_rules_and_nanopb_under_other_names_are_not_added_again(self):
+        with open(buf.DEFAULT_VALIDATE_PROTO, newline='') as handle:
+            ours = handle.read()
+        with open(buf.DEFAULT_NANOPB_PROTO, newline='') as handle:
+            nanopb = handle.read()
+        self.project({'buf/validate/validate.proto': self.buf_file(), 'deps/rules/my_rules.proto': ours,
+                      'deps/np/nanopb.proto': nanopb,
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   'import "rules/my_rules.proto";\nimport "np/nanopb.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'rules/my_rules.proto',
+                                                     'np/nanopb.proto'])
+
+    def test_nanopb_proto_added_when_missing(self):
+        # Numbers only: no (nanopb) option, so no import, but the project still gets the file.
+        self.project({'buf/validate/validate.proto': self.buf_file(),
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
+                                   'message A { uint32 x = 1 [(buf.validate.field).uint32.lte = 9]; }\n'})
+        self.assertEqual(self.added(), ['buf/validate/nanopb.proto', 'buf/validate/validate_rules.proto'])
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'buf/validate/validate_rules.proto'])
 
     def test_used_imports_stay(self):
         text = ('syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'

@@ -217,18 +217,22 @@ other file stay exactly as they are.
 
    For every field with `(buf.validate.field)` rules it adds, after the buf options:
    - the `(validate.rules)` equivalents;
-   - `(nanopb).max_size` / `(nanopb).max_count` from the buf limits, so the field is static
-     storage instead of `pb_callback_t`. Strings get `max_len + 1` (also from `len`, `const`,
-     `in`, `email`, `ipv4`, ...), bytes get `max_len`, repeated fields get `max_items` and maps
-     get `max_pairs`. A size already set inline, in the `.options` file or file-wide is never
-     changed.
+   - nanopb sizes from the buf limits, so the field is static storage instead of
+     `pb_callback_t`: strings get `(nanopb).max_length` = the longest string (`max_len`, also
+     from `len`, `const`, `in`, `email`, `ipv4`, ...; nanopb adds the NUL), bytes get
+     `(nanopb).max_size` = `max_len`, repeated fields get `(nanopb).max_count` = `max_items` (and
+     their items a `max_length` / `max_size`), maps get `max_count` = `max_pairs`. A size already
+     set inline (`max_size` or `max_length`), in the `.options` file or file-wide is never
+     changed. A field whose rules give no upper limit (a string with only `min_len`, a repeated
+     field with only `min_items`, ...) is listed in the report: give it a size in the `.options`
+     file, e.g. `pkg.Msg.name max_length:32`.
 
    And to the project, **next to every buf `validate.proto` it holds** (at the top, inside a
    protocol folder, several copies, or a copy of package `buf.validate` under another name),
    otherwise **at the top of the project**:
    - `validate_rules.proto`, our rules file;
-   - `nanopb.proto`, when sizes were added; a `nanopb.proto` the project already has is used
-     instead (two copies in one compile define everything twice);
+   - `nanopb.proto`, when the project has none; a `nanopb.proto` the project already has is
+     used instead (two copies in one compile define everything twice);
    - the imports of both in every file that uses them, after its existing imports, named the
      way the file imports buf's: `import "buf/validate/validate.proto";` gets
      `import "buf/validate/validate_rules.proto";` and `import "buf/validate/nanopb.proto";`
@@ -250,7 +254,7 @@ other file stay exactly as they are.
    string name = 1 [(buf.validate.field).string = {min_len: 1, max_len: 20}];
    // after
    string name = 1 [(buf.validate.field).string = {min_len: 1, max_len: 20}, (validate.rules).string.min_len = 1,
-                    (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
+                    (validate.rules).string.max_len = 20, (nanopb).max_length = 20];
    ```
 
    In an option list over several lines the last option gets the comma that separates it

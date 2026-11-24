@@ -21,7 +21,7 @@ keeping comments and layout:
                                                           + import "buf/validate/validate_rules.proto";
     string name = 1 [(buf.validate.field).string.max_len = 20];
         -> string name = 1 [(buf.validate.field).string.max_len = 20,
-                            (validate.rules).string.max_len = 20, (nanopb).max_size = 21];
+                            (validate.rules).string.max_len = 20, (nanopb).max_length = 20];
                                                           + import "nanopb.proto";
 
     const -> const_value;   len -> min_len + max_len (strings and bytes)
@@ -30,11 +30,14 @@ Our validate.proto is added as validate_rules.proto (--validate-name): next to b
 validate.proto when the project has it, else at the top of the project; each file
 that uses rules imports both: buf keeps working, nanopb-validate enforces its part. Fields
 that buf limits get nanopb sizes, so they are static storage instead of
-pb_callback_t: string max_len/len/const/in/email/... -> (nanopb).max_size (+1
-for the NUL), bytes -> max_size, repeated max_items / map max_pairs ->
-(nanopb).max_count; never where a size is already set (inline, the .options
-file, or file-wide). Then nanopb.proto is imported, and added next to our rules
-file if the project has none. --no-sizes turns this off. Our rules file and
+pb_callback_t: string max_len/len/const/in/email/... -> (nanopb).max_length (the
+longest string; nanopb adds the NUL), bytes -> max_size, repeated max_items / map
+max_pairs -> (nanopb).max_count; never where a size is already set (inline, the
+.options file, or file-wide). A field the rules give no limit for is listed in the
+report. A file that uses (nanopb) options imports nanopb.proto; the project gets a
+nanopb.proto next to our rules file if it has none. Imports of buf's validate.proto,
+our rules file and nanopb.proto follow what each file uses: missing ones are added,
+unused ones removed. --no-sizes turns the sizes off. Our rules file and
 nanopb.proto go next to every buf validate.proto of the project (at the top without
 one), imported the way the file imports buf's ("buf/validate/validate_rules.proto").
 
@@ -508,15 +511,16 @@ def longest_value(kind, pairs):
 
 
 def nanopb_sizes(buf_rules):
-    """[(nanopb option, value)] that give a field static storage: max_size for strings
-    (+1 for the NUL) and bytes, max_count for repeated fields and maps."""
+    """[(nanopb option, value)] that give a field static storage: max_length for strings
+    (the longest string, nanopb adds the NUL), max_size for bytes, max_count for repeated
+    fields and maps."""
 
     rules, out = merged(buf_rules), []
 
     def size_of(kind, pairs):
         n = longest_value(kind, pairs)
         if n is not None:
-            out.append(('max_size', n + 1 if kind == 'string' else n))
+            out.append(('max_length', n) if kind == 'string' else ('max_size', n))
 
     for kind in ('string', 'bytes'):
         if kind in rules:
@@ -555,16 +559,20 @@ class Sizes(object):
         self.file_wide = set(re.findall(r'\(\s*nanopb_fileopt\s*\)\s*\.\s*(\w+)', strip_comments(file_text)))
 
     def has(self, option, full_name, inner):
+        """True if the field already has ``option`` (max_size and max_length both size it)."""
+
+        names = ('max_size', 'max_length') if option in ('max_size', 'max_length') else (option,)
+        group = '|'.join(names + ('type',))
         code = strip_comments(inner)
-        if re.search(r'\(\s*nanopb\s*\)\s*\.\s*(%s|type|max_length)\b' % option, code) or \
+        if re.search(r'\(\s*nanopb\s*\)\s*\.\s*(%s)\b' % group, code) or \
                 re.search(r'\(\s*nanopb\s*\)\s*=', code):
             return True
-        if option in self.file_wide:
+        if any(name in self.file_wide for name in names):
             return True
         short = full_name.split('.', 1)[1] if '.' in full_name else full_name
         for pattern, settings in self.lines:
             if (fnmatch.fnmatchcase(full_name, pattern) or fnmatch.fnmatchcase(short, pattern)) and \
-                    re.search(r'\b(%s|type|max_length)\s*:' % option, settings):
+                    re.search(r'\b(%s)\s*:' % group, settings):
                 return True
         return False
 
@@ -612,12 +620,23 @@ def code_mask(text):
 
 
 def declared_field(code, i):
-    """The name of the field whose options start at code[i] ('['), or None (``code`` is the
-    file's code_mask)."""
+    """(label, type, name) of the field whose options start at code[i] ('['), or None
+    (``code`` is the file's code_mask)."""
 
     start = max(code.rfind(';', 0, i), code.rfind('{', 0, i), code.rfind('}', 0, i))
     match = FIELD_DECL.search(code[start if start >= 0 else 0:i].rstrip())
-    return match.group(3) if match else None
+    return (match.group(1) or '', re.sub(r'\s+', '', match.group(2)), match.group(3)) if match else None
+
+
+def needed_sizes(label, type_name):
+    """The nanopb options a field of that label and type needs for static storage."""
+
+    needed = []
+    if type_name in ('string', 'bytes') or (type_name.startswith('map<') and 'string' in type_name):
+        needed.append('max_length' if type_name == 'string' else 'max_size')
+    if label == 'repeated' or type_name.startswith('map<'):
+        needed.append('max_count')
+    return needed
 
 
 # ---------------------------------------------------------------------------
@@ -633,6 +652,7 @@ class FileState(object):
         self.package = package
         self.buf_imports = []
         self.sized = []               # (field, option, value)
+        self.unsized = []             # (field, option): no limit in the rules to size it from
 
 
 def line_of(text, index):
@@ -696,14 +716,21 @@ def convert_text(text, name, report, validate_import, append=False, state=None):
                 i = j + 1
                 continue
             kept, added, dropped, buf_rules = result
-            field = declared_field(code, i)
+            decl = declared_field(code, i)
             messages = [s for s in scopes if s]       # a oneof's braces are not a message
-            if state.sizes is not None and field and messages:
+            if state.sizes is not None and decl and messages:
+                label, type_name, field = decl
                 full = '.'.join(([state.package] if state.package else []) + messages + [field])
+                given = set()
                 for option, value in nanopb_sizes(buf_rules):
                     if not state.sizes.has(option, full, inner):
                         added.append('(nanopb).%s = %d' % (option, value))
                         state.sized.append((full, option, value))
+                    given.add(option)
+                # What the rules give no number for: the report names it (else a pb_callback_t).
+                for option in needed_sizes(label, type_name):
+                    if option not in given and not state.sizes.has(option, full, inner):
+                        state.unsized.append((full, option))
             what = 'not enforced by nanopb-validate (kept for buf)' if append else 'dropped'
             note = ('/* nanopb-validate: %s %s */' % (what, ', '.join(sorted(set(dropped))))) if dropped else ''
             multiline = '\n' in inner
@@ -841,14 +868,14 @@ def ensure_validate_import(text, validate_import, roots=(), changes=None):
     code = strip_comments(text)
     if '(validate.rules)' not in code and '(validate.message)' not in code:
         return text
+    uses_buf = bool(BUF_OPTION_RE.search(code))
     for match, name in imports_of(text):
-        kind = import_kind(name, validate_import, roots)
-        if kind == 'ours':
-            return text
-        if kind == 'old':
+        if name.rsplit('/', 1)[-1] in OLD_NAMES:
             if changes is not None:
                 changes.append('import "%s" -> "%s"' % (name, validate_import))
             return text[:match.start(2)] + validate_import + text[match.end(2):]
+        if option_import_kind(name, validate_import, roots, uses_buf) == 'ours':
+            return text                       # our rules file, under any name
     return add_import(text, validate_import)
 
 
@@ -858,32 +885,62 @@ NANOPB_OPTION_RE = re.compile(r'\(\s*\.?nanopb(?:_fileopt|_msgopt|_enumopt)?\s*\
 _BUF_PACKAGE_RE = re.compile(r'^\s*package\s+buf\.validate\s*;', re.M)
 
 
-def option_import_kind(name, validate_import, roots):
-    """'buf', 'ours' or 'nanopb' for an import of one of the option files this script
-    handles (buf's validate.proto under any name, our rules file under any name,
-    nanopb.proto), else None: any other import is never added or removed."""
+def resolve_import(name, roots):
+    """The file an import names, in the first of ``roots`` that has it, or None."""
 
-    if name.rsplit('/', 1)[-1] == 'nanopb.proto':
-        return 'nanopb'
-    kind = import_kind(name, validate_import, roots)
-    if kind in ('ours', 'old'):
-        return 'ours'
-    if kind == 'buf':
-        return 'buf'
     for root in roots:
         path = os.path.join(root, *name.split('/'))
         if os.path.isfile(path):
-            return 'buf' if _BUF_PACKAGE_RE.search(code_mask(read_text(path))) else None
+            return path
+    return None
+
+
+def option_import_kind(name, validate_import, roots, uses_buf=False):
+    """'buf', 'ours' or 'nanopb' for an import of one of the option files this script
+    handles, under any name, else None: any other import is never added or removed.
+
+    The file is found in the project (``roots``: every folder of it) and told by its
+    content: package buf.validate is buf's, (validate.rules) at 1011 is ours. Not in the
+    project: buf/validate/validate.proto is buf's; another .../validate.proto is buf's in a
+    file that uses buf options (it comes from the buf setup), else ours (the copy
+    nanopb_validate provides)."""
+
+    base = name.rsplit('/', 1)[-1]
+    if base == 'nanopb.proto':
+        return 'nanopb'
+    if base in OLD_NAMES or (validate_import and base == os.path.basename(validate_import)):
+        return 'ours'
+    path = resolve_import(name, roots)
+    if path:
+        text = read_text(path)
+        if _BUF_PACKAGE_RE.search(code_mask(text)):
+            return 'buf'
+        if OUR_RULES_RE.search(strip_comments(text)):
+            return 'ours'
+        return None
+    if is_buf_import(name):
+        return 'buf'
+    if base == 'validate.proto':
+        return 'buf' if uses_buf else 'ours'
+    return None
+
+
+def buf_import_of(text, roots):
+    """The name under which ``text`` imports buf's validate.proto, or None."""
+
+    for _, name in imports_of(text):
+        if option_import_kind(name, '', roots, uses_buf=True) == 'buf':
+            return name
     return None
 
 
 def ensure_buf_import(text, buf_import, roots):
     """Add  import "<buf_import>";  to a file that uses (buf.validate...) options without
-    importing buf's validate.proto."""
+    importing buf's validate.proto (under any name)."""
 
     if not BUF_OPTION_RE.search(strip_comments(text)):
         return text
-    if any(option_import_kind(n, '', roots) == 'buf' for _, n in imports_of(text)):
+    if buf_import_of(text, roots):
         return text
     return add_import(text, buf_import)
 
@@ -899,7 +956,7 @@ def remove_unused_imports(text, validate_import, roots, removed=None):
     for match, name in reversed(imports_of(text)):
         if re.match(r'\s*import\s+public\b', match.group(0)):
             continue
-        kind = option_import_kind(name, validate_import, roots)
+        kind = option_import_kind(name, validate_import, roots, bool(used['buf']))
         if kind and not used[kind]:
             text = text[:match.start()] + text[match.end():]
             if removed is not None:
@@ -907,12 +964,19 @@ def remove_unused_imports(text, validate_import, roots, removed=None):
     return text
 
 
-def ensure_nanopb_import(text, name='nanopb.proto'):
-    """Add  import "<name>";  to a file that uses (nanopb) options without importing a
-    nanopb.proto (any one it already imports is kept)."""
+def uses_validation(text):
+    """True for a file with buf.validate or (validate.rules) options."""
 
     code = strip_comments(text)
-    if not re.search(r'\(\s*nanopb(_fileopt|_msgopt|_enumopt)?\s*\)', code):
+    return bool(BUF_OPTION_RE.search(code) or OUR_OPTION_RE.search(code))
+
+
+def ensure_nanopb_import(text, name='nanopb.proto', always=False):
+    """Add  import "<name>";  to a file that uses (nanopb) options, or with ``always`` to any
+    file, without importing a nanopb.proto (any one it already imports is kept)."""
+
+    code = strip_comments(text)
+    if not always and not re.search(r'\(\s*nanopb(_fileopt|_msgopt|_enumopt)?\s*\)', code):
         return text
     if any(n == 'nanopb.proto' or n.endswith('/nanopb.proto') for _, n in imports_of(text)):
         return text
@@ -1031,8 +1095,11 @@ def _convert_file(src, dst, rel, report, opts, result):
         converted = ensure_buf_import(converted, buf_import_name(opts), roots)
         if converted != before:
             result.imports_added.append('%s: %s' % (rel, buf_import_name(opts)))
-            if not state.buf_imports:
-                state.buf_imports.append(buf_import_name(opts))
+        # Our imports are named like the file's own import of buf's validate.proto, whatever
+        # name that has ("protovalidate/validate.proto" -> "protovalidate/validate_rules.proto").
+        existing = buf_import_of(converted, roots)
+        if existing:
+            state.buf_imports[:] = [existing]
     validate_import = support_import(state, opts, opts.validate_name) if opts.append else opts.validate_import
     changes = []
     converted = ensure_validate_import(converted, validate_import, roots, changes)
@@ -1049,6 +1116,7 @@ def _convert_file(src, dst, rel, report, opts, result):
         result.nanopb_imports.add(nanopb_name)
     if state.sized:
         result.sized += [(rel,) + s for s in state.sized]
+    result.unsized += [(rel,) + s for s in state.unsized]
     in_place = os.path.abspath(src) == os.path.abspath(dst)
     if in_place and converted == text:
         return False                              # nothing to add: the file is not touched
@@ -1067,6 +1135,7 @@ class Result(object):
         self.converted, self.copied, self.written, self.backups = [], [], [], []
         self.sized = []                  # (file, field, option, value)
         self.failed = []                 # (file, why): left unchanged
+        self.unsized = []                # (file, field, option): rules give no number for it
         self.imports_added = []          # "file: name" of buf imports added
         self.imports_removed = []        # "file: name" of unused option imports removed
         self.migrated = []               # "file: import "old" -> "new""
@@ -1148,12 +1217,15 @@ def convert_path(source, out=None, validate_import='validate.proto', opts=None):
     opts.buf_files = [r for r in buf_files if r.endswith('.proto')]
     ours = opts.validate_name if opts.append else None
     opts.nanopb_files = [r for r in source_files if r.rsplit('/', 1)[-1] == 'nanopb.proto']
-    roots = set([os.path.abspath(base)])
-    for d in opts.buf_dirs:                 # imports may be relative to any folder above buf's
-        parts = d.split('/') if d else []
-        for k in range(len(parts) + 1):
-            roots.add(os.path.abspath(os.path.join(base, *parts[:k])))
-    opts.roots = sorted(roots)
+    # An import may be relative to any folder of the project (whatever -I the build uses):
+    # the top first, then shallower folders before deeper ones.
+    folders = set([''])
+    for r in source_files:
+        parts = r.split('/')[:-1]
+        for k in range(1, len(parts) + 1):
+            folders.add('/'.join(parts[:k]))
+    opts.roots = [os.path.abspath(os.path.join(base, *f.split('/'))) if f else os.path.abspath(base)
+                  for f in sorted(folders, key=lambda f: (f.count('/') + (1 if f else 0), f))]
 
     for rel in source_files:
         path = os.path.join(base, *rel.split('/'))
@@ -1176,9 +1248,10 @@ def convert_path(source, out=None, validate_import='validate.proto', opts=None):
         for folder in support_locations(result.validate_imports, opts.buf_dirs):
             copy_support_file(opts.validate_proto, out, (folder + '/' if folder else '') + opts.validate_name,
                               result, 'validate')
-    if result.nanopb_imports and opts.sizes and not opts.nanopb_files:
-        # Next to our rules file (nanopb's generator also brings its own copy, but it is
-        # used only when a file imports "nanopb.proto" by that name).
+    if opts.append and not opts.nanopb_files:
+        # A project without nanopb.proto gets one: next to our rules file, i.e. next to every
+        # buf validate.proto, or at the top (nanopb's generator also brings its own copy, but
+        # it is used only when a file imports "nanopb.proto" by that name).
         for folder in support_locations(result.nanopb_imports, opts.buf_dirs):
             copy_support_file(opts.nanopb_proto, out, (folder + '/' if folder else '') + 'nanopb.proto',
                               result, 'nanopb')
@@ -1246,6 +1319,11 @@ def main(argv=None):
         print('\nnanopb sizes added from the buf limits (static storage):')
         for rel, field, option, value in result.sized:
             print('  %-28s %-40s %s = %d' % (rel, field, option, value))
+    if result.unsized:
+        print('\nno limit in the buf rules to size these from (they stay pb_callback_t): give each one in '
+              'the .options file next to its .proto, e.g. "pkg.Msg.name max_length:32":')
+        for rel, field, option in result.unsized:
+            print('  %-28s %-40s %s' % (rel, field, option))
     if result.report.items:
         print('\nnot enforced by nanopb-validate%s:' % ('' if args.replace else ' (the buf rules stay in the files)'))
         for where, rule, why in result.report.items:
