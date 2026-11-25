@@ -128,61 +128,105 @@ Any  type_url = ".../fleet.envelope.Envelope"                 level 0
 
 For each level the filter:
 
-1. reads the `type_url` once: the hash and length of the name after the last `/`
-   (any host prefix is accepted);
-2. jumps to that message's `case`, confirms the name (length, then `memcmp`),
-   decodes `value` into a struct and runs that message's validator (all its rules);
+1. finds the message the `type_url` names: `pb_filter_find_route()` (in `pb_validate.c`)
+   takes the name after the last `/` (any host prefix is accepted), hashes it and looks it
+   up in the protocol's route table by binary search, confirming the name;
+2. calls that message's check function: `pb_decode` of `value` into the message's struct,
+   then the message's validator (all its rules);
 3. walks the decoded struct for further `Any` fields and repeats from 1 for each.
 
 Anything else is dropped and logged through `PB_VALIDATE_FILTER_DROP`: an unknown
 `type_url`, a message that does not decode, a rule that fails, more than
 `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` (default 4) Anys nested.
 
-## 4. The generated filter: one function
+## 4. The generated filter
 
-The protocol is a single static function and the two entry points (nothing per
-message). This is the whole shape of `fleet.pb.c`:
+`fleet.pb.c` holds the descriptors, then the filter: plain functions, no macros and no
+decoder of its own. Decoding is nanopb's `pb_decode`, the outer `Any` and the lookup are
+`pb_validate.c`'s `pb_filter_read_any()` and `pb_filter_find_route()`.
 
-```c
-static int fleet_check_any(const fleet_google_protobuf_Any *any, int depth);
-int fleet_udp(void *ctx, const uint8_t *packet, size_t packet_size);
-int fleet_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server);
-```
-
-and its `switch` reads by message name, one line for a message without `Any` fields:
+One check function per message. A message without `Any` fields decodes and validates:
 
 ```c
-    switch (hash) {
-        case FLEET_HASH_FLEET_TYPES_VEC3:
-            FLEET_FILTER_MESSAGE("fleet.types.Vec3", fleet_types_Vec3, fleet_validate_types_Vec3);
-            break;
-        case FLEET_HASH_FLEET_CMD_SETMODE:
-            FLEET_FILTER_MESSAGE("fleet.cmd.SetMode", fleet_cmd_SetMode, fleet_validate_cmd_SetMode);
-            break;
-        ...
+static int fleet_check_cmd_SetMode(const pb_byte_t *value, size_t value_size, int depth)
+{
+    fleet_cmd_SetMode msg;   /* static with PB_VALIDATE_FILTER_STATIC_BUFFERS */
+    pb_istream_t stream = pb_istream_from_buffer(value, value_size);
+
+    if (!pb_decode(&stream, fleet_cmd_SetMode_fields, &msg)) {
+        PB_VALIDATE_FILTER_DROP("fleet", "cannot decode fleet.cmd.SetMode");
+        return -1;
+    }
+    if (!fleet_validate_cmd_SetMode(&msg, NULL)) {
+        PB_VALIDATE_FILTER_DROP("fleet", "fleet.cmd.SetMode validation failed");
+        return -1;
+    }
+    (void)depth;
+    return 0;
+}
 ```
 
-and, for a message that holds `Any` fields, the walk written out in place:
+A message that holds `Any` fields then checks the message inside each of them:
 
 ```c
-        case FLEET_HASH_FLEET_ENVELOPE_BATCH:
-            if (FLEET_NAME_IS("fleet.envelope.Batch")) {
-                FLEET_NESTED_PAYLOAD(fleet_envelope_Batch);
-                FLEET_DECODE("fleet.envelope.Batch", fleet_envelope_Batch, fleet_validate_envelope_Batch);
-                {
-                    pb_size_t i0;
-                    for (i0 = 0; i0 < payload->items_count; i0++) {
-                        if (fleet_check_any(&payload->items[i0], depth + 1) != 0) return -1;
-                    }
-                }
-                return 0;
-            }
-            break;
+static int fleet_check_envelope_Batch(const pb_byte_t *value, size_t value_size, int depth)
+{
+    fleet_envelope_Batch level;   /* one static struct per level with STATIC_BUFFERS */
+    fleet_envelope_Batch *msg = &level;
+    pb_istream_t stream = pb_istream_from_buffer(value, value_size);
+
+    if (!pb_decode(&stream, fleet_envelope_Batch_fields, msg)) { ... return -1; }
+    if (!fleet_validate_envelope_Batch(msg, NULL)) { ... return -1; }
+
+    {
+        pb_size_t i0;
+        for (i0 = 0; i0 < msg->items_count; i0++) {
+            if (fleet_check_any_field(&msg->items[i0], depth + 1) != 0) return -1;
+        }
+    }
+    return 0;
+}
 ```
 
-`Envelope` does the same with a `switch (payload->which_body)`, and the arm
-`Envelope.frame` walks `Frame`'s `readings[]` and `primary` right there, so a
-sub-message with an `Any` inside needs no function of its own.
+`Envelope` does the same with a `switch (msg->which_body)`, and the arm `Envelope.frame`
+walks `Frame`'s `readings[]` and `primary` right there, so a sub-message with an `Any`
+inside needs no function of its own.
+
+The route table names every message once, sorted by the hash of its name:
+
+```c
+static const pb_filter_route_t fleet_routes[] = {
+    { 0x19f628c5u, "fleet.cmd.Move",               fleet_check_cmd_Move },
+    { 0x19f8f4f6u, "fleet.cmd.Stop",               fleet_check_cmd_Stop },
+    ...
+    { 0xf7056ba3u, "fleet.types.Version",          fleet_check_types_Version },
+};
+```
+
+and the rest is the dispatch and the two entry points:
+
+```c
+static int fleet_check_any(const char *type_url, size_t type_url_size,
+                           const pb_byte_t *value, size_t value_size, int depth)
+{
+    const pb_filter_route_t *route;
+
+    if (depth >= PB_VALIDATE_FILTER_MAX_ANY_DEPTH) { ... return -1; }
+    route = pb_filter_find_route(fleet_routes, sizeof(fleet_routes) / sizeof(fleet_routes[0]),
+                                 type_url, type_url_size);
+    if (route == NULL) { ... return -1; }
+    return route->check(value, value_size, depth);
+}
+
+int fleet_udp(void *ctx, const uint8_t *packet, size_t packet_size)
+{
+    pb_filter_any_t any;
+
+    (void)ctx;
+    if (!pb_filter_read_any(packet, packet_size, &any)) { ... return -1; }
+    return fleet_check_any(any.type_url, any.type_url_size, any.value, any.value_size, 0);
+}
+```
 
 ## 5. Memory
 

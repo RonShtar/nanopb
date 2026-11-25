@@ -16,7 +16,7 @@ LIBRARY_INCLUDE_FORMAT = '#include <%s>'
 
 
 #: The pb_validate.h version the generated code needs (PB_VALIDATE_RUNTIME_VERSION).
-RUNTIME_VERSION = 2
+RUNTIME_VERSION = 3
 RUNTIME_CHECK = ('#if !defined(PB_VALIDATE_RUNTIME_VERSION) || PB_VALIDATE_RUNTIME_VERSION < %d\n'
                  '#error "pb_validate.h is older than this generated code: use pb_validate.h and pb_validate.c '
                  'from the validate/runtime/ of the same nanopb checkout"\n'

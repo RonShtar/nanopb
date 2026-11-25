@@ -5,10 +5,8 @@ nanopb's .pb.c/.h) and protocol filters (ProtocolFilterEmitter, <name>_filter.c/
 from __future__ import unicode_literals
 
 import os
-import re
 import sys
 
-from collections import OrderedDict
 
 # nanopb's generator (read-only, from the checkout this tool lives in) does the
 # descriptor parsing, option handling and naming styles; env.setup() puts it
@@ -24,7 +22,6 @@ Globals = nanopb.Globals
 from filter_model import (ANY_FQN, GeneratorError, RET_ALLOW, RET_REJECT, Route, Strategy,  # noqa: E402
                           drop_line, ir_message_for_fqn,
                           strip_proto_ext, type_url_hash, validator_func_name)
-from fast_decode import FastDecodeEmitter  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -332,7 +329,6 @@ class ProtocolFilterEmitter(object):
                 % name)
         self._check_any_storage()
         self._holds_any = {}
-        self._fast_walk = False         # the walk reads Any values where the fast path left them
 
     # -- model ----------------------------------------------------------------
 
@@ -481,10 +477,8 @@ class ProtocolFilterEmitter(object):
         item = access if count is None else '%s[i%d]' % (access, level)
         inner = indent if count is None else indent + '        '
         if sub is self.any_ir:
-            # The fast path leaves the value in the packet; the Any's value array holds where.
-            value = (('pbf_value_at(%s.value.bytes)' if self._fast_walk else '%s.value.bytes') % item)
-            body = ['%sif (%s_check_any(%s.type_url, sizeof(%s.type_url), %s, %s.value.size, '
-                    'depth + 1) != 0) return %s;\n' % (inner, self.name, item, item, value, item, RET_REJECT)]
+            body = ['%sif (%s_check_any_field(&%s, depth + 1) != 0) return %s;\n'
+                    % (inner, self.name, item, RET_REJECT)]
         else:
             body = self._walk(sub, item + '.', inner, level + 1, active)
         if count is None:
@@ -502,314 +496,153 @@ class ProtocolFilterEmitter(object):
                 result.append((fqn, msg))
         return result
 
+    def _check_names(self, irs):
+        """<unit>_check_<Message> for every message, unique within the file."""
+        names, taken = {}, set(['%s_check_any' % self.name, '%s_check_any_field' % self.name])
+        for fqn, msg in irs:
+            ctype = self.ctype(msg)
+            label = '%s_check_%s' % (self.name, ctype[len(self.name) + 1:]
+                                     if ctype.startswith(self.name + '_') else ctype)
+            base, n = label, 2
+            while label in taken:
+                label, n = '%s_%d' % (base, n), n + 1
+            taken.add(label)
+            names[fqn] = label
+        return names
+
+    def _decode_and_validate(self, fqn, msg, target):
+        """pb_decode `value` into `target` (a pointer expression), then run the validator."""
+        yield '    pb_istream_t stream = pb_istream_from_buffer(value, value_size);\n\n'
+        yield '    if (!pb_decode(&stream, %s_fields, %s)) {\n' % (self.ctype(msg), target)
+        for line in self._reject('        ', 'cannot decode %s' % fqn):
+            yield line
+        yield '    }\n'
+        yield '    if (!%s(%s, NULL)) {\n' % (validator_func_name(msg), target)
+        for line in self._reject('        ', '%s validation failed' % fqn):
+            yield line
+        yield '    }\n'
+
+    def _check_function(self, fqn, msg, check, holds_any):
+        """The check function of one message (see the comment above them in the C)."""
+        ctype = self.ctype(msg)
+        signature = 'static int %s(const pb_byte_t *value, size_t value_size, int depth)\n' % check
+        if not holds_any:
+            yield '/** @brief Check one %s: pb_decode, then its validator. 0 allows, -1 drops. */\n' % fqn
+            yield signature
+            yield '{\n'
+            yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
+            yield '    static %s msg;\n' % ctype
+            yield '#else\n'
+            yield '    %s msg;\n' % ctype
+            yield '#endif\n'
+            for line in self._decode_and_validate(fqn, msg, '&msg'):
+                yield line
+            yield '    (void)depth;\n'
+            yield '    return %s;\n' % RET_ALLOW
+            yield '}\n\n'
+            return
+        yield '/**\n'
+        yield ' * @brief Check one %s, then the message in each of its google.protobuf.Any fields.\n' % fqn
+        yield ' *\n'
+        yield ' * It can arrive inside its own Any, so static buffers keep one struct per nesting level.\n'
+        yield ' */\n'
+        yield signature
+        yield '{\n'
+        yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
+        yield '    static %s levels[PB_VALIDATE_FILTER_MAX_ANY_DEPTH];\n' % ctype
+        yield '    %s *msg = &levels[depth];\n' % ctype
+        yield '#else\n'
+        yield '    %s level;\n' % ctype
+        yield '    %s *msg = &level;\n' % ctype
+        yield '#endif\n'
+        for line in self._decode_and_validate(fqn, msg, 'msg'):
+            yield line
+        yield '\n'
+        for line in self._walk(msg, 'msg->', '    '):
+            yield line
+        yield '    return %s;\n' % RET_ALLOW
+        yield '}\n\n'
+
     def source(self):
-        name = self.name
+        name, public = self.name, self.public_name
+        irs = self._protocol_irs()
+        check_names = self._check_names(irs)
+        nested = set(str(msg.name) for _, msg in irs if self.holds_any(msg))
+        any_ctype = self.ctype(self.any_ir)
+
         yield '/* Packet filter for protocol %s, generated by nanopb-validate --protocol-filter. */\n' % name
         yield '#include "%s_filter.h"\n' % name
-        yield '#include <string.h>\n'
         yield c_layout.lib_include('pb_decode.h')
         for header in self.pb_headers:
             yield '#include "%s"\n' % header
         for header in self.validate_headers:
             yield '#include "%s"\n' % header
         yield '\n'
-        yield '/* Levels of google.protobuf.Any resolved inside each other (stack use grows\n'
-        yield ' * with it: one decoded payload struct per level). */\n'
-        yield '#ifndef PB_VALIDATE_FILTER_MAX_ANY_DEPTH\n#define PB_VALIDATE_FILTER_MAX_ANY_DEPTH 4\n#endif\n\n'
-
-        any_ctype = self.ctype(self.any_ir)
-        cases = OrderedDict()
-        for fqn, msg in self._protocol_irs():
-            cases.setdefault(type_url_hash(fqn), []).append((fqn, msg))
-
-        # A named constant per message hash, so the switch reads
-        # "case CAMERA_HASH_CAMERA_FRAME:" (same code as a bare number).
-        hash_names, used = {}, set()
-        for value, entries in cases.items():
-            for fqn, _ in entries:
-                base = '%s_HASH_%s' % (name.upper(), re.sub(r'[^A-Za-z0-9]', '_', fqn).upper())
-                label, n = base, 2
-                while label in used:
-                    label, n = '%s_%d' % (base, n), n + 1
-                used.add(label)
-                hash_names[fqn] = label
-        width = max(len(label) for label in used) + 1
-        yield '/* Hash of each message name in the type_url (the switch below). */\n'
-        for value, entries in cases.items():
-            for fqn, _ in entries:
-                yield '#define %s0x%08xu /* "%s" */\n' % (hash_names[fqn].ljust(width), value, fqn)
-        yield '\n'
-
-        # One static function per message (<unit>_check_<msg>): each keeps only its own
-        # payload struct, so an Any level costs that message's stack, not the largest
-        # message's. They are noinline: inlined into <unit>_check_any, every level
-        # would again reserve the stack of the largest message.
-        up = name.upper()
-        drop = 'PB_VALIDATE_FILTER_DROP("%s", ' % self.public_name.replace('"', "'")
-        nested = set(str(msg.name) for _, msg in self._protocol_irs() if self.holds_any(msg))
-        check_names, taken = {}, set(['%s_check_any' % name])
-        for fqn, msg in self._protocol_irs():
-            ctype = self.ctype(msg)
-            label = '%s_check_%s' % (name, ctype[len(name) + 1:] if ctype.startswith(name + '_') else ctype)
-            base, n = label, 2
-            while label in taken:
-                label, n = '%s_%d' % (base, n), n + 1
-            taken.add(label)
-            check_names[fqn] = label
-
-        def define(signature, body, comment):
-            width = max(len(line) for line in body) + 5
-            out = '/* %s */\n#define %s \\\n' % (comment, signature)
-            for i, line in enumerate(body):
-                out += '    ' + (line if i == len(body) - 1 else line.ljust(width) + '\\') + '\n'
-            return out + '\n'
-
-        yield ('/* Each message is checked in its own function, which must stay a separate\n'
-               ' * function: its stack frame then holds only that message\'s struct. */\n')
-        yield '#if defined(__GNUC__) || defined(__clang__)\n'
-        yield '#define %s_NOINLINE __attribute__((noinline))\n' % up
-        yield '#else\n#define %s_NOINLINE\n#endif\n\n' % up
-        yield ('/* Where a decoded payload lives: on the stack, or static with\n'
-               ' * PB_VALIDATE_FILTER_STATIC_BUFFERS (nothing large on the stack; not reentrant).\n'
-               ' * A message with Any fields can come back inside itself, so it gets one\n'
-               ' * static slot per nesting level. */\n')
-        yield '#ifdef PB_VALIDATE_FILTER_STATIC_BUFFERS\n'
-        yield '#define %s_PAYLOAD(TYPE) static TYPE payload_store; TYPE *payload = &payload_store\n' % up
-        yield ('#define %s_NESTED_PAYLOAD(TYPE) static TYPE payload_store[PB_VALIDATE_FILTER_MAX_ANY_DEPTH]; '
-               'TYPE *payload = &payload_store[depth]\n' % up)
-        yield '#else\n'
-        yield '#define %s_PAYLOAD(TYPE) TYPE payload_store; TYPE *payload = &payload_store\n' % up
-        yield '#define %s_NESTED_PAYLOAD(TYPE) %s_PAYLOAD(TYPE)\n' % (up, up)
-        yield '#endif\n\n'
-        yield define('%s_DECODE(NAME, TYPE, VALIDATE)' % up, [
-            'do {',
-            '    pb_istream_t stream = pb_istream_from_buffer(value, value_size);',
-            '    if (!pb_decode(&stream, &TYPE##_msg, payload)) {',
-            '        %s"cannot decode " NAME);' % drop,
-            '        return %s;' % RET_REJECT,
-            '    }',
-            '    if (!VALIDATE(payload, NULL)) {',
-            '        %sNAME " validation failed");' % drop,
-            '        return %s;' % RET_REJECT,
-            '    }',
-            '} while (0)',
-        ], 'Decode the Any\'s value into *payload as TYPE and validate it; drop the packet if either fails.')
-        yield define('%s_CHECK_MESSAGE(FUNC, NAME, TYPE, VALIDATE)' % up, [
-            'static %s_NOINLINE int FUNC(const pb_byte_t *value, size_t value_size, int depth)' % up,
-            '{',
-            '    %s_PAYLOAD(TYPE);' % up,
-            '    (void)depth;',
-            '    %s_DECODE(NAME, TYPE, VALIDATE);' % up,
-            '    return %s;' % RET_ALLOW,
-            '}',
-        ], 'The check function of a message without Any fields: decode, validate, allow.')
-        yield define('%s_CHECK_MESSAGE_FAST(FUNC, FAST_FUNC, NAME, TYPE, VALIDATE)' % up, [
-            'static %s_NOINLINE int FUNC(const pb_byte_t *value, size_t value_size, int depth)' % up,
-            '{',
-            '    %s_PAYLOAD(TYPE);' % up,
-            '    (void)depth;',
-            '    %s_FAST(FAST_FUNC, NAME, VALIDATE);' % up,
-            '    %s_DECODE(NAME, TYPE, VALIDATE);' % up,
-            '    return %s;' % RET_ALLOW,
-            '}',
-        ], 'The same, decoded by the fast path first (pb_decode when it is unsure).')
+        yield '/**\n'
+        yield ' * @name Packet filter %s_udp / %s_tcp\n' % (public, public)
+        yield ' *\n'
+        yield ' * A packet is a google.protobuf.Any. Its type_url names one of the %d messages\n' % len(irs)
+        yield ' * below, which is decoded with pb_decode and checked by its validator. Every\n'
+        yield ' * google.protobuf.Any inside it is checked the same way, up to\n'
+        yield ' * PB_VALIDATE_FILTER_MAX_ANY_DEPTH levels. Anything else is dropped, and every\n'
+        yield ' * drop is reported through PB_VALIDATE_FILTER_DROP.\n'
+        yield ' */\n\n'
 
         if nested:
-            yield ('static int %s_check_any(const char *url, size_t url_size, const pb_byte_t *value, '
-                   'size_t value_size, int depth);\n\n' % name)
-        fast = FastDecodeEmitter(self)
-        fast_lines = fast.source(self._protocol_irs())
-        fast_used = bool(fast_lines)
-        for line in fast_lines:
-            yield line
-        yield fast.fast_macro(drop)
-        yield '/* One check function per message of the protocol. */\n'
-        for fqn, msg in self._protocol_irs():
-            ctype, check = self.ctype(msg), validator_func_name(msg)
-            key = fast.entry(msg) if fast.eligible(msg) else None
-            if str(msg.name) not in nested:
-                if key:
-                    yield '%s_CHECK_MESSAGE_FAST(%s, %s, "%s", %s, %s)\n' % (
-                        up, check_names[fqn], key, fqn, ctype, check)
-                else:
-                    yield '%s_CHECK_MESSAGE(%s, "%s", %s, %s)\n' % (up, check_names[fqn], fqn, ctype, check)
-                continue
-            yield '\n/* %s: decode and validate, then resolve its Any fields. */\n' % fqn
-            yield ('static %s_NOINLINE int %s(const pb_byte_t *value, size_t value_size, int depth)\n{\n'
-                   % (up, check_names[fqn]))
-            yield '    %s_NESTED_PAYLOAD(%s);\n' % (up, ctype)
-            if key:
-                yield '#ifdef %s_FAST_DECODE\n' % up
-                yield '    {\n'
-                yield '        int pbf_r = %s(value, value_size, payload, depth);\n' % key
-                yield '        if (pbf_r == PBF_OK) {\n'
-                yield '            if (!%s(payload, NULL)) {\n' % check
-                yield '                %s"%s validation failed");\n' % (drop, fqn)
-                yield '                return %s;\n' % RET_REJECT
-                yield '            }\n'
-                self._fast_walk = True
-                try:
-                    for line in self._walk(msg, 'payload->', '            '):
-                        yield line
-                finally:
-                    self._fast_walk = False
-                yield '            return %s;\n' % RET_ALLOW
-                yield '        }\n'
-                yield '        if (pbf_r == PBF_DROP) {\n'
-                yield '            %s"cannot decode %s");\n' % (drop, fqn)
-                yield '            return %s;\n' % RET_REJECT
-                yield '        }\n'
-                yield '    }\n'
-                yield '#endif\n'
-            yield '    %s_DECODE("%s", %s, %s);\n' % (up, fqn, ctype, check)
-            for line in self._walk(msg, 'payload->', '    '):
+            yield 'static int %s_check_any_field(const %s *any, int depth);\n\n' % (name, any_ctype)
+        for fqn, msg in irs:
+            for line in self._check_function(fqn, msg, check_names[fqn], str(msg.name) in nested):
                 yield line
-            yield '    return %s;\n}\n\n' % RET_ALLOW
-        yield '\n'
 
-        yield ('/* The name in the type_url is NAME (length first: it is known from the hash loop). */\n'
-               '#define %s_NAME_IS(NAME) \\\n'
-               '    (name_size == sizeof(NAME) - 1 && memcmp(type_name, NAME, sizeof(NAME) - 1) == 0)\n\n' % up)
-        yield define('%s_FILTER_MESSAGE(NAME, FUNC)' % up, [
-            'do {',
-            '    if (%s_NAME_IS(NAME)) {' % up,
-            '        return FUNC(value, value_size, depth);',
-            '    }',
-            '} while (0)',
-        ], 'The type_url names NAME: check the Any\'s value with that message\'s function.')
+        routes = sorted((type_url_hash(fqn), fqn) for fqn, _ in irs)
+        width = max(len(fqn) for _, fqn in routes) + 4
+        yield '/** @brief The messages a type_url can name, sorted by pb_filter_type_hash() for pb_filter_find_route(). */\n'
+        yield 'static const pb_filter_route_t %s_routes[] = {\n' % name
+        for value, fqn in routes:
+            yield '    { 0x%08xu, %s%s },\n' % (value, ('"%s",' % fqn).ljust(width), check_names[fqn])
+        yield '};\n\n'
 
-        yield '/* The type_url is the opcode: it selects the message to decode and validate.\n'
-        yield ' * type_url and value are read in place: from the packet itself for the outer\n'
-        yield ' * Any, from the decoded struct for an Any inside a message. */\n'
-        yield ('static int %s_check_any(const char *url, size_t url_size, const pb_byte_t *value, '
-               'size_t value_size, int depth)\n{\n' % name)
-        yield '    const char *type_name = url;\n'
-        yield '    const char *cursor;\n'
-        yield '    size_t name_size;\n'
-        yield '    uint32_t hash = 0;\n\n'
+        indent = ' ' * len('static int %s_check_any(' % name)
+        yield '/** @brief The type_url is the opcode: it selects the message that checks value. */\n'
+        yield 'static int %s_check_any(const char *type_url, size_t type_url_size,\n' % name
+        yield '%sconst pb_byte_t *value, size_t value_size, int depth)\n' % indent
+        yield '{\n'
+        yield '    const pb_filter_route_t *route;\n\n'
         yield '    if (depth >= PB_VALIDATE_FILTER_MAX_ANY_DEPTH) {\n'
         for line in self._reject('        ', 'google.protobuf.Any nested too deep'):
             yield line
         yield '    }\n'
-        yield '    /* One pass: "type.googleapis.com/pkg.Msg" -> hash and length of "pkg.Msg"\n'
-        yield '     * (the hash restarts after every \'/\'; any host prefix is accepted). */\n'
-        yield '    for (cursor = url; cursor < url + url_size && *cursor != \'\\0\'; cursor++) {\n'
-        yield '        if (*cursor == \'/\') {\n'
-        yield '            type_name = cursor + 1;\n'
-        yield '            hash = 0;\n'
-        yield '        } else {\n'
-        yield '            hash = hash * 31u + (uint32_t)(uint8_t)*cursor;\n'
-        yield '        }\n'
-        yield '    }\n'
-        yield '    name_size = (size_t)(cursor - type_name);\n\n'
-        yield '    switch (hash) {\n'
-        for value, entries in cases.items():
-            yield '        case %s:\n' % hash_names[entries[0][0]]
-            for fqn, msg in entries:
-                yield '            %s_FILTER_MESSAGE("%s", %s);\n' % (up, fqn, check_names[fqn])
-            yield '            break;\n'
-        yield '        default:\n            break;\n    }\n'
-        for line in self._reject('    ', 'type_url is not a message of this protocol'):
+        yield ('    route = pb_filter_find_route(%s_routes, sizeof(%s_routes) / sizeof(%s_routes[0]),\n'
+               % (name, name, name))
+        yield '                                 type_url, type_url_size);\n'
+        yield '    if (route == NULL) {\n'
+        for line in self._reject('        ', 'type_url is not a message of this protocol'):
             yield line
-        yield '}\n\n'
-        for macro in ('NOINLINE', 'PAYLOAD', 'NESTED_PAYLOAD', 'NAME_IS', 'DECODE', 'CHECK_MESSAGE',
-                      'CHECK_MESSAGE_FAST', 'FAST', 'FILTER_MESSAGE'):
-            yield '#undef %s_%s\n' % (up, macro)
-        yield '\n'
-
-        public = self.public_name
-        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % public
-        yield '    /* The packet is a google.protobuf.Any, read in place: nothing is copied and no\n'
-        yield '     * Any struct is filled. Field 1 type_url, field 2 value; other fields are\n'
-        yield '     * skipped and the last occurrence wins, as pb_decode does. */\n'
-        if fast_used:
-            yield '#ifdef %s_FAST_DECODE\n' % up
-            yield '    /* The same loop on the fast path\'s inline readers. */\n'
-            yield '    pbf_in_t in;\n'
-            yield '    const char *url = "";\n'
-            yield '    size_t url_size = 0;\n'
-            yield '    const pb_byte_t *value = packet;\n'
-            yield '    size_t value_size = 0;\n'
-            yield '    uint32_t key;\n'
-            yield '    bool bad = false;\n\n'
-            yield '    (void)ctx;\n'
-            yield '    in.p = packet;\n'
-            yield '    in.end = packet + packet_size;\n'
-            yield '    while (in.p != in.end) {\n'
-            yield '        uint32_t tag;\n'
-            yield '        if (!pbf_varint32(&in, &key)) {\n'
-            yield '            bad = true;\n'
-            yield '            break;\n'
-            yield '        }\n'
-            yield '        tag = key >> 3;\n'
-            yield '        if ((tag == 1 || tag == 2) && (key & 7u) == PB_WT_STRING) {\n'
-            yield '            pbf_in_t field;\n'
-            yield '            if (!pbf_sub(&in, &field)) {\n'
-            yield '                bad = true;\n'
-            yield '                break;\n'
-            yield '            }\n'
-            yield '            if (tag == 1) {\n'
-            yield '                url = (const char *)field.p;\n'
-            yield '                url_size = (size_t)(field.end - field.p);\n'
-            yield '            } else {\n'
-            yield '                value = field.p;\n'
-            yield '                value_size = (size_t)(field.end - field.p);\n'
-            yield '            }\n'
-            yield '        } else if (tag == 1 || tag == 2 || !pbf_skip(&in, key & 7u)) {\n'
-            yield '            bad = true;\n'
-            yield '            break;\n'
-            yield '        }\n'
-            yield '    }\n'
-            yield '    if (bad) {\n'
-            for line in self._reject('        ', 'packet is not a google.protobuf.Any'):
-                yield line
-            yield '    }\n'
-            yield '    return %s_check_any(url, url_size, value, value_size, 0);\n' % name
-            yield '#else\n'
-        yield '    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);\n'
-        yield '    const char *url = "";\n'
-        yield '    size_t url_size = 0;\n'
-        yield '    const pb_byte_t *value = packet;\n'
-        yield '    size_t value_size = 0;\n'
-        yield '    pb_wire_type_t wire_type;\n'
-        yield '    uint32_t tag;\n'
-        yield '    bool eof = false;\n\n'
-        yield '    (void)ctx;\n'
-        yield '    while (pb_decode_tag(&stream, &wire_type, &tag, &eof)) {\n'
-        yield '        if ((tag == 1 || tag == 2) && wire_type == PB_WT_STRING) {\n'
-        yield '            uint32_t size;\n'
-        yield '            const pb_byte_t *at;\n'
-        yield '            if (!pb_decode_varint32(&stream, &size) || size > stream.bytes_left) {\n'
-        yield '                eof = false;\n'
-        yield '                break;\n'
-        yield '            }\n'
-        yield '            at = packet + (packet_size - stream.bytes_left);\n'
-        yield '            if (tag == 1) {\n'
-        yield '                url = (const char *)at;\n'
-        yield '                url_size = size;\n'
-        yield '            } else {\n'
-        yield '                value = at;\n'
-        yield '                value_size = size;\n'
-        yield '            }\n'
-        yield '            if (!pb_read(&stream, NULL, size)) {\n'
-        yield '                eof = false;\n'
-        yield '                break;\n'
-        yield '            }\n'
-        yield '        } else if (tag == 1 || tag == 2 || !pb_skip_field(&stream, wire_type)) {\n'
-        yield '            eof = false;\n'
-        yield '            break;\n'
-        yield '        }\n'
         yield '    }\n'
-        yield '    if (!eof) {\n'
+        yield '    return route->check(value, value_size, depth);\n'
+        yield '}\n\n'
+
+        if nested:
+            yield '/** @brief Check the message inside a google.protobuf.Any field of a decoded message. */\n'
+            yield 'static int %s_check_any_field(const %s *any, int depth)\n' % (name, any_ctype)
+            yield '{\n'
+            yield ('    return %s_check_any(any->type_url, sizeof(any->type_url),\n'
+                   '%sany->value.bytes, any->value.size, depth);\n'
+                   % (name, ' ' * len('    return %s_check_any(' % name)))
+            yield '}\n\n'
+
+        yield 'int %s_udp(void *ctx, const uint8_t *packet, size_t packet_size)\n{\n' % public
+        yield '    pb_filter_any_t any;\n\n'
+        yield '    (void)ctx;\n'
+        yield '    if (!pb_filter_read_any(packet, packet_size, &any)) {\n'
         for line in self._reject('        ', 'packet is not a google.protobuf.Any'):
             yield line
         yield '    }\n'
-        yield '    return %s_check_any(url, url_size, value, value_size, 0);\n' % name
-        if fast_used:
-            yield '#endif\n'
+        yield '    return %s_check_any(any.type_url, any.type_url_size, any.value, any.value_size, 0);\n' % name
         yield '}\n\n'
         yield 'int %s_tcp(void *ctx, const uint8_t *packet, size_t packet_size, bool is_to_server)\n{\n' % public
         yield '    (void)is_to_server;\n    return %s_udp(ctx, packet, packet_size);\n}\n' % public
+
 
 def protocol_messages(index, files):
     """FQNs of the messages a protocol filter accepts: every message of `files`

@@ -602,7 +602,8 @@ class StudioTests(LuaTestCase):
         names = set(self.mock.menus.keys())
         self.assertEqual(names, {'nanopb/Set protos directory (once)...',
                                  'nanopb/Generate C (merged + validation)...',
-                                 'nanopb/Generate test packets (passed + dropped)...', 'nanopb/About'})
+                                 'nanopb/Generate test packets (passed + dropped)...',
+                                 'nanopb/Add nanopb rules to buf protos...', 'nanopb/About'})
 
     def test_generate_c_through_backend(self):
         picker = self.picker('nanopb/Generate C (merged + validation)...', 'Generate C (merged + validation)')
@@ -825,6 +826,151 @@ class StudioTests(LuaTestCase):
         window = self.last_window()
         self.assertTrue(window.text.startswith('FAILED'), window.text)
         self.assertIn('is not a directory', window.text)
+
+    # -- Add nanopb rules to buf protos (validate/tools/buf_to_validate.py) ------------
+
+    BUF_MENU = 'nanopb/Add nanopb rules to buf protos...'
+    BUF_TITLE = 'Add nanopb rules to buf protos'
+
+    def buf_project(self):
+        """A buf project: buf's validate.proto and one message with buf rules."""
+        root = os.path.join(self.tmp, 'buf project')
+        os.makedirs(os.path.join(root, 'robot'))
+        shutil.copytree(os.path.join(TESTS_DIR, 'fixtures', 'protovalidate', 'buf'), os.path.join(root, 'robot', 'buf'))
+        with open(os.path.join(root, 'robot', 'robot.proto'), 'w') as handle:
+            handle.write('syntax = "proto3";\npackage robot;\nimport "buf/validate/validate.proto";\n'
+                         'message Move {\n  uint32 speed = 1 [(buf.validate.field).uint32.lte = 9];\n'
+                         '  string name = 2 [(buf.validate.field).string.max_len = 12];\n}\n')
+        return root
+
+    def stub_gui(self):
+        """Record what buttons do instead of opening folders, captures or reloading."""
+        self.lua.execute('''
+            gui_calls = {}
+            local function record(...) gui_calls[#gui_calls + 1] = table.concat({ ... }, "|") end
+            function browser_open_url(url) record("browse", url) end
+            function open_capture_file(path, filter) record("open", path, filter) end
+            function reload_lua_plugins() record("reload") end
+            function set_filter(text) record("filter", text) end
+            function apply_filter() record("apply") end
+        ''')
+        return self.lua.eval('gui_calls')
+
+    def test_buf_rules_into_an_output_folder(self):
+        calls = self.stub_gui()
+        source, out = self.buf_project(), os.path.join(self.tmp, 'converted')
+        self.answer(self.BUF_TITLE, source, out, 'no', 'no', 'yes')
+        self.mock.menus[self.BUF_MENU]()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('1 file(s) changed into', window.text)
+        self.assertIn('robot.Move.name', window.text)          # the size taken from max_len
+        with open(os.path.join(out, 'robot', 'robot.proto')) as handle:
+            text = handle.read()
+        self.assertIn('(buf.validate.field).uint32.lte = 9', text)   # buf kept
+        self.assertIn('(validate.rules).uint32.lte = 9', text)       # ours added
+        self.assertIn('(nanopb).max_length = 12', text)
+        with open(os.path.join(source, 'robot', 'robot.proto')) as handle:
+            self.assertNotIn('validate.rules', handle.read())         # the project is not touched
+        # The converted folder becomes the protos directory and is loaded into the dissector.
+        window.buttons['Use as protos directory']()
+        loaded = self.last_window()
+        self.assertTrue(loaded.text.startswith('OK'), loaded.text)
+        self.assertIn('ROBOT', loaded.text)
+        loaded.buttons['Activate']()
+        self.assertEqual(calls[len(calls)], 'reload')
+        with open(os.path.join(self.tmp, 'nanopb', 'studio_config.luadata')) as handle:
+            config = handle.read()
+        self.assertIn('protos_root = "%s"' % out.replace('\\', '\\\\'), config)
+        # Asked again, the dialog starts from the last project and output folder.
+        self.assertIn('buf_source = "%s"' % source.replace('\\', '\\\\'), config)
+
+    def test_buf_rules_in_place_with_backup(self):
+        source = self.buf_project()
+        self.answer(self.BUF_TITLE, source, '', 'yes', 'no', 'no')
+        self.mock.menus[self.BUF_MENU]()
+        window = self.last_window()
+        self.assertTrue(window.text.startswith('OK'), window.text)
+        self.assertIn('in place', window.text)
+        with open(os.path.join(source, 'robot', 'robot.proto')) as handle:
+            text = handle.read()
+        self.assertIn('(validate.rules).uint32.lte = 9', text)
+        self.assertNotIn('(nanopb).max_length', text)                 # sizes: no
+        self.assertTrue(os.path.isfile(os.path.join(source, 'robot', 'robot.proto.bak')))
+
+    def test_buf_rules_wrong_answers(self):
+        source = self.buf_project()
+        for answers, message in (((source, '', 'no', 'yes', 'yes'), 'needs an output folder'),
+                                 ((source, '', 'maybe', 'no', 'yes'), 'Answer yes or no'),
+                                 (('', '', 'no', 'no', 'yes'), 'Enter the buf project folder'),
+                                 ((os.path.join(self.tmp, 'nope'), '', 'no', 'no', 'yes'), 'does not exist')):
+            self.answer(self.BUF_TITLE, *answers)
+            self.mock.menus[self.BUF_MENU]()
+            window = self.last_window()
+            self.assertTrue(window.text.startswith('FAILED'), window.text)
+            self.assertIn(message, window.text)
+        with open(os.path.join(source, 'robot', 'robot.proto')) as handle:
+            self.assertNotIn('validate.rules', handle.read())
+
+    # -- every menu, every button ------------------------------------------------------
+
+    def test_every_menu_and_every_button(self):
+        """Open each menu item and press every button of every window it opens, and of the
+        windows those buttons open. Nothing may fail, and every button must be reached."""
+        calls = self.stub_gui()
+        source = self.buf_project()
+        self.answer('Generate C (merged + validation)', FIXTURES, self.out)
+        self.answer('Generate C (merged + validation): choose', 'envelope')
+        self.answer('Generate test packets', FIXTURES, self.out)
+        self.answer('Generate test packets: choose', '1-2')
+        self.answer(self.BUF_TITLE, source, os.path.join(self.tmp, 'converted'), 'no', 'no', 'yes')
+        self.answer('Set protos directory', FIXTURES, self.out, '', '', '', '', '', '', '', '')
+        # The picker's Generate goes last: the other buttons only change the selection.
+        order = {'Select none': 0, 'Select all': 1, 'Choose...': 2}
+        pressed = []
+        for menu in ('nanopb/About', 'nanopb/Generate C (merged + validation)...',
+                     'nanopb/Generate test packets (passed + dropped)...', self.BUF_MENU,
+                     'nanopb/Set protos directory (once)...'):
+            first = len(self.mock.windows) + 1
+            self.mock.menus[menu]()
+            index = first
+            while index <= len(self.mock.windows):
+                window = self.mock.windows[index]
+                self.assertFalse(window.text.startswith('FAILED'), '%s: %s' % (window.title, window.text))
+                for label in sorted(window.buttons.keys(), key=lambda b: (order.get(b, 3), b)):
+                    window.buttons[label]()
+                    pressed.append((menu, window.title, label))
+                index += 1
+        self.assertEqual(sorted(set((title, label) for _, title, label in pressed)), sorted([
+            ('nanopb studio', 'Open plugins folder'),
+            ('Generate C (merged + validation): choose units', 'Choose...'),
+            ('Generate C (merged + validation): choose units', 'Select all'),
+            ('Generate C (merged + validation): choose units', 'Select none'),
+            ('Generate C (merged + validation): choose units', 'Generate'),
+            ('Generate C (merged + validation)', 'Open output folder'),
+            ('Generate test packets: choose units', 'Choose...'),
+            ('Generate test packets: choose units', 'Select all'),
+            ('Generate test packets: choose units', 'Select none'),
+            ('Generate test packets: choose units', 'Generate'),
+            ('Generate test packets', 'Open capture'),
+            ('Generate test packets', 'Show passed only'),
+            ('Generate test packets', 'Show dropped only'),
+            ('Generate test packets', 'Show all'),
+            ('Generate test packets', 'Open packets folder'),
+            ('Generate test packets', 'Open output folder'),
+            (self.BUF_TITLE, 'Use as protos directory'),
+            (self.BUF_TITLE, 'Open output folder'),
+            (self.BUF_TITLE, 'Activate'),
+            ('Set protos directory', 'Activate'),
+        ]))
+        recorded = [calls[i] for i in range(1, len(calls) + 1)]
+        for prefix in ('browse|', 'open|', 'filter|nanopb.validation == "passed"',
+                       'filter|nanopb.validation == "dropped"', 'filter|', 'apply', 'reload'):
+            self.assertTrue(any(c.startswith(prefix) for c in recorded), (prefix, recorded))
+        # Folders are opened as file:// URLs, never as a shell command.
+        for call in recorded:
+            if call.startswith('browse|'):
+                self.assertTrue(call.startswith('browse|file:///'), call)
 
 
 if __name__ == '__main__':

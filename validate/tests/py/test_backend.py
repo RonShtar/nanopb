@@ -390,8 +390,8 @@ class BackendTests(unittest.TestCase):
             header = handle.read()
         self.assertEqual(re.findall(r'^int (\w+)\(void \*ctx', header, re.M), ['robot_udp', 'robot_tcp'])
         with open(os.path.join(out, 'robot', 'robot.pb.c')) as handle:
-            self.assertEqual(sorted(re.findall(r'case (ROBOT_HASH_\w+):', handle.read())),
-                             ['ROBOT_HASH_ROBOT_MOVE', 'ROBOT_HASH_ROBOT_STOP'])
+            self.assertEqual(sorted(re.findall(r'"(robot\.\w+)", +robot_check_\w+ \}', handle.read())),
+                             ['robot.Move', 'robot.Stop'])
         shutil.rmtree(os.path.join(self.tmp, 'packets'), ignore_errors=True)
         _, manifest = self.gen_packets(root, '--mode', 'protocol')
         self.assertTrue(all(e['any_wrapped'] for e in manifest['packets']))
@@ -961,8 +961,8 @@ class BackendTests(unittest.TestCase):
         with open(os.path.join(unit_dir, 'envelope.pb.c')) as handle:
             text = handle.read()
         self.assertIn('#include "filter/envelope/envelope_validate.h"', text)
-        self.assertIn('#define ENVELOPE_FILTER_MESSAGE(NAME, FUNC)', text)
-        self.assertIn('#undef ENVELOPE_FILTER_MESSAGE', text)
+        self.assertIn('static const pb_filter_route_t envelope_routes[] = {', text)
+        self.assertNotIn('#define', text.split('PB_BIND(')[-1])   # the filter defines no macros
         with open(os.path.join(unit_dir, 'envelope_validate.h')) as handle:
             self.assertIn('#include "filter/envelope/envelope.pb.h"', handle.read())
         status, _, err = run_backend('gen-c', '--protos-root', FIXTURES, '--out', out, '--unit', 'envelope',
@@ -1031,7 +1031,8 @@ class BackendTests(unittest.TestCase):
         self.compile_each(cc, ['-std=c99', '-Wall', '-Werror', '-DPB_VALIDATE_DEBUG', '-include', logger,
                                '-I', plain_dir], [os.path.join(plain_dir, 'plain.pb.c')])
         with open(os.path.join(unit_dir, 'pb_validate.h')) as handle:
-            old = handle.read().replace('#define PB_VALIDATE_RUNTIME_VERSION 2', '#define PB_VALIDATE_RUNTIME_VERSION 1')
+            old = re.sub(r'#define PB_VALIDATE_RUNTIME_VERSION \d+', '#define PB_VALIDATE_RUNTIME_VERSION 1',
+                         handle.read())
         with open(os.path.join(unit_dir, 'pb_validate.h'), 'w') as handle:
             handle.write(old)
         build = subprocess.run(cc + ['-std=c99', '-I', unit_dir, '-c', os.path.join(unit_dir, 'envelope_validate.c'),

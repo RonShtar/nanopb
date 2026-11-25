@@ -32,58 +32,47 @@ Costs that used to be on this path and no longer are:
 - With oneof dispatch, the selected arm was validated twice: once by the
   entrypoint validator and once by the dispatch.
 
-## Protocol filters: the fast path
+## Protocol filters: what a packet costs
 
-A protocol filter (`<protocol>_udp` / `_tcp`) no longer runs `pb_decode` on the hot path.
-For every message type the generator writes a decoder of its own
-(`nanopb_validate/fast_decode.py`) that fills the same struct straight from the receive
-buffer, and then runs the same generated validators on it:
+A protocol filter (`<protocol>_udp` / `_tcp`) decodes every message with nanopb's
+`pb_decode` and checks it with the same generated validators as everywhere else; it has
+no decoder of its own. What it does to keep the per-packet cost down:
 
-- a `switch` on the field number; varints, fixed values, strings and bytes are read inline
-  with nanopb's own acceptance rules (varint overflow, "integer too large" for the field's
-  size, string / bytes / array overflow, packed arrays, missing required fields, zero tag,
-  invalid wire types), so a packet is accepted or rejected exactly as `pb_decode` would;
-- only what the validators read is reset (counts, `has_` flags, `which_` fields, scalars,
-  the first byte of a string, the size of bytes), not whole arrays;
-- an `Any` inside a message is not copied: its `type_url` is (the validators read it), its
-  value stays in the packet. After the message is decoded and validated, its `Any`s are
-  resolved from the final struct exactly as before, each payload read where it is in the
-  packet, so a field seen twice, merged or replaced by another oneof member counts the way
-  `pb_decode` counts it;
-- each message is checked in its own `static` function, so an `Any` level costs the stack of
-  that message only, not of the largest message of the protocol.
+- **The outer `Any` is read in place** (`pb_filter_read_any()` in `pb_validate.c`, built on
+  `pb_decode_tag` / `pb_skip_field`): `type_url` and `value` point into the receive buffer,
+  so no `Any` struct is cleared or filled and nothing is copied.
+- **The `type_url` is looked up in a sorted table** (`pb_filter_find_route()`): one pass
+  over the URL for the hash of the name, a binary search, one string compare.
+- **Each message is checked in its own function**, called through the table, so an `Any`
+  level costs the stack of that message only, not of the largest message of the protocol.
+- **Release builds pass `NULL` to the validators**: pass/fail only, no violations buffer.
 
-Whatever it does not reproduce exactly goes to `pb_decode`, which then decides:
-messages with proto2 default values (an explicit `default`, or a proto2 enum whose first
-value is not 0; also checked at run time on the descriptors), and builds with
-`PB_VALIDATE_DEBUG`, `PB_VALIDATE_UTF8`, `PB_CONVERT_DOUBLE_FLOAT`, `PB_WITHOUT_64BIT` or
-`PB_MESSAGE_NESTING_MAX`. Message types with callback/pointer fields, `fixed_count` arrays,
-extensions, more than 64 required fields or an `Any.value` smaller than a pointer keep the
-`pb_decode` path only. `-DPB_VALIDATE_FILTER_NO_FAST_DECODE` turns it off everywhere.
+`validate/tests/py/test_protocol_filter_corpus.py` runs every protocol at `-O2`, `-O0`, with
+`PB_FIELD_32BIT PB_BUFFER_ONLY PB_NO_ERRMSG` and with `PB_VALIDATE_FILTER_STATIC_BUFFERS` on
+the generated packets (each must get its expected verdict) plus duplicated fields,
+truncations, bit flips, inserted and deleted bytes and over-long varints, and requires the
+same verdict from every build.
 
-`validate/tests/py/test_fast_decode.py` builds every protocol both ways (the fast one with
-`PB_VALIDATE_FILTER_TEST_POISON`, which fills the struct with `0xA5` first, so a field the
-fast decoder forgot to set would change a verdict) and compares the verdicts on the
-generated packets plus duplicated fields, truncations, bit flips, inserted and deleted
-bytes and over-long varints; with `PB_FIELD_32BIT PB_BUFFER_ONLY PB_NO_ERRMSG
-PB_VALIDATE_FILTER_STATIC_BUFFERS` and at `-O0` too. During development more than 1.1
-million such packets were compared (camera, gps, motor, the stress protocol and a schema
-with every kind of field, at -O0/-O2/-Os and every switch above): no difference.
+Measured on a PC (x86-64, zig/clang 21, `-O2`, ns per packet, the generated valid and
+invalid packets, best of 5 × 3000 rounds):
 
-Measured on a PC (x86-64, zig/clang 21, `-O2`, ns per packet, best of 5 × 20000 calls):
+| protocol | `-O2` | `-O2` + `PB_BUFFER_ONLY PB_NO_ERRMSG` |
+|---|---|---|
+| `fleet` (stress example, 98 packets) | 575 | 466 |
+| `kinds` (every kind of field, 73 packets) | 1260 | 945 |
 
-| packets | `pb_decode` | fast path | fast path + `PB_FIELD_32BIT PB_BUFFER_ONLY PB_NO_ERRMSG` |
-|---|---|---|---|
-| `camera`, valid (mean) | 330 | **68** | |
-| `fleet`, invalid (mean of 22) | 410 | **87** | 86 |
-| `fleet`, small 100-256 B | 632 | **226** | 190 |
-| `fleet`, medium 400-800 B | 3090 | **455** | 446 |
-| `fleet`, slowest valid packet | 3937 | **1460** | 1392 |
+Until 2026-11 a protocol filter had a second, generated decoder per message type that
+filled the structs without `pb_decode`. It was 3.5-5x faster on these packets (`fleet` 167 ns,
+`kinds` 242 ns) but was a second protobuf decoder to read and maintain, so it was removed;
+the verdicts are identical (compared on 29 000 packets in three build configurations before
+it went). If a filter is too slow on your target, in order of effect: compile the generated
+files and nanopb with optimization (below), `PB_BUFFER_ONLY` + `PB_NO_ERRMSG` (about 20 %),
+a tight `--any-value-size` and tight `max_count` / `max_size` (smaller structs to clear and
+copy).
 
 ## Protocol filters (`Any`): compile flags and packet sizes
 
-The sections below were measured on the `pb_decode` path (before the fast path above);
-the advice still holds. Measured on a PC (zig/clang 21, `camera_udp` and `fleet_udp`,
+The sections below were measured earlier, on the same `pb_decode` path; the advice still holds. Measured on a PC (zig/clang 21, `camera_udp` and `fleet_udp`,
 best of 5 × 200000 calls). Your target's numbers differ; the ratios carry over.
 
 **1. Compile the generated `.c` files with optimization.** Most of the validation code is
@@ -195,9 +184,7 @@ Validation (`pb_validate.h`):
 | `PB_VALIDATE_FILTER_LOG(fmt, ...)` | no-op | Filter logging hook (printf-style or one string). Receives one line per dropped packet in every build, plus every violated rule with `PB_VALIDATE_DEBUG`. |
 | `PB_VALIDATE_FILTER_RULE(reason, path, id, message)` | printf-style via `PB_VALIDATE_FILTER_LOG` | `PB_VALIDATE_DEBUG` only: one call per violated rule after the drop line. |
 | `PB_VALIDATE_FILTER_DROP(filter, reason)` | one string via `PB_VALIDATE_FILTER_LOG` | Called once per dropped packet, on the reject path only; accepted packets never pay for it. |
-| `PB_VALIDATE_FILTER_NO_FAST_DECODE` | off | Protocol filters: `pb_decode` only, no fast path (see [the fast path](#protocol-filters-the-fast-path)). |
-| `PB_VALIDATE_FILTER_TEST_POISON` | off | Tests only: the fast path fills the decode struct with `0xA5` before decoding. |
-| `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` | 4 | Protocol filters (`--protocol-filter`): levels of `Any` resolved inside each other. Each level keeps one decoded payload struct on the stack; `PB_VALIDATE_FILTER_STATIC_BUFFERS` only moves the outermost `Any` to static storage. |
+| `PB_VALIDATE_FILTER_MAX_ANY_DEPTH` | 4 | Protocol filters (`--protocol-filter`): levels of `Any` resolved inside each other. Each level keeps one decoded message on the stack; with `PB_VALIDATE_FILTER_STATIC_BUFFERS` a message gets a static struct (one per level if it holds `Any` fields). Defined in `pb_validate.h`: same value for every file. |
 
 nanopb (`pb.h`, see [reference](reference.md#compilation-options)):
 

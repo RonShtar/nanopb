@@ -1,8 +1,9 @@
 -- nanopb_studio.lua
 --
 -- Tools > nanopb menu for Wireshark: generate merged nanopb C code (with
--- validation) and encoded sample data from a directory of .proto units, and
--- install/update nanopb_any_dissector.lua with a matching schema.
+-- validation) and encoded sample data from a directory of .proto units,
+-- install/update nanopb_any_dissector.lua with a matching schema, and add
+-- nanopb-validate rules next to the buf.validate rules of a buf project.
 --
 -- Every action asks only for the input (protos) and output directories, then
 -- lists the units found in the input so you can pick which ones to generate.
@@ -47,7 +48,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local KEYS = { "python", "project", "nanopb_root", "protos_root", "output_dir", "extra_includes", "port_map",
-    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "optimize", "packet_sizes", "c_defines" }
+    "protos_root_fixed", "include_prefix", "author", "header_dir", "compile_if", "first_include", "any_value_size", "optimize", "packet_sizes", "c_defines",
+    "buf_source", "buf_out" }
 
 local config = {
     python = IS_WINDOWS and "python" or "python3",
@@ -67,6 +69,8 @@ local config = {
     optimize = "",          -- e.g. O2: #pragma GCC optimize in every generated .c
     packet_sizes = "",      -- e.g. small,medium,large,fragmented: test packets per size range
     c_defines = "",         -- older name of compile_if, read once
+    buf_source = "",        -- Add nanopb rules to buf protos: the last project
+    buf_out = "",           -- ... and its output folder (empty = in place)
 }
 
 local function load_config()
@@ -645,6 +649,70 @@ local function set_directory()
     end)
 end
 
+-- yes/no answer of a dialog field: true, false, or nil if it is neither.
+local function yes_no(value)
+    value = trim(value):lower()
+    if value == "y" or value == "yes" or value == "1" or value == "true" then return true end
+    if value == "n" or value == "no" or value == "0" or value == "false" or value == "" then return false end
+    return nil
+end
+
+-- validate/tools/buf_to_validate.py: next to every (buf.validate) rule of a buf project it
+-- adds our (validate.rules) and nanopb sizes, so buf keeps working and nanopb-validate
+-- enforces the same limits. In place it only adds; with an output folder the project is
+-- not touched.
+local function buf_append()
+    local title = "Add nanopb rules to buf protos"
+    dialog(title, {
+        { "buf project: folder of .proto files, or one .proto file", config.buf_source ~= "" and config.buf_source or config.protos_root },
+        { "Output folder (empty = change the project in place, only additions)", config.buf_out },
+        { "In place: keep <file>.proto.bak first (yes/no)", "no" },
+        { "Replace buf.validate instead of adding next to it (yes/no; needs an output folder)", "no" },
+        { "Add nanopb sizes (max_length/max_size/max_count) from the buf limits (yes/no)", "yes" },
+    }, function(source, out, backup, replace, sizes)
+        source, out = trim(source), trim(out)
+        local want_backup, want_replace, want_sizes = yes_no(backup), yes_no(replace), yes_no(sizes)
+        if source == "" then
+            show(title, false, "Enter the buf project folder (or a .proto file).")
+            return
+        end
+        if want_backup == nil or want_replace == nil or want_sizes == nil then
+            show(title, false, "Answer yes or no in the last three fields.")
+            return
+        end
+        if want_replace and out == "" then
+            show(title, false, "Replace removes the buf.validate rules, so it needs an output folder.")
+            return
+        end
+        config.buf_source, config.buf_out = source, out
+        save_config()
+        local args = { "wireshark", "buf-append", source }
+        if out ~= "" then
+            args[#args + 1] = "--out"
+            args[#args + 1] = out
+        end
+        if want_backup then args[#args + 1] = "--backup" end
+        if want_replace then args[#args + 1] = "--replace" end
+        if not want_sizes then args[#args + 1] = "--no-sizes" end
+        local ok, text = run_backend(args)
+        if not ok then
+            show(title, false, text)
+            return
+        end
+        local folder = json_string(text, "folder") or ""
+        local notes = (json_string(text, "summary") or text) .. "\n\n"
+            .. "Use as protos directory: load this folder into the dissector and make it the input of"
+            .. "\nGenerate C and Generate test packets."
+        show(title, true, notes, folder, {
+            { "Use as protos directory", function()
+                config.protos_root = folder
+                save_config()
+                load_now(title, "\n\nProtos directory: " .. folder)
+            end },
+        })
+    end)
+end
+
 local function about()
     show("nanopb studio", true, table.concat({
         "Plugins folder: " .. PLUGINS_DIR,
@@ -709,4 +777,5 @@ pcall(install_highlights)
 register_menu("nanopb/Set protos directory (once)...", set_directory, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate C (merged + validation)...", gen_c, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/Generate test packets (passed + dropped)...", gen_packets, MENU_TOOLS_UNSORTED)
+register_menu("nanopb/Add nanopb rules to buf protos...", buf_append, MENU_TOOLS_UNSORTED)
 register_menu("nanopb/About", about, MENU_TOOLS_UNSORTED)

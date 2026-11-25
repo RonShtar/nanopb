@@ -14,6 +14,7 @@ commands are what its public commands map to:
   refresh-schema    <- wireshark refresh    rebuild the schema if protos changed
   units             <- wireshark units      protocols and their messages
   pick-units        <- wireshark pick       tick-box window to choose protocols
+  buf-append        <- wireshark buf-append add (validate.rules) next to buf.validate
   gen-data, schema     (internal: sample messages, Lua schema)
 
 A "protos root" is a directory whose subdirectories are *units* (protocols):
@@ -34,8 +35,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import env  # noqa: E402
 from protos import (BackendError, setup_nanopb)  # noqa: E402
 from gen import (cmd_gen_c)  # noqa: E402
-from wireshark import (cmd_install_dissector, cmd_install_studio, cmd_pick_units, cmd_refresh_schema,  # noqa: E402
-                       cmd_schema, cmd_units)
+from wireshark import (cmd_buf_append, cmd_install_dissector, cmd_install_studio, cmd_pick_units,  # noqa: E402
+                       cmd_refresh_schema, cmd_schema, cmd_units)
 from traffic import (AUTO_PORT_BASE, DEFAULT_ANY_PORT, DEFAULT_PROTOCOL_PORT, cmd_gen_data, cmd_gen_packets)  # noqa: E402
 
 
@@ -173,6 +174,15 @@ def build_parser():
     p.add_argument('--names', required=True, help='comma-separated units')
     p.add_argument('--off', default='', help='comma-separated units that start unticked')
     p.set_defaults(func=cmd_pick_units)
+
+    p = sub.add_parser('buf-append', help='validate/tools/buf_to_validate.py: add (validate.rules) next to '
+                                          'buf.validate; its report as the summary')
+    p.add_argument('source', help='a folder of .proto files or one .proto file')
+    p.add_argument('--out', default=None, help='write the result here (default: in place, only additions)')
+    p.add_argument('--backup', action='store_true', help='in place: keep <file>.proto.bak first')
+    p.add_argument('--replace', action='store_true', help='replace buf.validate instead of adding (needs --out)')
+    p.add_argument('--no-sizes', action='store_true', help='no nanopb sizes from the buf limits')
+    p.set_defaults(func=cmd_buf_append)
 
     p = sub.add_parser('install-studio', help='install nanopb_studio.lua into a plugins dir')
     p.add_argument('--plugins-dir', default=None, help='default: personal Wireshark plugins folder')

@@ -1,8 +1,8 @@
 /* pb_validate.c: Runtime support implementation for nanopb validation */
 
 #include "pb_validate.h"
+#include "pb_decode.h"
 #include <string.h>
-#include <stdio.h>
 #include <stdio.h>
 
 static bool is_valid_email(const char *s, size_t len);
@@ -1013,4 +1013,99 @@ static bool is_valid_ipv6(const char *s, size_t len)
     if (compress)
         return hextets < 8; /* at least one compressed */
     return hextets == 8;
+}
+
+/* ---------------------------------------------------------------------------
+ * Protocol filters
+ * ------------------------------------------------------------------------- */
+
+bool pb_filter_read_any(const pb_byte_t *packet, size_t packet_size, pb_filter_any_t *any)
+{
+    pb_istream_t stream = pb_istream_from_buffer(packet, packet_size);
+    pb_wire_type_t wire_type;
+    uint32_t tag;
+    bool eof = false;
+
+    any->type_url = "";
+    any->type_url_size = 0;
+    any->value = packet;
+    any->value_size = 0;
+
+    while (pb_decode_tag(&stream, &wire_type, &tag, &eof))
+    {
+        if (tag == 1 || tag == 2)
+        {
+            uint32_t size;
+            const pb_byte_t *start;
+
+            if (wire_type != PB_WT_STRING || !pb_decode_varint32(&stream, &size) || size > stream.bytes_left)
+                return false;
+            start = packet + (packet_size - stream.bytes_left);
+            if (tag == 1)
+            {
+                any->type_url = (const char *)start;
+                any->type_url_size = size;
+            }
+            else
+            {
+                any->value = start;
+                any->value_size = size;
+            }
+            if (!pb_read(&stream, NULL, size))
+                return false;
+        }
+        else if (!pb_skip_field(&stream, wire_type))
+        {
+            return false;
+        }
+    }
+    return eof; /* false: the packet ended inside a tag */
+}
+
+uint32_t pb_filter_type_hash(const char *type_name, size_t type_name_size)
+{
+    uint32_t hash = 0;
+    size_t i;
+
+    for (i = 0; i < type_name_size; i++)
+        hash = hash * 31u + (uint32_t)(uint8_t)type_name[i];
+    return hash;
+}
+
+const pb_filter_route_t *pb_filter_find_route(const pb_filter_route_t *routes, size_t route_count,
+                                              const char *type_url, size_t type_url_size)
+{
+    const char *name = type_url;
+    size_t name_size;
+    size_t end = 0;
+    size_t low = 0;
+    size_t high = route_count;
+    uint32_t hash;
+
+    /* "type.googleapis.com/pkg.Msg" -> "pkg.Msg" */
+    while (end < type_url_size && type_url[end] != '\0')
+    {
+        if (type_url[end] == '/')
+            name = type_url + end + 1;
+        end++;
+    }
+    name_size = (size_t)(type_url + end - name);
+    hash = pb_filter_type_hash(name, name_size);
+
+    /* The first route with this hash, then every route that shares it. */
+    while (low < high)
+    {
+        size_t middle = low + (high - low) / 2;
+        if (routes[middle].hash < hash)
+            low = middle + 1;
+        else
+            high = middle;
+    }
+    for (; low < route_count && routes[low].hash == hash; low++)
+    {
+        const char *type_name = routes[low].type_name;
+        if (strncmp(type_name, name, name_size) == 0 && type_name[name_size] == '\0')
+            return &routes[low];
+    }
+    return NULL;
 }

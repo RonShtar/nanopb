@@ -3,7 +3,7 @@
     python -m nanopb_validate check     PROTOS_DIR
     python -m nanopb_validate gen       PROTOS_DIR --out DIR      (or FILE.proto ...)
     python -m nanopb_validate packets   PROTOS_DIR --out DIR
-    python -m nanopb_validate wireshark install|load|refresh|units|pick ...
+    python -m nanopb_validate wireshark install|load|refresh|units|pick|buf-append ...
     python -m nanopb_validate test      [--c] [--py] [--perf] [--security]
 
 PROTOS_DIR holds one folder per protocol (its .proto files may sit in
@@ -30,6 +30,7 @@ WIRESHARK = {
     'refresh': 'refresh-schema',      # rebuild the schema if protos changed (run at startup)
     'units': 'units',                 # list protocols and messages
     'pick': 'pick-units',             # tick-box window to choose protocols
+    'buf-append': 'buf-append',       # add (validate.rules) next to buf.validate (tools/buf_to_validate.py)
 }
 
 USAGE = __doc__.split('\n\n')[1]

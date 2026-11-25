@@ -10,7 +10,7 @@
 /* Version of this runtime. Generated code checks it and stops with an #error
  * when it is older than the generator that wrote it (copy pb_validate.h and
  * pb_validate.c from the same validate/runtime/ as the generator). */
-#define PB_VALIDATE_RUNTIME_VERSION 2
+#define PB_VALIDATE_RUNTIME_VERSION 3
 
 #include "pb.h"
 #include <stdbool.h>
@@ -1198,6 +1198,60 @@ extern "C"
     {
         return count <= max_allowed;
     }
+
+/* ---------------------------------------------------------------------------
+ * Protocol filters (<protocol>_udp / _tcp from --protocol-filter)
+ *
+ * A packet is a google.protobuf.Any; its type_url names the message to decode
+ * and validate. The generated filter holds one check function per message and
+ * a table of routes; these functions read the outer Any and pick the route.
+ * They use nanopb's pb_decode.c, so link it (nanopb's library holds both).
+ * ------------------------------------------------------------------------- */
+
+/* Levels of google.protobuf.Any resolved inside each other. Each level keeps
+ * one decoded message on the stack (or, with PB_VALIDATE_FILTER_STATIC_BUFFERS,
+ * in a static slot per level). Same value for every file of a build. */
+#ifndef PB_VALIDATE_FILTER_MAX_ANY_DEPTH
+#define PB_VALIDATE_FILTER_MAX_ANY_DEPTH 4
+#endif
+
+/* An encoded google.protobuf.Any, read in place: both fields point into the packet. */
+typedef struct
+{
+    const char *type_url;     /* not NUL-terminated */
+    size_t type_url_size;
+    const pb_byte_t *value;   /* the encoded message the type_url names */
+    size_t value_size;
+} pb_filter_any_t;
+
+/* Decodes and validates `value` as one message; 0 allows it, -1 drops it.
+ * `depth` is the number of Anys around it (0 for the packet itself). */
+typedef int (*pb_filter_check_t)(const pb_byte_t *value, size_t value_size, int depth);
+
+/* One message a type_url can name. */
+typedef struct
+{
+    uint32_t hash;            /* pb_filter_type_hash() of type_name */
+    const char *type_name;    /* full message name, e.g. "demo.payloads.Ping" */
+    pb_filter_check_t check;
+} pb_filter_route_t;
+
+/* Reads the packet as an encoded google.protobuf.Any without copying it:
+ * field 1 is type_url, field 2 is value, other fields are skipped, and the last
+ * occurrence of a field wins, as with pb_decode. A missing field is empty.
+ * Returns false if the packet is not a well-formed Any. */
+bool pb_filter_read_any(const pb_byte_t *packet, size_t packet_size, pb_filter_any_t *any);
+
+/* Hash of a message name ("demo.payloads.Ping": h = h * 31 + byte). The
+ * generator writes the same hash into every route of the table. */
+uint32_t pb_filter_type_hash(const char *type_name, size_t type_name_size);
+
+/* The route whose type_name is the message name in `type_url` (the part after
+ * the last '/', so any host prefix is accepted; the URL ends at a NUL or after
+ * type_url_size bytes), or NULL if the protocol has no such message.
+ * `routes` must be sorted by hash; the search is binary. */
+const pb_filter_route_t *pb_filter_find_route(const pb_filter_route_t *routes, size_t route_count,
+                                              const char *type_url, size_t type_url_size);
 
 /* Encode/decode hook macros (optional) */
 #ifdef PB_VALIDATE_BEFORE_ENCODE

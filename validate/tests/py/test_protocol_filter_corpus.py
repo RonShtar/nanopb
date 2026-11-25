@@ -1,16 +1,19 @@
-"""The filter's fast path (nanopb_validate/fast_decode.py) gives pb_decode's verdict on every packet.
+"""Protocol filters on generated and mutated packets, in every build configuration.
 
-Each protocol is built twice: with the fast path (and PB_VALIDATE_FILTER_TEST_POISON, which
-fills the decode struct with 0xA5 first, so a field the fast decoder forgot to initialize
-changes a verdict) and with PB_VALIDATE_FILTER_NO_FAST_DECODE (pb_decode only). Both get the
-same packets: the generated valid and invalid ones, every field of them duplicated (nanopb
-merges a sub-message seen twice, the last scalar wins), truncations, bit flips, inserted and
-deleted bytes and over-long varints. The verdicts must be identical.
+The filter decodes each message with pb_decode and checks it with its validator; the
+outer Any and the type_url lookup are pb_validate.c's pb_filter_read_any() and
+pb_filter_find_route(). Each protocol is built at -O2, -O0, with nanopb's switches
+(PB_FIELD_32BIT PB_BUFFER_ONLY PB_NO_ERRMSG) and with PB_VALIDATE_FILTER_STATIC_BUFFERS.
+Every build gets the same packets: the generated valid and invalid ones (each must get
+its expected verdict), every field of them duplicated (nanopb merges a sub-message seen
+twice, the last scalar wins), truncations, bit flips, inserted and deleted bytes and
+over-long varints. Every build must give the same verdict on every packet.
 """
 
 import json
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
@@ -218,34 +221,86 @@ int main(int argc, char **argv) {
 }
 '''
 
-BENCH = r'''#include <stdio.h>
-#include <time.h>
-#include "%(unit)s.pb.h"
-static const uint8_t pkts[] = {%(bytes)s};
-static const unsigned sizes[] = {%(sizes)s};
-int main(void) {
-    clock_t t0 = clock();
-    volatile int sink = 0;
-    int round;
-    for (round = 0; round < %(rounds)d; round++) {
-        const uint8_t *p = pkts;
-        unsigned i;
-        for (i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
-            sink += %(unit)s_udp(NULL, p, sizes[i]);
-            p += sizes[i];
-        }
+RUNTIME_TEST = r'''#include <stdio.h>
+#include <string.h>
+#include <pb_validate.h>
+static int failed;
+#define EXPECT(cond, what) do { if (!(cond)) { printf("FAIL %s\n", what); failed++; } } while (0)
+static int check_a(const pb_byte_t *v, size_t n, int d) { (void)v; (void)n; (void)d; return 1; }
+static int check_b(const pb_byte_t *v, size_t n, int d) { (void)v; (void)n; (void)d; return 2; }
+static int check_c(const pb_byte_t *v, size_t n, int d) { (void)v; (void)n; (void)d; return 3; }
+static const pb_filter_route_t routes[] = {
+    /* "Aa" and "BB" share their hash: both must still be found. */
+    { 2112u, "Aa", check_a },
+    { 2112u, "BB", check_b },
+    { 0u, "pkg.Msg", check_c },   /* fixed below: the hash is computed at run time */
+};
+static pb_filter_route_t table[3];
+static int route(const char *url, size_t size)
+{
+    const pb_filter_route_t *r = pb_filter_find_route(table, 3, url, size);
+    return r ? r->check(NULL, 0, 0) : 0;
+}
+int main(void)
+{
+    pb_filter_any_t any;
+    uint32_t h = pb_filter_type_hash("pkg.Msg", 7);
+    memcpy(table, routes, sizeof routes);
+    table[2].hash = h;
+    if (h < 2112u) {                  /* keep the table sorted by hash */
+        table[0] = routes[2]; table[0].hash = h; table[1] = routes[0]; table[2] = routes[1];
     }
-    printf("%%ld\n", (long)(clock() - t0));
-    return sink == 12345;
+    EXPECT(pb_filter_type_hash("Aa", 2) == 2112u && pb_filter_type_hash("BB", 2) == 2112u, "hash");
+    EXPECT(route("Aa", 2) == 1, "Aa");
+    EXPECT(route("BB", 2) == 2, "BB (same hash)");
+    EXPECT(route("type.googleapis.com/pkg.Msg", 27) == 3, "host prefix");
+    EXPECT(route("a/b/pkg.Msg", 11) == 3, "name after the last slash");
+    EXPECT(route("pkg.Msg\0junk", 12) == 3, "ends at a NUL");
+    EXPECT(route("pkg.Ms", 6) == 0 && route("pkg.Msgs", 8) == 0 && route("", 0) == 0, "no partial names");
+    EXPECT(route("Ab", 2) == 0 && route("BB/", 3) == 0, "unknown names");
+
+    /* type_url "ab", value {1,2}, an unknown varint field 3 skipped */
+    {
+        static const pb_byte_t p[] = { 0x0a, 2, 'a', 'b', 0x18, 0x96, 0x01, 0x12, 2, 1, 2 };
+        EXPECT(pb_filter_read_any(p, sizeof p, &any), "read any");
+        EXPECT(any.type_url_size == 2 && memcmp(any.type_url, "ab", 2) == 0, "type_url in place");
+        EXPECT(any.value == p + 9 && any.value_size == 2, "value in place");
+    }
+    {
+        static const pb_byte_t p[] = { 0x0a, 1, 'a', 0x0a, 1, 'b' };     /* last one wins */
+        EXPECT(pb_filter_read_any(p, sizeof p, &any) && any.type_url[0] == 'b', "last wins");
+        EXPECT(any.value_size == 0, "missing value is empty");
+    }
+    EXPECT(pb_filter_read_any((const pb_byte_t *)"", 0, &any) && any.type_url_size == 0, "empty packet");
+    {
+        static const pb_byte_t wrong_type[] = { 0x08, 1 };                 /* field 1 as a varint */
+        static const pb_byte_t too_long[] = { 0x0a, 5, 'a' };
+        static const pb_byte_t cut_tag[] = { 0x0a, 1, 'a', 0x80 };
+        static const pb_byte_t bad_wire[] = { 0x1f, 0 };                   /* wire type 7 */
+        EXPECT(!pb_filter_read_any(wrong_type, sizeof wrong_type, &any), "wrong wire type");
+        EXPECT(!pb_filter_read_any(too_long, sizeof too_long, &any), "length past the end");
+        EXPECT(!pb_filter_read_any(cut_tag, sizeof cut_tag, &any), "packet ends inside a tag");
+        EXPECT(!pb_filter_read_any(bad_wire, sizeof bad_wire, &any), "invalid wire type");
+    }
+    printf("%d failed\n", failed);
+    return failed != 0;
 }
 '''
 
+# Build configurations every verdict must agree across.
+CONFIGS = [
+    ('O2', ['-O2']),
+    ('O0', ['-O0']),
+    ('switches', ['-O2', '-DPB_FIELD_32BIT', '-DPB_BUFFER_ONLY', '-DPB_NO_ERRMSG']),
+    ('static', ['-O2', '-DPB_VALIDATE_FILTER_STATIC_BUFFERS']),
+]
 
-class FastDecodeTests(unittest.TestCase):
+
+class ProtocolFilterCorpusTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.cc = find_cc()
-        cls.tmp = tempfile.mkdtemp(prefix='nanopb_fast_')
+        cls.tmp = tempfile.mkdtemp(prefix='nanopb_corpus_')
         root = os.path.join(cls.tmp, 'protos')
         os.makedirs(os.path.join(root, 'kinds'))
         for name, text in (('kinds.proto', KINDS), ('legacy.proto', LEGACY), ('kinds.options', KINDS_OPTIONS),
@@ -273,91 +328,89 @@ class FastDecodeTests(unittest.TestCase):
         self.assertEqual(status, 0, err)
         return out
 
-    def seeds(self, out):
+    def manifest(self, out):
         with open(os.path.join(out, 'packets', 'nanopb_test_packets.json')) as handle:
-            return [bytes.fromhex(p['hex']) for p in json.load(handle)['packets']]
+            return json.load(handle)['packets']
 
-    def build(self, out, unit, tag, main, defines, flags=('-O2',)):
-        src = os.path.join(out, 'gen', unit)
-        with open(os.path.join(src, 'main_%s.c' % tag), 'w', newline='\n') as handle:
+    def build(self, src, exe, main, flags, extra_sources=()):
+        main_path = exe + '.c'
+        with open(main_path, 'w', newline='\n') as handle:
             handle.write(main)
-        sources = [os.path.join(src, n) for n in sorted(os.listdir(src))
-                   if n.endswith('.c') and (not n.startswith('main_') or n == 'main_%s.c' % tag)]
-        exe = os.path.join(out, tag + ('.exe' if os.name == 'nt' else ''))
-        proc = subprocess.run(self.cc + ['-std=c99', '-Wall', '-Werror', '-I', src]
-                              + list(flags) + list(defines) + sources + ['-o', exe],
+        sources = [os.path.join(src, n) for n in sorted(os.listdir(src)) if n.endswith('.c')]
+        proc = subprocess.run(self.cc + ['-std=c99', '-Wall', '-Wextra', '-Werror', '-I', src] + list(flags)
+                              + [main_path] + sources + list(extra_sources) + ['-o', exe],
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)
         self.assertEqual(proc.returncode, 0, proc.stdout[-4000:])
         return exe
 
-    def verdicts(self, unit, count, flags=('-O2',)):
+    def verdicts(self, unit, count):
+        """Verdicts of every build configuration on the generated packets plus `count` mutations."""
         if not self.cc:
             self.skipTest('no C compiler')
         out = self.generate(unit)
-        packets = corpus(self.seeds(out), count, 1)
+        manifest = self.manifest(out)
+        seeds = [bytes.fromhex(p['hex']) for p in manifest]
+        packets = corpus(seeds, count, 1)
         path = os.path.join(out, 'corpus.bin')
         with open(path, 'wb') as handle:
             for pkt in packets:
                 handle.write(struct.pack('<I', len(pkt)) + pkt)
-        main = MAIN % {'unit': unit}
         result = {}
-        for tag, define in (('fast', '-DPB_VALIDATE_FILTER_TEST_POISON'), ('slow', '-DPB_VALIDATE_FILTER_NO_FAST_DECODE')):
-            exe = self.build(out, unit, tag + ''.join(f.strip('-') for f in flags), main, [define] + list(flags[1:]),
-                             flags[:1])
+        for tag, flags in CONFIGS:
+            exe = self.build(os.path.join(out, 'gen', unit), os.path.join(out, 'run_' + tag + EXE),
+                             MAIN % {'unit': unit}, flags)
             proc = subprocess.run([exe, path], stdout=subprocess.PIPE)
             self.assertEqual(proc.returncode, 0, '%s build of %s exited %d' % (tag, unit, proc.returncode))
             result[tag] = proc.stdout.decode()
-        self.assertEqual(len(result['fast']), len(packets))
-        self.assertGreater(result['slow'].count('P'), 20)            # valid packets are in the corpus
-        differ = [(i, packets[i].hex()) for i in range(len(packets)) if result['fast'][i] != result['slow'][i]]
-        self.assertEqual(differ[:5], [], '%d of %d packets differ' % (len(differ), len(packets)))
+            self.assertEqual(len(result[tag]), len(packets), tag)
+        # The generated packets come first in the corpus, each with its expected verdict.
+        want = ''.join('P' if p['expect'] == 'passed' else 'D' for p in manifest)
+        for tag, got in result.items():
+            wrong = [manifest[i]['message'] for i in range(len(want)) if got[i] != want[i]]
+            self.assertEqual(wrong, [], '%s build: generated packets with the wrong verdict' % tag)
+        self.assertGreater(want.count('P'), 20)
+        reference = result['O2']
+        for tag, got in result.items():
+            differ = [packets[i].hex() for i in range(len(packets)) if got[i] != reference[i]]
+            self.assertEqual(differ[:5], [], '%s build: %d of %d packets differ from -O2'
+                             % (tag, len(differ), len(packets)))
 
-    def test_every_field_kind_gives_pb_decodes_verdict(self):
+    def test_every_field_kind(self):
         self.verdicts('kinds', 12000)
 
-    def test_stress_protocol_gives_pb_decodes_verdict(self):
+    def test_stress_protocol(self):
         self.verdicts('fleet', 8000)
 
-    def test_with_nanopb_switches(self):
-        self.verdicts('kinds', 4000, ('-O2', '-DPB_FIELD_32BIT', '-DPB_BUFFER_ONLY', '-DPB_NO_ERRMSG',
-                                      '-DPB_VALIDATE_FILTER_STATIC_BUFFERS'))
-
-    def test_unoptimized_build(self):
-        self.verdicts('kinds', 3000, ('-O0',))
-
-    def test_which_messages_take_the_fast_path(self):
+    def test_generated_filter_uses_pb_decode_and_the_library(self):
+        """Per message: pb_decode + its validator. Dispatch and the outer Any: pb_validate.c.
+        No decoder of its own, no macros, no inline helpers."""
         out = self.generate('kinds')
         with open(os.path.join(out, 'gen', 'kinds', 'kinds.pb.c')) as handle:
             text = handle.read()
-        for name in ('Scalars', 'Texts', 'Req', 'Sub', 'WithEnum'):
-            self.assertIn('KINDS_CHECK_MESSAGE_FAST(kinds_check_%s, kinds_fast_%s,' % (name, name), text)
-        for name in ('Inner', 'Lists', 'Choice', 'Holder'):                 # hold Anys: written out
-            self.assertIn('int pbf_r = kinds_fast_%s(value, value_size, payload, depth);' % name, text)
-        # an explicit proto2 default: pb_decode only
-        self.assertIn('KINDS_CHECK_MESSAGE(kinds_check_WithDefault, "kinds.WithDefault"', text)
-        # the first enum value of a proto2 enum is a default too: checked on the descriptor
-        self.assertIn('PBF_NODEF(kinds_WithEnum)', text)
-        self.assertIn('#if !defined(PB_VALIDATE_DEBUG)', text)
+        body = text[text.index('kinds_check_any_field(const'):]
+        for name in ('Scalars', 'Texts', 'Req', 'Sub', 'WithEnum', 'WithDefault', 'Inner', 'Holder'):
+            self.assertIn('pb_decode(&stream, kinds_%s_fields, ' % name, body)
+        self.assertIn('pb_filter_read_any(packet, packet_size, &any)', body)
+        self.assertIn('pb_filter_find_route(kinds_routes,', body)
+        self.assertIn('static const pb_filter_route_t kinds_routes[] = {', body)
+        for banned in ('#define', 'inline', 'pb_decode_tag', 'pb_decode_varint', 'switch (key', 'pbf_', 'PBF_'):
+            self.assertNotIn(banned, body)
+        # The route table is sorted by hash (pb_filter_find_route searches it binary).
+        hashes = [int(h, 16) for h in re.findall(r'\{ 0x([0-9a-f]{8})u, "', body)]
+        self.assertEqual(hashes, sorted(hashes))
+        self.assertEqual(len(hashes), 10)
 
-    def test_fast_path_is_faster(self):
+    def test_runtime_helpers(self):
         if not self.cc:
             self.skipTest('no C compiler')
-        out = self.generate('fleet')
-        seeds = self.seeds(out)
-        args = {'unit': 'fleet', 'bytes': ','.join(str(b) for p in seeds for b in p),
-                'sizes': ','.join(str(len(p)) for p in seeds), 'rounds': 3000}
-        times = {}
-        for tag, define in (('bench_fast', '-DPB_VALIDATE_FILTER_NO_POISON'),
-                            ('bench_slow', '-DPB_VALIDATE_FILTER_NO_FAST_DECODE')):
-            exe = self.build(out, 'fleet', tag, BENCH % args, [define])
-            best = None
-            for _ in range(3):
-                proc = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
-                value = int(proc.stdout.strip())
-                best = value if best is None else min(best, value)
-            times[tag] = best
-        self.assertLess(times['bench_fast'], times['bench_slow'], times)
+        out = self.generate('kinds')
+        exe = self.build(os.path.join(out, 'gen', 'kinds'), os.path.join(out, 'runtime_test' + EXE),
+                         RUNTIME_TEST, ['-O2'])
+        proc = subprocess.run([exe], stdout=subprocess.PIPE, universal_newlines=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout)
 
+
+EXE = '.exe' if os.name == 'nt' else ''
 
 if __name__ == '__main__':
     unittest.main()

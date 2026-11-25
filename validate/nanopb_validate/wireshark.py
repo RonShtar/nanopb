@@ -664,6 +664,10 @@ def assert_no_lua(path):
                                    % os.path.join(dirpath, name))
 
 
+#: validate/tools/: adds our (validate.rules) next to buf's (buf.validate); Tools > nanopb runs it.
+BUF_APPENDER = 'buf_to_validate.py'
+
+
 def copy_project(src_root, dst):
     """Copy what the tool needs to ``dst`` with the checkout's layout: nanopb's
     runtime and generator, and validate/ (runtime, package, Lua as .src)."""
@@ -684,6 +688,8 @@ def copy_project(src_root, dst):
     shutil.copytree(os.path.join(src_validate, 'runtime'), os.path.join(dst_validate, 'runtime'))
     shutil.copytree(os.path.join(src_validate, 'nanopb_validate'), os.path.join(dst_validate, 'nanopb_validate'),
                     ignore=ignore)
+    os.makedirs(os.path.join(dst_validate, 'tools'))
+    shutil.copy(os.path.join(src_validate, 'tools', BUF_APPENDER), os.path.join(dst_validate, 'tools', BUF_APPENDER))
     os.makedirs(os.path.join(dst_validate, 'wireshark'))
     for name in ('nanopb_any_dissector.lua', 'nanopb_studio.lua'):
         shutil.copy(os.path.join(src_validate, 'wireshark', name),
@@ -859,3 +865,42 @@ def cmd_pick_units(args):
         ttk.Button(buttons, text=label, command=command).pack(side=side, padx=2)
     root.mainloop()
     return {'units': chosen}
+
+
+def cmd_buf_append(args):
+    """validate/tools/buf_to_validate.py for the Tools > nanopb menu: its report as the summary."""
+
+    import contextlib
+    import importlib.util
+    import io
+
+    tool = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools', BUF_APPENDER)
+    if not os.path.isfile(tool):
+        raise BackendError('%s not found next to nanopb_validate (reinstall: wireshark install)' % tool)
+    source = os.path.abspath(args.source)
+    if not os.path.exists(source):
+        raise BackendError('%s does not exist: enter a folder of .proto files or one .proto file' % source)
+    argv = [source]
+    out = os.path.abspath(args.out) if args.out else None
+    if out:
+        argv += ['--out', out]
+    if args.backup:
+        argv.append('--backup')
+    if args.replace:
+        argv.append('--replace')
+    if args.no_sizes:
+        argv.append('--no-sizes')
+    spec = importlib.util.spec_from_file_location('buf_to_validate', tool)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    report, errors = io.StringIO(), io.StringIO()
+    try:
+        with contextlib.redirect_stdout(report), contextlib.redirect_stderr(errors):
+            status = module.main(argv)
+    except SystemExit as exc:  # argparse: a wrong combination of options
+        message = errors.getvalue().strip().splitlines()
+        raise BackendError(message[-1] if message else 'buf_to_validate exited with %s' % exc.code)
+    if status:
+        raise BackendError(report.getvalue() + errors.getvalue())
+    folder = out or (source if os.path.isdir(source) else os.path.dirname(source))
+    return {'summary': report.getvalue().strip(), 'folder': folder, 'in_place': out is None}

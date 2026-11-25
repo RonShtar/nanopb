@@ -246,6 +246,27 @@ generated filter and expect `0` (passed) or `-1` (dropped).
 The result window lists the exported filters and the smallest validation
 buffer settings for this protocol.
 
+### Protos from buf: add nanopb rules first
+
+**Tools > nanopb > Add nanopb rules to buf protos** runs
+`validate/tools/buf_to_validate.py` on a buf (protovalidate) project: next to every
+`(buf.validate.field)` rule it adds the matching `(validate.rules)` and nanopb sizes, so buf
+keeps working and nanopb-validate enforces the same limits. The dialog asks for:
+
+| Field | Meaning |
+|------|----------|
+| buf project | a folder of `.proto` files, or one `.proto` file |
+| Output folder | empty: change the project in place (only additions); else write the result there and leave the project untouched |
+| keep `.proto.bak` | in place only: a copy of each file before it changes |
+| Replace | remove the `buf.validate` rules instead of adding next to them (needs an output folder) |
+| nanopb sizes | add `(nanopb).max_length` / `max_size` / `max_count` from the buf limits |
+
+The result window shows the converter's report (files changed and added, sizes added, buf
+rules nanopb-validate does not enforce). **Use as protos directory** loads the result into
+the dissector and makes it the input of Generate C and Generate test packets; **Activate**
+then reloads the Lua plugins. The same from a terminal:
+`python -m nanopb_validate wireshark buf-append PROJECT [--out DIR] [--backup] [--replace] [--no-sizes]`.
+
 ## Using the generated C code
 
 Add the four files to a project that already has the nanopb runtime on its

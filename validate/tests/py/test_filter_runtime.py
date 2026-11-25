@@ -131,14 +131,14 @@ class FilterRuntimeTests(unittest.TestCase):
 
     def test_one_function(self):
         """One public filter, fleet_udp/fleet_tcp; the rest is static: <unit>_check_any, one check
-        function per message (each with only its own struct on the stack) and the fast path."""
+        function per message (each with only its own struct on the stack) and the route table."""
         with open(os.path.join(self.out, 'fleet', 'fleet.pb.c')) as handle:
             text = handle.read()
         import re
         public = re.findall(r'^int (\w+)\(', text, re.M)
         self.assertEqual(public, ['fleet_udp', 'fleet_tcp'])
         self.assertIn('static int fleet_check_any(', text)
-        self.assertIn('FLEET_FILTER_MESSAGE("fleet.cmd.Move", fleet_check_cmd_Move);', text)
+        self.assertRegex(text, r'\{ 0x[0-9a-f]{8}u, "fleet\.cmd\.Move", +fleet_check_cmd_Move \},')
         with open(os.path.join(self.out, 'fleet', 'fleet.pb.h')) as handle:
             header = handle.read()
         self.assertEqual(re.findall(r'^int (\w+)\(', header, re.M), ['fleet_udp', 'fleet_tcp'])
