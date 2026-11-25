@@ -431,8 +431,10 @@ IMPORT_FIELD = 'message M { string name = 1 [(buf.validate.field).string.max_len
 
 
 class BufImportAndPlacementTests(unittest.TestCase):
-    """The import of our rules file is always added (only an import of our rules file counts),
-    and the rules file and nanopb.proto go next to every buf validate.proto of the project."""
+    """The import of our rules file is always added (only an import of our rules file counts).
+    The project keeps ONE rules file and ONE nanopb.proto, in one folder: where one of them
+    already is, else next to buf's validate.proto, else at the top; a missing one is added
+    there, and nanopb.proto only when a file uses (nanopb) options."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix='nanopb_buf_imports_')
@@ -493,16 +495,17 @@ class BufImportAndPlacementTests(unittest.TestCase):
         self.project({'rules/mine.proto': ours,
                       'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
                                    'import "rules/mine.proto";\n' + IMPORT_FIELD})
-        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'rules/mine.proto', 'nanopb.proto'])
-        self.assertNotIn('validate_rules.proto', ' '.join(self.added()))
+        # nanopb.proto goes next to the rules file the project already has.
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'rules/mine.proto',
+                                                     'rules/nanopb.proto'])
+        self.assertEqual(self.added(), ['rules/nanopb.proto'])
 
-    def test_next_to_every_buf_validate(self):
+    def test_one_copy_with_several_buf_validate(self):
         self.project({'p/buf/validate/validate.proto': self.buf_file(),
                       'q/buf/validate/validate.proto': self.buf_file(),
                       'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
                                    + IMPORT_FIELD})
-        self.assertEqual(self.added(), ['p/buf/validate/nanopb.proto', 'p/buf/validate/validate_rules.proto',
-                                        'q/buf/validate/nanopb.proto', 'q/buf/validate/validate_rules.proto'])
+        self.assertEqual(self.added(), ['p/buf/validate/nanopb.proto', 'p/buf/validate/validate_rules.proto'])
         self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'buf/validate/validate_rules.proto',
                                                      'buf/validate/nanopb.proto'])
 
@@ -518,8 +521,110 @@ class BufImportAndPlacementTests(unittest.TestCase):
         self.project({'buf/validate/validate.proto': self.buf_file(), 'nanopb.proto': nanopb,
                       'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
                                    + IMPORT_FIELD})
-        self.assertEqual(self.added(), ['buf/validate/validate_rules.proto', 'nanopb.proto'])
-        self.assertEqual(self.imports('p/p.proto')[-1], 'nanopb.proto')
+        # Our rules file goes next to the nanopb.proto the project already has.
+        self.assertEqual(self.added(), ['nanopb.proto', 'validate_rules.proto'])
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'validate_rules.proto',
+                                                     'nanopb.proto'])
+
+    def test_our_validate_proto_counts_and_nanopb_goes_next_to_it(self):
+        # Our rules as validate/validate.proto (nanopb_validate's own name): no validate_rules.proto.
+        with open(buf.DEFAULT_VALIDATE_PROTO, newline='') as handle:
+            ours = handle.read()
+        self.project({'buf/validate/validate.proto': self.buf_file(), 'third/validate/validate.proto': ours,
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(self.added(), ['third/validate/nanopb.proto'])
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'third/validate/validate.proto',
+                                                     'third/validate/nanopb.proto'])
+
+    def test_nanopb_under_another_name_counts(self):
+        # nanopb.proto told by its content ((nanopb) = 1010), under any name: not added again,
+        # and our rules file goes next to it.
+        with open(buf.DEFAULT_NANOPB_PROTO, newline='') as handle:
+            nanopb = handle.read()
+        self.project({'buf/validate/validate.proto': self.buf_file(), 'opts/np_options.proto': nanopb,
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(self.added(), ['opts/validate_rules.proto'])
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'opts/validate_rules.proto',
+                                                     'opts/np_options.proto'])
+
+    def test_both_exist_nothing_added(self):
+        with open(buf.DEFAULT_VALIDATE_PROTO, newline='') as handle:
+            ours = handle.read()
+        with open(buf.DEFAULT_NANOPB_PROTO, newline='') as handle:
+            nanopb = handle.read()
+        result = self.project({'buf/validate/validate.proto': self.buf_file(), 'a/validate_rules.proto': ours,
+                               'b/nanopb.proto': nanopb, 'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(result.written, [])
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'a/validate_rules.proto',
+                                                     'b/nanopb.proto'])
+        again = buf.convert_path(self.tmp)
+        self.assertEqual((again.written, again.converted), ([], []))
+
+    def option_files(self):
+        with open(buf.DEFAULT_VALIDATE_PROTO, newline='') as handle:
+            ours = handle.read()
+        with open(buf.DEFAULT_NANOPB_PROTO, newline='') as handle:
+            nanopb = handle.read()
+        return ours, nanopb
+
+    def test_imports_point_at_the_one_copy(self):
+        # Two copies of our rules (a/ is used: shallowest, then by name), and nanopb.proto in b/.
+        # Imports of the other copy, of a stale path and of nanopb's built-in copy are moved.
+        ours, nanopb = self.option_files()
+        result = self.project({
+            'buf/validate/validate.proto': self.buf_file(), 'a/validate_rules.proto': ours,
+            'c/validate_rules.proto': ours, 'b/nanopb.proto': nanopb,
+            'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + 'import "c/validate_rules.proto";\nimport "buf/validate/nanopb.proto";\n'
+                         + IMPORT_FIELD,
+            'p/q.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + 'import "nanopb.proto";\n'
+                         'message Q { string s = 1 [(buf.validate.field).string.max_len = 4, (nanopb).max_size = 5]; }\n'})
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'a/validate_rules.proto',
+                                                     'b/nanopb.proto'])
+        self.assertEqual(self.imports('p/q.proto'), ['buf/validate/validate.proto', 'b/nanopb.proto',
+                                                     'a/validate_rules.proto'])
+        self.assertEqual(result.written, [])                       # nothing added: both exist
+        self.assertEqual(sorted(result.retargeted), [
+            'p/p.proto: import "buf/validate/nanopb.proto" -> "b/nanopb.proto"',
+            'p/p.proto: import "c/validate_rules.proto" -> "a/validate_rules.proto"',
+            'p/q.proto: import "nanopb.proto" -> "b/nanopb.proto"'])
+        again = buf.convert_path(self.tmp)
+        self.assertEqual((again.converted, again.retargeted), ([], []))
+
+    def test_second_import_of_another_copy_is_removed(self):
+        ours, _ = self.option_files()
+        self.project({'buf/validate/validate.proto': self.buf_file(), 'a/validate_rules.proto': ours,
+                      'c/validate_rules.proto': ours,
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + 'import "a/validate_rules.proto";\nimport "c/validate_rules.proto";\n'
+                                   + IMPORT_FIELD})
+        self.assertEqual(self.imports('p/p.proto')[:2], ['buf/validate/validate.proto', 'a/validate_rules.proto'])
+        self.assertNotIn('c/validate_rules.proto', self.imports('p/p.proto'))
+
+    def test_stale_import_goes_to_the_added_copy(self):
+        # "buf/validate/nanopb.proto" exists nowhere: it is pointed at the nanopb.proto added
+        # next to the rules file the project has (our validate.proto), and the result compiles.
+        ours, _ = self.option_files()
+        result = self.project({'robot/buf/validate/validate.proto': self.buf_file(),
+                               'robot/third/validate/validate.proto': ours,
+                               'robot/robot.proto': 'syntax = "proto3";\npackage robot;\n'
+                                                    'import "buf/validate/validate.proto";\n'
+                                                    'import "buf/validate/nanopb.proto";\n' + IMPORT_FIELD})
+        self.assertEqual(self.imports('robot/robot.proto'), ['buf/validate/validate.proto',
+                                                             'third/validate/nanopb.proto',
+                                                             'third/validate/validate.proto'])
+        self.assertEqual(result.written, ['robot/third/validate/nanopb.proto'])
+        out = self.tmp + '_gen'
+        try:
+            status, result, err = run_backend('gen-c', '--protos-root', self.tmp, '--out', out, '--no-filter')
+            self.assertEqual(status, 0, err or result)
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+
+    def test_built_in_copy_stays_when_the_project_has_none(self):
+        # No nanopb.proto in the project: "nanopb.proto" is nanopb's own copy and stays.
+        self.project({'buf/validate/validate.proto': self.buf_file(),
+                      'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n' + 'import "nanopb.proto";\n' + IMPORT_FIELD})
+        self.assertIn('nanopb.proto', self.imports('p/p.proto'))
+        self.assertNotIn('buf/validate/nanopb.proto', self.added())
 
     def test_missing_buf_import_is_added(self):
         result = self.project({'buf/validate/validate.proto': self.buf_file(),
@@ -579,15 +684,18 @@ class BufImportAndPlacementTests(unittest.TestCase):
                       'deps/np/nanopb.proto': nanopb,
                       'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
                                    'import "rules/my_rules.proto";\nimport "np/nanopb.proto";\n' + IMPORT_FIELD})
-        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'rules/my_rules.proto',
-                                                     'np/nanopb.proto'])
+        # Not added again, and imported from the root the file's buf import uses (the top):
+        # "rules/my_rules.proto" only resolved with an extra -I deps.
+        self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'deps/rules/my_rules.proto',
+                                                     'deps/np/nanopb.proto'])
+        self.assertNotIn('validate_rules.proto', ' '.join(self.added()))
 
-    def test_nanopb_proto_added_when_missing(self):
-        # Numbers only: no (nanopb) option, so no import, but the project still gets the file.
+    def test_nanopb_proto_only_when_used(self):
+        # Numbers only: no (nanopb) option, so no import and no nanopb.proto added.
         self.project({'buf/validate/validate.proto': self.buf_file(),
                       'p/p.proto': 'syntax = "proto3";\npackage p;\nimport "buf/validate/validate.proto";\n'
                                    'message A { uint32 x = 1 [(buf.validate.field).uint32.lte = 9]; }\n'})
-        self.assertEqual(self.added(), ['buf/validate/nanopb.proto', 'buf/validate/validate_rules.proto'])
+        self.assertEqual(self.added(), ['buf/validate/validate_rules.proto'])
         self.assertEqual(self.imports('p/p.proto'), ['buf/validate/validate.proto', 'buf/validate/validate_rules.proto'])
 
     def test_used_imports_stay(self):

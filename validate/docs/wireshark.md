@@ -251,7 +251,10 @@ buffer settings for this protocol.
 **Tools > nanopb > Add nanopb rules to buf protos** runs
 `validate/tools/buf_to_validate.py` on a buf (protovalidate) project: next to every
 `(buf.validate.field)` rule it adds the matching `(validate.rules)` and nanopb sizes, so buf
-keeps working and nanopb-validate enforces the same limits. The dialog asks for:
+keeps working and nanopb-validate enforces the same limits. The project keeps one
+`validate_rules.proto` and one `nanopb.proto`: an existing one (any name) is reused, a missing
+one goes next to it, and every import is pointed at that copy (see the
+[README](../README.md), "Preparing a protos directory"). The dialog asks for:
 
 | Field | Meaning |
 |------|----------|

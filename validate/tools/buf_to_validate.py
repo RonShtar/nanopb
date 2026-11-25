@@ -34,12 +34,18 @@ pb_callback_t: string max_len/len/const/in/email/... -> (nanopb).max_length (the
 longest string; nanopb adds the NUL), bytes -> max_size, repeated max_items / map
 max_pairs -> (nanopb).max_count; never where a size is already set (inline, the
 .options file, or file-wide). A field the rules give no limit for is listed in the
-report. A file that uses (nanopb) options imports nanopb.proto; the project gets a
-nanopb.proto next to our rules file if it has none. Imports of buf's validate.proto,
+report. --no-sizes turns the sizes off.
+
+The project keeps ONE rules file and ONE nanopb.proto, in one folder: where one of them
+already is (ours is found by its content under any name, e.g. our validate.proto;
+nanopb.proto too), else next to buf's validate.proto (the shallowest one), else at the
+top. Only a missing one is added there: our rules file when a file uses rules,
+nanopb.proto only when a file uses (nanopb) options. Imports of buf's validate.proto,
 our rules file and nanopb.proto follow what each file uses: missing ones are added,
-unused ones removed. --no-sizes turns the sizes off. Our rules file and
-nanopb.proto go next to every buf validate.proto of the project (at the top without
-one), imported the way the file imports buf's ("buf/validate/validate_rules.proto").
+unused ones removed, and every import of our rules file or nanopb.proto points at that
+one copy, named from the root the file imports buf's from
+("buf/validate/validate_rules.proto"; an import of another copy, a stale path or a
+built-in copy is rewritten and reported).
 
 Rules nanopb-validate cannot enforce are listed (file, line, rule), never
 converted into something that only looks equivalent: cel, ignore, pattern,
@@ -817,6 +823,9 @@ SYNTAX_RE = re.compile(r'''^\s*(?:syntax|edition)\s*=\s*["'][^"']*["']\s*;[^\n]*
 OLD_NAMES = ('nanopb_validate.proto',)
 # What makes a file our rules file: (validate.rules) is FieldOptions extension 1011.
 OUR_RULES_RE = re.compile(r'extend\s+\.?(?:google\.protobuf\.)?FieldOptions\s*\{[^}]*=\s*1011\s*;', re.S)
+# What makes a file nanopb.proto (under any name): (nanopb) is FieldOptions extension 1010.
+NANOPB_RULES_RE = re.compile(r'extend\s+\.?(?:google\.protobuf\.)?FieldOptions\s*\{[^}]*\bnanopb\s*=\s*1010\s*;',
+                             re.S)
 
 
 def imports_of(text):
@@ -908,16 +917,25 @@ def option_import_kind(name, validate_import, roots, uses_buf=False):
     base = name.rsplit('/', 1)[-1]
     if base == 'nanopb.proto':
         return 'nanopb'
-    if base in OLD_NAMES or (validate_import and base == os.path.basename(validate_import)):
-        return 'ours'
+    if base in OLD_NAMES or (validate_import and name == validate_import):
+        return 'ours'                        # an earlier name of ours, or the import we write
     path = resolve_import(name, roots)
     if path:
+        # In the project: its content decides (buf's validate.proto and ours may share a name).
         text = read_text(path)
         if _BUF_PACKAGE_RE.search(code_mask(text)):
             return 'buf'
-        if OUR_RULES_RE.search(strip_comments(text)):
+        try:
+            code = strip_comments(text)
+        except Unparsable:
+            return None
+        if OUR_RULES_RE.search(code):
             return 'ours'
+        if NANOPB_RULES_RE.search(code):
+            return 'nanopb'
         return None
+    if validate_import and base == os.path.basename(validate_import) and not is_buf_import(name):
+        return 'ours'
     if is_buf_import(name):
         return 'buf'
     if base == 'validate.proto':
@@ -943,6 +961,39 @@ def ensure_buf_import(text, buf_import, roots):
     if buf_import_of(text, roots):
         return text
     return add_import(text, buf_import)
+
+
+# The names under which nanopb's generator and nanopb_validate provide their own copies.
+BUILT_IN = {'ours': 'validate.proto', 'nanopb': 'nanopb.proto'}
+
+
+def retarget_imports(text, kind, target, target_path, project_has_it, validate_import, roots, own_roots,
+                     changes):
+    """Point every import of one option file (``kind`` 'ours' or 'nanopb') at the project's one
+    copy, imported as ``target``: an import of another copy in the project, or of a path found
+    nowhere (stale), is renamed; the built-in name ("nanopb.proto", "validate.proto") only when
+    the project has its own copy (two copies in one compile define everything twice). An import that reaches
+    the same file from the file's own include roots (``own_roots``: the project top, its
+    folder, the root of its buf import) stays. If ``target`` is imported already, the other
+    import line is removed instead (protoc refuses an import listed twice)."""
+
+    uses_buf = bool(BUF_OPTION_RE.search(strip_comments(text)))
+    want = os.path.normcase(os.path.abspath(target_path))
+    for match, name in reversed(imports_of(text)):
+        if name == target or option_import_kind(name, validate_import, roots, uses_buf) != kind:
+            continue
+        path = resolve_import(name, own_roots)
+        if path and os.path.normcase(os.path.abspath(path)) == want:
+            continue
+        if not resolve_import(name, roots) and not project_has_it and name == BUILT_IN[kind]:
+            continue                         # the tools' own copy: fine while the project has none
+        if target in [n for _, n in imports_of(text)]:
+            text = text[:match.start()] + text[match.end():]
+            changes.append('import "%s" removed (the file imports "%s")' % (name, target))
+        else:
+            text = text[:match.start(2)] + target + text[match.end(2):]
+            changes.append('import "%s" -> "%s"' % (name, target))
+    return text
 
 
 def remove_unused_imports(text, validate_import, roots, removed=None):
@@ -1008,8 +1059,12 @@ class Options(object):
         # Set by convert_path:
         self.buf_dirs = []                          # folders holding buf's validate.proto ('' = top)
         self.nanopb_files = []                      # nanopb.proto files the project already has
+        self.ours_files = []                        # our rules files it already has (any name)
+        self.rules_path = DEFAULT_NAME              # project path of the rules file files import
+        self.nanopb_path = 'nanopb.proto'           # ... and of nanopb.proto
         self.roots = []                             # folders imports may be relative to
         self.buf_files = []                         # buf validate.proto files of the project
+        self.base = '.'                             # the project folder
 
 
 BUF_PACKAGE_RE = re.compile(r'^\s*package\s+buf\.validate\s*;', re.M)
@@ -1030,18 +1085,71 @@ def folder_of(name):
     return name.rsplit('/', 1)[0] if '/' in name else ''
 
 
-def support_import(state, opts, filename):
-    """How this file imports one of the files we add (our rules file, nanopb.proto): from the
-    folder its buf import names, when the project holds buf's validate.proto
-    ("buf/validate/validate_rules.proto"); else from the top ("validate_rules.proto")."""
+def support_import(state, opts, path):
+    """How this file imports one of the option files (our rules file, nanopb.proto) whose
+    project path is ``path``: from the include root of its own buf import when the file lies
+    under it (buf at "deps/buf/validate/validate.proto" imported as "buf/validate/validate.proto":
+    "deps/buf/validate/validate_rules.proto" -> "buf/validate/validate_rules.proto"), else
+    from the top of the project."""
 
-    if not opts.buf_dirs:
-        return filename
-    if state.buf_imports:
-        folder = folder_of(state.buf_imports[0])
-    else:
-        folder = opts.buf_dirs[0]
-    return (folder + '/' if folder else '') + filename
+    for prefix in buf_import_roots(state, opts):
+        if path.startswith(prefix):
+            return path[len(prefix):]
+    return path
+
+
+def buf_import_roots(state, opts):
+    """Project folders ('' or 'deps/', with the slash) from which this file's buf import
+    resolves to a buf validate.proto of the project."""
+
+    if not state.buf_imports:
+        return []
+    name = state.buf_imports[0]
+    return [rel[:len(rel) - len(name)] for rel in opts.buf_files if rel == name or rel.endswith('/' + name)]
+
+
+def buf_import_root(state, opts):
+    """The include root of this file's buf import (a project folder, '' = top), or None."""
+
+    roots = buf_import_roots(state, opts)
+    return roots[0].rstrip('/') if roots else None
+
+
+def project_option_files(base, source_files, buf_files, validate_name):
+    """([our rules files], [nanopb.proto files]) the project already has, told by name or
+    content ((validate.rules) = 1011, (nanopb) = 1010), shallowest first. An earlier version's
+    name of ours (nanopb_validate.proto) does not count: its imports are switched."""
+
+    ours, nanopb = [], []
+    for rel in source_files:
+        if not rel.endswith('.proto') or rel in buf_files:
+            continue
+        name = rel.rsplit('/', 1)[-1]
+        if name in OLD_NAMES:
+            continue
+        try:
+            text = strip_comments(read_text(os.path.join(base, *rel.split('/'))))
+        except Unparsable:
+            continue                         # reported when it is converted
+        if name == validate_name or OUR_RULES_RE.search(text):
+            ours.append(rel)
+        elif name == 'nanopb.proto' or NANOPB_RULES_RE.search(text):
+            nanopb.append(rel)
+    order = lambda r: (r.count('/'), r)
+    return sorted(ours, key=order), sorted(nanopb, key=order)
+
+
+def support_folder(opts):
+    """The one folder where the option files of the project are: where one of them already
+    is (our rules file first, then nanopb.proto), else next to buf's validate.proto (the
+    shallowest), else the top. A missing one is added there, never a second copy."""
+
+    for files in (opts.ours_files, opts.nanopb_files):
+        if files:
+            return folder_of(files[0])
+    if opts.buf_dirs:
+        return sorted(opts.buf_dirs, key=lambda d: (d.count('/') + (1 if d else 0), d))[0]
+    return ''
 
 
 def buf_import_name(opts):
@@ -1055,18 +1163,10 @@ def buf_import_name(opts):
 
 
 def nanopb_import(state, opts):
-    """The nanopb.proto this file imports: one the project already has (two copies in one
-    compile define everything twice), else the one we add next to our rules file."""
+    """The nanopb.proto this file imports: the project's one (two copies in one compile
+    define everything twice), or the one we add next to our rules file."""
 
-    if opts.nanopb_files:
-        wanted = support_import(state, opts, 'nanopb.proto')
-        for rel in opts.nanopb_files:
-            if rel == wanted or rel.endswith('/' + wanted):
-                return wanted
-        if 'nanopb.proto' in opts.nanopb_files:
-            return 'nanopb.proto'
-        return opts.nanopb_files[0]
-    return support_import(state, opts, 'nanopb.proto')
+    return support_import(state, opts, opts.nanopb_path)
 
 
 def convert_file(src, dst, rel, report, opts, result):
@@ -1100,12 +1200,24 @@ def _convert_file(src, dst, rel, report, opts, result):
         existing = buf_import_of(converted, roots)
         if existing:
             state.buf_imports[:] = [existing]
-    validate_import = support_import(state, opts, opts.validate_name) if opts.append else opts.validate_import
+    validate_import = support_import(state, opts, opts.rules_path) if opts.append else opts.validate_import
     changes = []
     converted = ensure_validate_import(converted, validate_import, roots, changes)
     result.migrated += ['%s: %s' % (rel, c) for c in changes]
     nanopb_name = nanopb_import(state, opts) if opts.append else 'nanopb.proto'
     converted = ensure_nanopb_import(converted, nanopb_name)
+    if opts.append:
+        # Every import of an option file points at the project's one copy.
+        moved = []
+        own_roots = [os.path.abspath(opts.base), os.path.dirname(os.path.abspath(src))]
+        buf_root = buf_import_root(state, opts)
+        if buf_root is not None:
+            own_roots.append(os.path.abspath(os.path.join(opts.base, *buf_root.split('/'))))
+        for kind, target, path, has in (('ours', validate_import, opts.rules_path, opts.ours_files),
+                                        ('nanopb', nanopb_name, opts.nanopb_path, opts.nanopb_files)):
+            converted = retarget_imports(converted, kind, target, os.path.join(opts.base, *path.split('/')),
+                                         bool(has), validate_import, roots, own_roots, moved)
+        result.retargeted += ['%s: %s' % (rel, m) for m in moved]
     removed = []
     converted = remove_unused_imports(converted, validate_import, roots, removed)
     result.imports_removed += ['%s: %s' % (rel, name) for name in removed]
@@ -1139,6 +1251,7 @@ class Result(object):
         self.imports_added = []          # "file: name" of buf imports added
         self.imports_removed = []        # "file: name" of unused option imports removed
         self.migrated = []               # "file: import "old" -> "new""
+        self.retargeted = []             # "file: import "x" -> "y"": now the project's one copy
         self.validate_imports = set()    # how files import our rules file
         self.nanopb_imports = set()      # how files import nanopb.proto
         self.in_place = False
@@ -1174,20 +1287,6 @@ def list_files(source):
     return found
 
 
-def support_locations(import_names, buf_dirs):
-    """Where the files we add go: next to every buf validate.proto of the project, and for an
-    import whose folder matches none of them, that folder (from the top of the project)."""
-
-    locations = list(buf_dirs)
-    for name in sorted(import_names):
-        folder = folder_of(name)
-        if any(d == folder or (folder and d.endswith('/' + folder)) or (not folder and buf_dirs)
-               for d in locations):
-            continue
-        locations.append(folder)
-    return locations or ['']
-
-
 def convert_path(source, out=None, validate_import='validate.proto', opts=None):
     """Convert a .proto file or a folder, into ``out`` or, without it (or with out ==
     source), in place: only .proto files that get something added are rewritten, nothing
@@ -1211,12 +1310,17 @@ def convert_path(source, out=None, validate_import='validate.proto', opts=None):
                          'works in place')
     # buf's validate.proto wherever the project has it (buf/validate/validate.proto,
     # third_party/buf/validate/validate.proto, a copy of package buf.validate in another
-    # folder): our rules file and nanopb.proto go next to each one.
+    # folder), and the option files it already has: the project keeps ONE rules file and ONE
+    # nanopb.proto, in one folder (support_folder).
     buf_files = [r for r in source_files if is_buf_validate(base, r)]
     opts.buf_dirs = sorted(set(folder_of(r) for r in buf_files if r.endswith('.proto')))
     opts.buf_files = [r for r in buf_files if r.endswith('.proto')]
-    ours = opts.validate_name if opts.append else None
-    opts.nanopb_files = [r for r in source_files if r.rsplit('/', 1)[-1] == 'nanopb.proto']
+    opts.base = base
+    opts.ours_files, opts.nanopb_files = project_option_files(base, source_files, buf_files, opts.validate_name)
+    folder = support_folder(opts)
+    opts.rules_path = opts.ours_files[0] if opts.ours_files else (folder + '/' if folder else '') + opts.validate_name
+    opts.nanopb_path = opts.nanopb_files[0] if opts.nanopb_files else (folder + '/' if folder else '') + 'nanopb.proto'
+    keep = set(opts.ours_files + opts.nanopb_files) if opts.append else set(opts.nanopb_files)
     # An import may be relative to any folder of the project (whatever -I the build uses):
     # the top first, then shallower folders before deeper ones.
     folders = set([''])
@@ -1230,7 +1334,7 @@ def convert_path(source, out=None, validate_import='validate.proto', opts=None):
     for rel in source_files:
         path = os.path.join(base, *rel.split('/'))
         target = os.path.join(out, *rel.split('/'))
-        if rel in buf_files or rel.rsplit('/', 1)[-1] in (ours, 'nanopb.proto'):
+        if rel in buf_files or rel in keep:
             # buf's own files, our rules file and nanopb.proto stay as they are.
             if not result.in_place and opts.append:
                 os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -1244,17 +1348,11 @@ def convert_path(source, out=None, validate_import='validate.proto', opts=None):
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.copyfile(path, target)
             result.copied.append(rel)
-    if opts.append and result.validate_imports:
-        for folder in support_locations(result.validate_imports, opts.buf_dirs):
-            copy_support_file(opts.validate_proto, out, (folder + '/' if folder else '') + opts.validate_name,
-                              result, 'validate')
-    if opts.append and not opts.nanopb_files:
-        # A project without nanopb.proto gets one: next to our rules file, i.e. next to every
-        # buf validate.proto, or at the top (nanopb's generator also brings its own copy, but
-        # it is used only when a file imports "nanopb.proto" by that name).
-        for folder in support_locations(result.nanopb_imports, opts.buf_dirs):
-            copy_support_file(opts.nanopb_proto, out, (folder + '/' if folder else '') + 'nanopb.proto',
-                              result, 'nanopb')
+    # Only a missing file is added, only when a file imports it, and only once.
+    if opts.append and result.validate_imports and not opts.ours_files:
+        copy_support_file(opts.validate_proto, out, opts.rules_path, result, 'validate')
+    if opts.append and result.nanopb_imports and not opts.nanopb_files:
+        copy_support_file(opts.nanopb_proto, out, opts.nanopb_path, result, 'nanopb')
     return result
 
 
@@ -1311,6 +1409,8 @@ def main(argv=None):
         print('nanopb.proto imported as: %s' % ', '.join(sorted(result.nanopb_imports)))
     for change in result.migrated:
         print('updated (earlier version\'s name of our rules file): %s' % change)
+    for change in result.retargeted:
+        print('import moved to the project\'s one copy: %s' % change)
     for change in result.imports_added:
         print('missing import of buf\'s validate.proto added: %s' % change)
     for change in result.imports_removed:

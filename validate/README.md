@@ -227,16 +227,21 @@ other file stay exactly as they are.
      field with only `min_items`, ...) is listed in the report: give it a size in the `.options`
      file, e.g. `pkg.Msg.name max_length:32`.
 
-   And to the project, **next to every buf `validate.proto` it holds** (at the top, inside a
-   protocol folder, several copies, or a copy of package `buf.validate` under another name),
-   otherwise **at the top of the project**:
-   - `validate_rules.proto`, our rules file;
-   - `nanopb.proto`, when the project has none; a `nanopb.proto` the project already has is
-     used instead (two copies in one compile define everything twice);
-   - the imports of both in every file that uses them, after its existing imports, named the
-     way the file imports buf's: `import "buf/validate/validate.proto";` gets
+   And to the project, **one copy of each, in one folder**: where one of them already is
+   (our rules file under any name, e.g. our `validate.proto`, found by its content;
+   `nanopb.proto` the same way), otherwise next to buf's `validate.proto` (the shallowest
+   one, if the project holds several), otherwise **at the top of the project**:
+   - `validate_rules.proto`, our rules file, when the project has none;
+   - `nanopb.proto`, when the project has none and a file uses `(nanopb)` options (never
+     added just in case; two copies in one compile define everything twice);
+   - the imports of both in every file that uses them, after its existing imports, named
+     from the root the file imports buf's from: `import "buf/validate/validate.proto";` gets
      `import "buf/validate/validate_rules.proto";` and `import "buf/validate/nanopb.proto";`
      (without buf's file in the project: `"validate_rules.proto"`, `"nanopb.proto"`).
+   - every existing import of our rules file or `nanopb.proto` that does not reach that one
+     copy (another copy, a stale path, nanopb's built-in `"nanopb.proto"` when the project
+     has its own) is rewritten to it, or removed if the file imports it already; the report
+     lists each one ("import moved to the project's one copy").
 
    Only an import of our rules file counts as one, by its name or its content: an import of
    buf's `validate.proto` or of any other `*validate.proto` does not. A project converted by an
