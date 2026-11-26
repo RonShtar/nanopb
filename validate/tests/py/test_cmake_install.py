@@ -177,9 +177,10 @@ class CMakeInstallTests(unittest.TestCase):
         self.consume(prefix, 'nanopb', 'nanopb::protobuf-nanopb-static', '-DEXPECT_FIELD_32BIT=ON')
 
     def test_optimize_level_for_every_build_type(self):
-        """-DNANOPB_VALIDATE_OPTIMIZE=O2: nanopb's pb_*.c and pb_validate.c end with -O2 in
-        Release (after CMake's -O3) and Debug (after -g) alike."""
-        for build_type in ('Release', 'Debug'):
+        """-DNANOPB_VALIDATE_OPTIMIZE=O2: nanopb's pb_*.c and pb_validate.c are compiled with
+        -O2 as the only -O in every build type: Release's -O3 (and RelWithDebInfo's, MinSizeRel's
+        level) is replaced, not overridden; Debug keeps -g."""
+        for build_type in ('Release', 'Debug', 'RelWithDebInfo', 'MinSizeRel'):
             build = os.path.join(self.tmp, 'build_' + build_type)
             self.run_step(['cmake', '-S', slash(VALIDATE_DIR), '-B', build, '-DCMAKE_BUILD_TYPE=' + build_type,
                            '-Dnanopb_BUILD_GENERATOR=OFF', '-DNANOPB_VALIDATE_OPTIMIZE=O2'] + self.extra)
@@ -190,8 +191,10 @@ class CMakeInstallTests(unittest.TestCase):
             self.assertTrue({'pb_common.c', 'pb_encode.c', 'pb_decode.c', 'pb_validate.c'} <= compiled,
                             (build_type, compiled, log[-2000:]))
             for line in lines:
-                levels = re.findall(r'(?:^|\s)[-/](O[0-3sdzg]?)(?=\s)', line)
-                self.assertTrue(levels and levels[-1] == 'O2', (build_type, line))
+                levels = re.findall(r'(?:^|\s)[-/](O\w*)(?=\s)', line)
+                self.assertEqual(levels, ['O2'], (build_type, line))
+                if build_type == 'Debug' and ' /c ' not in line:
+                    self.assertIn(' -g', line, line)
         proc = subprocess.run([CMAKE, '-S', slash(VALIDATE_DIR), '-B', os.path.join(self.tmp, 'bad'),
                                '-DNANOPB_VALIDATE_OPTIMIZE=fast'] + self.extra,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True)

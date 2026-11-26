@@ -47,6 +47,8 @@ include(GNUInstallDirs)
 
 get_filename_component(_nanopb_root "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
 include(${CMAKE_CURRENT_SOURCE_DIR}/extra/nanopb_validate_attach.cmake)
+# NANOPB_VALIDATE_OPTIMIZE replaces the build type's -O (Release's -O3) for nanopb and us.
+nanopb_validate_remove_build_type_optimize()
 
 if(NANOPB_VALIDATE_WITH_NANOPB)
     add_subdirectory(${_nanopb_root} nanopb)

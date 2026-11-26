@@ -36,9 +36,11 @@ endfunction()
 #
 #   -DNANOPB_VALIDATE_OPTIMIZE=O2       nanopb's pb_*.c and pb_validate.c at -O2 (MSVC: /O2)
 #
-# It is added after the build type's flags, so it wins (the last -O counts); -g of a
-# Debug build stays. PRIVATE: projects linking the library keep their own level (the
-# generated code has `gen --optimize O2` for that).
+# It replaces the build type's level: the -O of CMAKE_C_FLAGS and CMAKE_C_FLAGS_<CONFIG>
+# (Release's -O3, RelWithDebInfo's -O2, MinSizeRel's -Os, also from a toolchain file) is
+# removed for the library's directory, and the level is the one -O on each compile line;
+# everything else (-g, -DNDEBUG, -m...) stays. PRIVATE: projects linking the library keep
+# their own level (the generated code has `gen --optimize O2` for that).
 set(NANOPB_VALIDATE_OPTIMIZE "" CACHE STRING
     "Optimization level for nanopb's runtime and pb_validate.c in every build type (O0, O1, O2, O3, Os; empty: the build type's)")
 
@@ -65,6 +67,28 @@ function(nanopb_validate_optimize_flag out)
         set(${out} "-${_level}" PARENT_SCOPE)
     endif()
 endfunction()
+
+# With NANOPB_VALIDATE_OPTIMIZE set, removes every -O.. / /O.. from the C flags of the
+# calling directory (a macro: the variables are set there, and its subdirectories
+# inherit them). Call it before nanopb's targets are compiled, in their directory or a
+# parent: validate/CMakeLists.txt before add_subdirectory(<nanopb>), the hook in nanopb's.
+macro(nanopb_validate_remove_build_type_optimize)
+    nanopb_validate_optimize_flag(_nanopb_validate_opt)
+    if(_nanopb_validate_opt)
+        set(_nanopb_validate_vars CMAKE_C_FLAGS)
+        foreach(_nanopb_validate_cfg DEBUG RELEASE RELWITHDEBINFO MINSIZEREL ${CMAKE_BUILD_TYPE} ${CMAKE_CONFIGURATION_TYPES})
+            string(TOUPPER "${_nanopb_validate_cfg}" _nanopb_validate_cfg)
+            list(APPEND _nanopb_validate_vars CMAKE_C_FLAGS_${_nanopb_validate_cfg})
+        endforeach()
+        list(REMOVE_DUPLICATES _nanopb_validate_vars)
+        foreach(_nanopb_validate_var ${_nanopb_validate_vars})
+            if(DEFINED ${_nanopb_validate_var})
+                string(REGEX REPLACE "(^| )[-/]O[^ ]*" "" ${_nanopb_validate_var} "${${_nanopb_validate_var}}")
+                string(STRIP "${${_nanopb_validate_var}}" ${_nanopb_validate_var})
+            endif()
+        endforeach()
+    endif()
+endmacro()
 
 # Adds the settings to `target` as PUBLIC definitions (exported with the target), and
 # NANOPB_VALIDATE_OPTIMIZE as a PRIVATE compile option.

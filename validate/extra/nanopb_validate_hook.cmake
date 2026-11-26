@@ -33,4 +33,5 @@ if(CMAKE_VERSION VERSION_LESS 3.19)
 endif()
 
 include(${CMAKE_CURRENT_LIST_DIR}/nanopb_validate_attach.cmake)
+nanopb_validate_remove_build_type_optimize()   # in nanopb's directory: Release's -O3 goes
 cmake_language(DEFER CALL nanopb_validate_attach)
